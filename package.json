@@ -1,0 +1,17 @@
+{
+  "name": "studioflow",
+  "private": true,
+  "version": "0.1.0",
+  "description": "StudioFlow — Content Factory OS desktop app (Electron + React + FastAPI)",
+  "workspaces": [
+    "frontend",
+    "electron"
+  ],
+  "scripts": {
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:electron": "npm run dev --workspace=electron",
+    "dev:backend": "cd backend && (test -d .venv || python -m venv .venv) && .venv/Scripts/python -m pip install -q -r requirements.txt && .venv/Scripts/python -m uvicorn app.main:app --reload --port 8756",
+    "build:frontend": "npm run build --workspace=frontend",
+    "build:electron": "npm run build --workspace=electron"
+  }
+}
