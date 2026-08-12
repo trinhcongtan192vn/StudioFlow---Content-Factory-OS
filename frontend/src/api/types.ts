@@ -156,6 +156,10 @@ export interface YoutubeMeta {
   hashtags: string[];
   chapters: YoutubeChapter[];
   thumbnail_description: string;
+  thumbnail_status: "pending" | "generating" | "ready" | "error";
+  thumbnail_asset_path: string | null;
+  thumbnail_provider: string | null;
+  thumbnail_error: string | null;
 }
 export interface RetentionCheck {
   hook_strength: number | null;

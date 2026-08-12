@@ -200,6 +200,14 @@ class YoutubeMeta(BaseModel):
     hashtags: list[str] = Field(default_factory=list)
     chapters: list[YoutubeChapter] = Field(default_factory=list)
     thumbnail_description: str = ""
+    # Thumbnail sinh ảnh THẬT (M2, tái dùng OpenAI Image adapter — §05 mục 8c) —
+    # bổ sung theo yêu cầu người dùng ở Pack Review, KHÔNG dùng render.json riêng như
+    # Visual Studio vì thumbnail là dữ liệu Pack-level (Title/Thumbnail Concepts đã
+    # thuộc phạm vi EPIC 9/M1), không phải asset theo từng shot.
+    thumbnail_status: Literal["pending", "generating", "ready", "error"] = "pending"
+    thumbnail_asset_path: Optional[str] = None
+    thumbnail_provider: Optional[str] = None
+    thumbnail_error: Optional[str] = None
 
 
 class RetentionCheck(BaseModel):

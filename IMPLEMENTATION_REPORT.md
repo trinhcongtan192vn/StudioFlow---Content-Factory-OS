@@ -320,6 +320,64 @@ key thật; nếu lệch, sửa theo message lỗi thật (đã có `raise_for_s
 (`shutil.which`) + ghi vào README.md, test `assemble` khi thiếu ffmpeg dùng `monkeypatch`
 thay vì cần cài thật trên máy dev/CI.
 
+## 14. Pack Review — gộp Description/Timeline/Hashtags + Thumbnail AI + copy buttons; sửa lỗi Gemini test connection (2026-08-12)
+
+### 14.1 Pack Review — Title & Thumbnail
+
+- Bỏ tab "Repurposing" (chờ M3, tab rỗng gây rối) — `PackReview.tsx` chỉ còn 2 tab.
+  `pack.repurpose` giữ nguyên trong schema, không xoá — chỉ ẩn UI.
+- Description/Timeline/Hashtags gộp hiển thị chung 1 khối (không phải 3 field tách
+  rời như trước) — Timeline định dạng `h:mm:ss - tên chapter` (hàm `formatTimestamp`,
+  frontend). 1 nút Copy ở đầu khối copy TOÀN BỘ 3 phần ghép thành 1 đoạn text (mỗi
+  phần cách nhau 1 dòng trống) — dán thẳng được vào ô Description khi upload YouTube
+  Studio. Description (SEO) vẫn là field RIÊNG có thể sửa/lưu (auto-save debounce
+  500ms qua `PATCH /pack`, giống pattern `BriefEditor.tsx`) — Timeline/Hashtags hiển
+  thị read-only bên dưới (nguồn dữ liệu cấu trúc `chapters`/`hashtags` không đổi,
+  chỉ GHÉP LÚC HIỂN THỊ/COPY, không lưu thành 1 blob text duy nhất — tránh lệch dữ
+  liệu nếu sau này cần dùng `chapters` có cấu trúc ở chỗ khác, VD export).
+- Nút Copy riêng ở mỗi Title (component `CopyButton` dùng chung, ✓ xanh 1.5s sau khi
+  copy thành công).
+- **Nút "Tạo ảnh Thumbnail bằng AI"** — sinh ảnh THẬT, tái dùng nguyên
+  `app/providers/image_openai.py::OpenAIImageProvider` đã build ở M2 (không viết
+  adapter mới). Backend: `POST /projects/{id}/pack/thumbnail/generate` (đồng bộ, 1
+  ảnh — không cần `BackgroundTasks` như Render Studio nhiều shot); prompt ghép từ
+  `thumbnail_description` + tiêu đề đầu tiên (gợi ý text overlay) +
+  `brand.visual_style_prompt`. Lưu ảnh vào `assets/thumbnail.png` (tái dùng thư mục
+  `assets/` đã tạo cho M2), trạng thái `thumbnail_status`/`thumbnail_asset_path`/
+  `thumbnail_provider`/`thumbnail_error` ghi thẳng vào `youtube_meta` trong
+  `pack.json` (KHÔNG dùng `render.json` riêng như shot — thumbnail là dữ liệu
+  Pack-level, không phải asset theo shot). `GET /projects/{id}/pack/thumbnail` phục
+  vụ file — frontend dùng làm cả `<img src>` và link tải (`download="thumbnail.png"`).
+  Chi phí ghi qua `record_asset_usage()` có sẵn từ M2.
+
+### 14.2 Sửa lỗi Gemini "Test kết nối" báo lỗi khó hiểu (mất chữ, chỉ hiện "parts")
+
+**Nguyên nhân xác nhận**: `gemini.py::complete()` đọc thẳng
+`data["candidates"][0]["content"]["parts"]` không qua kiểm tra — khi Gemini không trả
+`parts` (thường gặp nhất: model có "thinking" bật mặc định ở dòng Gemini 2.5+/3.x tiêu
+hết ngân sách `maxOutputTokens` rất nhỏ — `test_connection()` cũ dùng `max_tokens=8` —
+cho suy luận nội bộ, không còn phần trả lời hiển thị dù HTTP vẫn 200 OK) → Python raise
+`KeyError('parts')` trần, `str(e)` chỉ còn đúng chữ `'parts'` — đúng như người dùng mô
+tả, không có ngữ cảnh gì để tự chẩn đoán.
+
+**Sửa**: hàm `_extract_text()` mới parse phòng thủ — kiểm tra `candidates` rỗng (kèm
+`promptFeedback.blockReason` nếu bị chặn an toàn), kiểm tra `parts` rỗng (kèm
+`finishReason`, gợi ý "model dùng hết ngân sách token cho suy luận nội bộ — thử tăng
+max_tokens hoặc đổi model"). Đồng thời tăng `max_tokens` của riêng lệnh test ping từ
+8 → 64 để giảm khả năng gặp lại tình huống này ngay từ đầu.
+
+**Điểm liên quan đã hỏi thêm**: các provider TTS/Image/Video còn ở dạng stub (Vbee,
+Flux, Midjourney, Runway, OpenAI TTS, Gemini TTS/Image, Veo) trả `test_connection()`
+chỉ dựa trên `bool(api_key)` — message cũ "Đã lưu key — sinh ảnh thật sẽ mở ở M2" dễ
+hiểu lầm là ĐÃ xác minh kết nối thành công. Đổi thành "Đã lưu key — CHƯA xác minh kết
+nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)" — trung thực hơn,
+không hứa hẹn quá mức những gì thật sự đã kiểm tra. 3 provider đã thực thi thật ở M2
+(ElevenLabs/OpenAI Image/Sora) không đổi — `test_connection()` của chúng gọi API thật
+(hoặc endpoint free như `GET /v1/models`), message "Kết nối thành công" là đúng nghĩa.
+
+**Test mới**: `backend/tests/test_pack_thumbnail.py` (4 test — mock qua `respx`, không
+tốn phí). Tổng **117 test, tất cả pass** (113 cũ + 4 mới). Frontend typecheck sạch.
+
 ## 6. File specs đã cập nhật
 
 `02_database.md`, `03_api.md`, `04_data_schemas.md`, `05_ai_providers.md`, `06_uiux.md`, `07_prompt_templates.md`, `09_sprint_tasks.md` — mỗi chỗ lệch đánh dấu bằng blockquote `> **Đã build...`, giữ nguyên nội dung gốc bên cạnh để thấy được ý định ban đầu vs. thực tế.

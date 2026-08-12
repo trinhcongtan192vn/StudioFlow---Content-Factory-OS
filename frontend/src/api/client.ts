@@ -118,6 +118,8 @@ export const api = {
   // Pack
   getPack: (id: string) => get<ProductionPack>(`/projects/${id}/pack`),
   patchPack: (id: string, patchBody: Partial<ProductionPack>) => patch<ProductionPack>(`/projects/${id}/pack`, patchBody),
+  generateThumbnail: (id: string) => post<ProductionPack>(`/projects/${id}/pack/thumbnail/generate`),
+  thumbnailUrl: (id: string) => `${BASE}/projects/${id}/pack/thumbnail`,
 
   // Guardrail + retention
   guardrailCheck: (id: string) => post<{ hook_strength: number | null; max_anchor_gap_sec: number | null; warnings: unknown[] }>(`/projects/${id}/guardrail/check`),

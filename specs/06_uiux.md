@@ -49,7 +49,18 @@ Ba vùng cố định + stepper trên cùng:
 | ③ | **Outline & Hook (Gate #1)** — **đã build, tách khỏi Script Studio** | Dàn ý AI Research (chọn 1) + **Hook Variants** (3 thẻ kiểu tâm lý, **không điểm số**) hiển thị CÙNG màn, chọn xong sửa trực tiếp hook. Duyệt → mới sinh Full Script. **Đã build vòng 4:** header có thêm nút "Nhập kịch bản từ file (CSV/Excel)" — đường tắt bỏ qua toàn bộ chọn outline/hook + AI viết Full Script, nhảy thẳng Script Studio với script đã có sẵn (xem `03_api.md` mục Script Import). Dialog xác nhận hiện số block/số từ/thời lượng ước tính trước khi ghi đè. |
 | ④ | **Script Studio** (xương sống) | Trước duyệt: 1 cột Full Script liền mạch + ô góp ý "tạo lại". Sau duyệt & bóc tách: kịch bản đa cột theo timeline (Audio/Visual/Direction), 1 cột (đã build vòng 4: bỏ mini-panel Hook đang dùng — xem ghi chú dưới). Cảnh báo retention = **gạch chân + ghi chú lề** tại đoạn có vấn đề — không popup chặn. |
 | ⑤ | **Visual Studio** — **đã build, màn mới** | 1 card/shot (= 1 beat script): Visual/FX + Audio/SFX cùng lúc (đã build vòng 4: đổi tên field, tách 2 nút "Tạo lại Visual"/"Tạo lại giọng đọc"), toggle Image⇄Video. Khớp nguyên tắc "shot chuẩn hoá" nhưng tương tác trực tiếp thay vì chỉ liệt kê trong Pack Review. |
-| ⑥ | **Pack Review** (Gate #2) | Xem tổng hợp Pack dạng tab: Full Script & Shot List / Title & Thumbnail / Repurposing (khoá tới M3). Dải trạng thái đầu trang liệt kê số cảnh báo chưa xử lý. 2 nút: **Approve** (mở khoá Output) / **Trả về** (ô ghi chú bắt buộc, quay lại Script Studio). |
+| ⑥ | **Pack Review** (Gate #2) | Xem tổng hợp Pack dạng tab: Full Script & Shot List / Title & Thumbnail. Dải trạng thái đầu trang liệt kê số cảnh báo chưa xử lý. 2 nút: **Approve** (mở khoá Output) / **Trả về** (ô ghi chú bắt buộc, quay lại Script Studio). |
+
+> **Đã build (2026-08-12):** bỏ tab "Repurposing" khỏi Pack Review (chờ tới M3 mới có
+> nội dung thật, giữ tab rỗng gây rối) — `pack.repurpose` vẫn còn trong schema, chỉ ẩn
+> UI. Tab "Title & Thumbnail" cải tiến theo yêu cầu người dùng:
+> - Timeline (Chapters) + Hashtags gộp hiển thị cùng khối với Description (không phải
+>   3 field tách rời) — định dạng Timeline theo chuẩn chapter YouTube `h:mm:ss - tên
+>   chapter`. Nút Copy ở đầu khối copy CẢ 3 phần (description + timeline + hashtags)
+>   thành 1 đoạn text dán thẳng vào ô Description khi upload YouTube Studio.
+> - Nút Copy riêng ở mỗi Title.
+> - Nút "Tạo ảnh Thumbnail bằng AI" — sinh ảnh THẬT (tái dùng OpenAI Image adapter, M2
+>   — xem `specs/05_ai_providers.md` §8c), preview + nút tải ảnh khi xong.
 | ⑦ | **Output Center** | 2 thẻ lớn: "Export Pack" và "Render in-app" (thẻ 2 nhãn "Beta · M2"). Sau khi chạy: tiến độ + link tải. |
 
 > **Đã build 1 phần M2 (2026-08-12):** thẻ "Render in-app" không còn `disabled` — bấm

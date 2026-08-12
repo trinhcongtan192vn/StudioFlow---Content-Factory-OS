@@ -169,10 +169,20 @@ Generation" duy nhất. Để Pack vẫn là artifact trung tâm xuyên suốt t
     "description": "mô tả SEO đầy đủ",
     "hashtags": ["..."],
     "chapters": [{ "ts_sec", "label" }],
-    "thumbnail_description": "..."
+    "thumbnail_description": "...",
+    "thumbnail_status": "pending|generating|ready|error",
+    "thumbnail_asset_path": "null trừ khi đã sinh ảnh thật",
+    "thumbnail_provider": "null trừ khi đã sinh ảnh thật",
+    "thumbnail_error": "null trừ khi lỗi"
   }
 }
 ```
+
+> **Đã build (2026-08-12):** 4 field `thumbnail_*` mới trong `youtube_meta` — theo dõi
+> trạng thái sinh ảnh thumbnail THẬT ở Pack Review (nút "Tạo ảnh Thumbnail bằng AI",
+> tái dùng OpenAI Image adapter — M2, `specs/05_ai_providers.md` §8c). Khác Visual
+> Studio/Render Studio (asset theo shot, sống ở `render.json` riêng), thumbnail là dữ
+> liệu Pack-level nên nằm thẳng trong `pack.json`/`youtube_meta`.
 
 - `research` + `hooks`: kết quả AI Research/Hook Variants sống trong CHÍNH pack.json
   ngay từ trước Gate #1, thay vì một artifact tạm rời rạc — giữ nguyên tắc "Pack JSON

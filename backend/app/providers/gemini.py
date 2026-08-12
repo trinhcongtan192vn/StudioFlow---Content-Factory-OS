@@ -17,6 +17,31 @@ PRICING: dict[str, tuple[float, float]] = {
 DEFAULT_PRICING = (1.25, 5.0)
 
 
+def _extract_text(data: dict) -> str:
+    """`data["candidates"][0]["content"]["parts"]` crash trần (KeyError -> hiện lỗi
+    chỉ mỗi chữ "parts", không rõ lý do) khi Gemini không trả nội dung — thường gặp
+    nhất với model có "thinking" (Gemini 2.5+/3.x mặc định bật) khi maxOutputTokens
+    quá nhỏ: model tiêu hết ngân sách token cho suy luận nội bộ, không còn phần trả
+    lời hiển thị (`parts` bị thiếu hẳn khỏi response dù finishReason vẫn "MAX_TOKENS"
+    chứ không phải lỗi HTTP). Parse phòng thủ + thông báo rõ nguyên nhân."""
+    candidates = data.get("candidates") or []
+    if not candidates:
+        block_reason = (data.get("promptFeedback") or {}).get("blockReason")
+        if block_reason:
+            raise RuntimeError(f"Gemini chặn nội dung (blockReason={block_reason}) — kiểm tra lại prompt/safety settings.")
+        raise RuntimeError("Gemini không trả về candidate nào — kiểm tra lại model_name hoặc thử lại.")
+    content = candidates[0].get("content") or {}
+    parts = content.get("parts") or []
+    if not parts:
+        finish_reason = candidates[0].get("finishReason", "unknown")
+        raise RuntimeError(
+            f"Gemini không trả về nội dung hiển thị (finishReason={finish_reason}). "
+            "Model có thể đã dùng hết ngân sách token cho suy luận nội bộ (thinking) trước khi kịp trả lời — "
+            "thử tăng max_tokens hoặc đổi sang model khác."
+        )
+    return "".join(p.get("text", "") for p in parts)
+
+
 class GeminiProvider(LLMProvider):
     provider_name = "gemini"
 
@@ -37,7 +62,7 @@ class GeminiProvider(LLMProvider):
             resp = client.post(self._url(), json=body)
             raise_for_status_with_body(resp)
             data = resp.json()
-        text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+        text = _extract_text(data)
         usage = data.get("usageMetadata", {})
         in_tok, out_tok = usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0)
         price_in, price_out = PRICING.get(self.model_name, DEFAULT_PRICING)
@@ -46,7 +71,10 @@ class GeminiProvider(LLMProvider):
 
     def test_connection(self) -> ProviderStatus:
         try:
-            self.complete("Trả lời đúng 1 từ.", [LLMMessage(role="user", content="ping")], max_tokens=8)
+            # max_tokens thấp (VD 8) dễ khiến model "thinking" tiêu hết ngân sách cho
+            # suy luận nội bộ, không còn chỗ trả lời hiển thị -> lỗi khó hiểu (xem
+            # _extract_text). Dùng ngân sách rộng rãi hơn cho riêng lệnh test ping này.
+            self.complete("Trả lời đúng 1 từ.", [LLMMessage(role="user", content="ping")], max_tokens=64)
             return ProviderStatus(ok=True, message="Kết nối thành công")
         except Exception as e:  # noqa: BLE001
             return ProviderStatus(ok=False, message=str(e))

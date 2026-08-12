@@ -26,7 +26,7 @@ class VbeeTTSProvider(TTSProvider, NotImplementedMixin):
         self._not_implemented("Vbee TTS synthesize")
 
     def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh giọng đọc thật sẽ mở ở M2")
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
 
 
 class FluxImageProvider(ImageProvider, NotImplementedMixin):
@@ -39,7 +39,7 @@ class FluxImageProvider(ImageProvider, NotImplementedMixin):
         self._not_implemented("Flux image generate")
 
     def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh ảnh thật sẽ mở ở M2")
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
 
 
 class MidjourneyImageProvider(ImageProvider, NotImplementedMixin):
@@ -52,7 +52,7 @@ class MidjourneyImageProvider(ImageProvider, NotImplementedMixin):
         self._not_implemented("Midjourney image generate")
 
     def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh ảnh thật sẽ mở ở M2")
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
 
 
 class RunwayVideoProvider(VideoProvider, NotImplementedMixin):
@@ -65,7 +65,7 @@ class RunwayVideoProvider(VideoProvider, NotImplementedMixin):
         self._not_implemented("Runway video generate")
 
     def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — render video thật sẽ mở ở M2")
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ class OpenAITTSProvider(TTSProvider, NotImplementedMixin):
         self._not_implemented("OpenAI TTS synthesize")
 
     def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh giọng đọc thật sẽ mở ở M2")
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
 
 
 class GeminiTTSProvider(TTSProvider, NotImplementedMixin):
@@ -99,7 +99,7 @@ class GeminiTTSProvider(TTSProvider, NotImplementedMixin):
         self._not_implemented("Gemini TTS synthesize")
 
     def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh giọng đọc thật sẽ mở ở M2")
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
 
 
 class GeminiImageProvider(ImageProvider, NotImplementedMixin):
@@ -112,7 +112,7 @@ class GeminiImageProvider(ImageProvider, NotImplementedMixin):
         self._not_implemented("Gemini (Nano Banana) image generate")
 
     def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh ảnh thật sẽ mở ở M2")
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
 
 
 class VeoVideoProvider(VideoProvider, NotImplementedMixin):
@@ -125,4 +125,4 @@ class VeoVideoProvider(VideoProvider, NotImplementedMixin):
         self._not_implemented("Google Veo video generate")
 
     def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — render video thật sẽ mở ở M2")
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
