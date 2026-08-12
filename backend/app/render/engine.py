@@ -16,16 +16,31 @@ from app.config import project_dir
 from app.db import SessionLocal
 from app.filestore import read_json, write_bytes, write_json
 from app.models import Project
-from app.providers.base import ImageProvider, TTSProvider, VideoProvider
-from app.providers.factory import NoProviderConfiguredError, get_image, get_tts, get_video
-from app.providers.image_openai import estimate_cost as estimate_image_cost
-from app.providers.tts_elevenlabs import estimate_cost as estimate_tts_cost
-from app.providers.video_sora import estimate_cost as estimate_video_cost
+from app.providers.base import VideoProvider
+from app.providers.factory import NoProviderConfiguredError, get_image_chain, get_tts_chain, get_video_chain
+from app.providers.image_gemini import estimate_cost as estimate_gemini_image_cost
+from app.providers.image_openai import estimate_cost as estimate_openai_image_cost
+from app.providers.tts_elevenlabs import estimate_cost as estimate_elevenlabs_tts_cost
+from app.providers.tts_gemini import estimate_cost as estimate_gemini_tts_cost
+from app.providers.video_sora import estimate_cost as estimate_sora_video_cost
+from app.providers.video_veo import estimate_cost as estimate_veo_video_cost
 from app.render.schemas import RenderState, ShotRenderStatus
 from app.routers.pipeline import record_asset_usage
 
 VIDEO_POLL_INTERVAL_SEC = 10
 VIDEO_MAX_WAIT_SEC = 480  # 8 phút — khớp giới hạn ghi trong plan
+
+# Mỗi task tra đúng hàm ước tính chi phí theo provider THẬT SỰ THÀNH CÔNG trong chain
+# fallback (không biết trước sẽ là default hay fallback) — xem _candidate_configs()
+# trong factory.py.
+_IMAGE_COST_FN = {"openai": estimate_openai_image_cost, "gemini": estimate_gemini_image_cost}
+_VIDEO_COST_FN = {"sora": estimate_sora_video_cost, "veo": estimate_veo_video_cost}
+_TTS_COST_FN = {"elevenlabs": estimate_elevenlabs_tts_cost, "gemini": estimate_gemini_tts_cost}
+
+# ElevenLabs trả MP3, Gemini TTS trả WAV (tự bọc từ PCM thô — xem tts_gemini.py) —
+# đuôi file SAI khiến FileResponse (app/routers/render.py::get_shot_asset) đoán nhầm
+# Content-Type theo phần mở rộng, browser phát âm thanh có thể lỗi.
+_TTS_EXT = {"elevenlabs": "mp3", "gemini": "wav"}
 
 
 def _render_path(pdir):
@@ -169,47 +184,61 @@ def generate_visual_asset(db: Session, p: Project, pdir, shot: dict, beat: dict,
     và regenerate 1 shot riêng lẻ (app/routers/render.py). Bỏ qua nếu đã `ready` —
     tránh gọi API tốn phí lại khi `run_asset_generation` chạy lần 2 (VD sau khi 1 vài
     shot khác lỗi); muốn sinh lại 1 shot ĐÃ ready thì gọi trực tiếp từ endpoint
-    regenerate (không qua đường batch này)."""
+    regenerate (không qua đường batch này).
+
+    Thử LẦN LƯỢT từng provider trong chain (mặc định trước, fallback sau nếu có cấu
+    hình — `factory.py::get_image_chain`/`get_video_chain`) — dừng ở provider đầu
+    tiên gọi API thành công; chỉ báo lỗi khi TẤT CẢ đều lỗi, gộp lý do từng lần thử."""
     if status.visual_status == "ready":
         return
     status.visual_status = "generating"
     status.visual_error = None
+    prompt = shot.get("visual_fx", "")
+    is_video = shot.get("visual_type") == "video"
     try:
-        prompt = shot.get("visual_fx", "")
-        if shot.get("visual_type") == "video":
-            provider: VideoProvider = get_video(db)
-            seconds = _video_duration_sec(beat)
-            job_id = provider.start_generation(prompt, seconds=seconds)
-            data = _poll_video_until_done(provider, job_id)
-            ext = "mp4"
-            cost = estimate_video_cost(seconds, getattr(provider, "model_name", "sora-2"))
-            unit_label = f"1 video (~{seconds}s)"
-        else:
-            provider: ImageProvider = get_image(db)
-            data = provider.generate(prompt)
-            ext = "png"
-            cost = estimate_image_cost(1)
-            unit_label = "1 ảnh"
-
-        path = pdir / "assets" / f"{shot['shot_id']}.{ext}"
-        write_bytes(path, data)
-        status.visual_asset_path = str(path)
-        status.visual_provider = provider.provider_name
-        status.visual_status = "ready"
-        record_asset_usage(db, p.channel_id, p.title, provider=provider.provider_name, stage="visual", unit_label=unit_label, cost=cost)
+        providers = get_video_chain(db) if is_video else get_image_chain(db)
     except NoProviderConfiguredError as e:
         status.visual_status = "error"
         status.visual_error = str(e)
-    except Exception as e:  # noqa: BLE001
-        status.visual_status = "error"
-        status.visual_error = str(e)
+        return
+
+    errors = []
+    for provider in providers:
+        try:
+            if is_video:
+                seconds = _video_duration_sec(beat)
+                job_id = provider.start_generation(prompt, seconds=seconds)
+                data = _poll_video_until_done(provider, job_id)
+                ext = "mp4"
+                cost = _VIDEO_COST_FN.get(provider.provider_name, estimate_sora_video_cost)(seconds, getattr(provider, "model_name", ""))
+                unit_label = f"1 video (~{seconds}s)"
+            else:
+                data = provider.generate(prompt)
+                ext = "png"
+                cost = _IMAGE_COST_FN.get(provider.provider_name, estimate_openai_image_cost)(1, getattr(provider, "model_name", ""))
+                unit_label = "1 ảnh"
+
+            path = pdir / "assets" / f"{shot['shot_id']}.{ext}"
+            write_bytes(path, data)
+            status.visual_asset_path = str(path)
+            status.visual_provider = provider.provider_name
+            status.visual_status = "ready"
+            status.visual_error = None
+            record_asset_usage(db, p.channel_id, p.title, provider=provider.provider_name, stage="visual", unit_label=unit_label, cost=cost)
+            return
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{provider.provider_name}: {e}")
+
+    status.visual_status = "error"
+    status.visual_error = "; ".join(errors)
 
 
 def generate_narration_asset(db: Session, p: Project, pdir, beat: dict, status: ShotRenderStatus) -> None:
     """Sinh 1 clip giọng đọc — TTS hoá LỜI THOẠI THẬT (`beat.audio`), KHÔNG PHẢI
     `shot.audio_sfx` (đó là mô tả nhạc nền/cảm xúc, không phải lời đọc — xem
     specs/07 mục 7). `audio_sfx`/`direction` chỉ dùng làm gợi ý emotion. Bỏ qua nếu đã
-    `ready` — cùng lý do tránh tốn phí lại như generate_visual_asset()."""
+    `ready` — cùng lý do tránh tốn phí lại như generate_visual_asset(). Cùng cơ chế
+    fallback chain (default → fallback) như generate_visual_asset()."""
     if status.narration_status == "ready":
         return
     text = (beat.get("audio") or "").strip()
@@ -219,19 +248,29 @@ def generate_narration_asset(db: Session, p: Project, pdir, beat: dict, status: 
     status.narration_status = "generating"
     status.narration_error = None
     try:
-        provider: TTSProvider = get_tts(db)
-        emotion = beat.get("direction", "")
-        data = provider.synthesize(text, emotion=emotion)
-        path = pdir / "assets" / f"{status.shot_id}.mp3"
-        write_bytes(path, data)
-        status.narration_asset_path = str(path)
-        status.narration_provider = provider.provider_name
-        status.narration_status = "ready"
-        cost = estimate_tts_cost(len(text))
-        record_asset_usage(db, p.channel_id, p.title, provider=provider.provider_name, stage="narration", unit_label=f"{len(text)} ký tự", cost=cost)
+        providers = get_tts_chain(db)
     except NoProviderConfiguredError as e:
         status.narration_status = "error"
         status.narration_error = str(e)
-    except Exception as e:  # noqa: BLE001
-        status.narration_status = "error"
-        status.narration_error = str(e)
+        return
+
+    emotion = beat.get("direction", "")
+    errors = []
+    for provider in providers:
+        try:
+            data = provider.synthesize(text, emotion=emotion)
+            ext = _TTS_EXT.get(provider.provider_name, "mp3")
+            path = pdir / "assets" / f"{status.shot_id}.{ext}"
+            write_bytes(path, data)
+            status.narration_asset_path = str(path)
+            status.narration_provider = provider.provider_name
+            status.narration_status = "ready"
+            status.narration_error = None
+            cost = _TTS_COST_FN.get(provider.provider_name, estimate_elevenlabs_tts_cost)(len(text), getattr(provider, "model_name", ""))
+            record_asset_usage(db, p.channel_id, p.title, provider=provider.provider_name, stage="narration", unit_label=f"{len(text)} ký tự", cost=cost)
+            return
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{provider.provider_name}: {e}")
+
+    status.narration_status = "error"
+    status.narration_error = "; ".join(errors)

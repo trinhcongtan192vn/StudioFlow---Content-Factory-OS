@@ -48,5 +48,7 @@ class ElevenLabsTTSProvider(TTSProvider):
             return ProviderStatus(ok=False, message=str(e))
 
 
-def estimate_cost(char_count: int) -> float:
+def estimate_cost(char_count: int, model_name: str = "") -> float:
+    # model_name nhận cho ĐỒNG NHẤT chữ ký với estimate_cost() các adapter khác
+    # (tts_gemini.py) — xem ghi chú tương tự ở image_openai.py::estimate_cost.
     return char_count / 1000 * PRICE_PER_1K_CHARS

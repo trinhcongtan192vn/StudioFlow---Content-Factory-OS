@@ -41,9 +41,12 @@ def _find_shot_and_beat(pack: dict, shot_id: str):
 
 @router.post("/projects/{project_id}/render/start")
 def start_render(project_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Sinh asset thật (ảnh/video/giọng đọc) cho từng shot — dùng ngay ở Visual Studio
+    (bước ④, TRƯỚC Gate #2), không còn chờ tới Output Center. Chỉ cần đã có shot list
+    (`/visual/generate` đã chạy) — không gate theo `project.status` nữa (khác
+    `start_assemble` bên dưới, vẫn yêu cầu qua Gate #2 vì ghép MP4 là bước xuất
+    thành phẩm cuối)."""
     p = _get_project_or_404(db, project_id)
-    if p.status not in READY_STATUSES:
-        raise HTTPException(400, "Project phải qua Gate #2 (đã duyệt Pack) trước khi sinh asset thật")
     pdir = project_dir(p.channel_id, p.id)
     pack = read_json(pdir / "pack.json") or {}
     shots = pack.get("shots", [])
@@ -123,7 +126,12 @@ def regenerate_narration(project_id: str, shot_id: str, background_tasks: Backgr
 
 @router.post("/projects/{project_id}/render/assemble")
 def start_assemble(project_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Ghép MP4 — vai trò CÒN LẠI của Render Studio sau khi sinh asset đã chuyển sang
+    Visual Studio. Vẫn yêu cầu qua Gate #2 (xuất thành phẩm chỉ làm sau khi Pack đã
+    được duyệt)."""
     p = _get_project_or_404(db, project_id)
+    if p.status not in READY_STATUSES:
+        raise HTTPException(400, "Project phải qua Gate #2 (đã duyệt Pack) trước khi ghép MP4")
     pdir = project_dir(p.channel_id, p.id)
     state = engine.load_render_state(pdir, project_id)
     if not state.shots:

@@ -39,9 +39,11 @@ export default function ProviderSettings() {
   const [group, setGroup] = useState<(typeof GROUPS)[number]>("llm");
   const [providers, setProviders] = useState<ProviderOut[]>([]);
   const [addOpen, setAddOpen] = useState(false);
-  const [revealed, setRevealed] = useState<Record<number, boolean>>({});
   const [testing, setTesting] = useState<Record<number, boolean>>({});
   const [testResult, setTestResult] = useState<Record<number, { ok: boolean; message: string }>>({});
+  const [editingKey, setEditingKey] = useState<Record<number, boolean>>({});
+  const [keyDraft, setKeyDraft] = useState<Record<number, string>>({});
+  const [savingKey, setSavingKey] = useState<Record<number, boolean>>({});
 
   async function load() {
     setProviders(await api.listProviders());
@@ -84,6 +86,26 @@ export default function ProviderSettings() {
     if (!confirm("Xóa provider này? Thao tác không hoàn tác được.")) return;
     await api.deleteProvider(id);
     await load();
+  }
+
+  function startEditKey(id: number) {
+    setKeyDraft((d) => ({ ...d, [id]: "" }));
+    setEditingKey((e) => ({ ...e, [id]: true }));
+  }
+  function cancelEditKey(id: number) {
+    setEditingKey((e) => ({ ...e, [id]: false }));
+  }
+  async function saveKey(id: number) {
+    const value = (keyDraft[id] || "").trim();
+    if (!value) return;
+    setSavingKey((s) => ({ ...s, [id]: true }));
+    try {
+      await api.patchProvider(id, { api_key: value });
+      setEditingKey((e) => ({ ...e, [id]: false }));
+      await load();
+    } finally {
+      setSavingKey((s) => ({ ...s, [id]: false }));
+    }
   }
 
   return (
@@ -198,19 +220,40 @@ export default function ProviderSettings() {
                     </option>
                   ))}
                 </select>
-                {group !== "video" && group !== "image" && (
-                  <>
-                    <label style={{ marginTop: 6 }}>API Key</label>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <input className="input" readOnly value={revealed[pv.id] ? "(ẩn — nhập lại để đổi)" : pv.key_display || "(chưa có key)"} />
-                      <button className="btn btn-icon btn-secondary" onClick={() => setRevealed((r) => ({ ...r, [pv.id]: !r[pv.id] }))}>
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                          <circle cx="12" cy="12" r="3" />
-                        </svg>
-                      </button>
-                    </div>
-                  </>
+                <label style={{ marginTop: 6 }}>API Key</label>
+                {editingKey[pv.id] ? (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      className="input"
+                      type="password"
+                      autoFocus
+                      placeholder="sk-..."
+                      value={keyDraft[pv.id] || ""}
+                      onChange={(e) => setKeyDraft((d) => ({ ...d, [pv.id]: e.target.value }))}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveKey(pv.id);
+                        if (e.key === "Escape") cancelEditKey(pv.id);
+                      }}
+                    />
+                    <button className="btn btn-secondary" style={{ fontSize: 12, padding: "0 10px", flex: "none" }} onClick={() => cancelEditKey(pv.id)}>
+                      Hủy
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      style={{ fontSize: 12, padding: "0 10px", flex: "none" }}
+                      onClick={() => saveKey(pv.id)}
+                      disabled={!keyDraft[pv.id]?.trim() || savingKey[pv.id]}
+                    >
+                      {savingKey[pv.id] ? "Đang lưu..." : "Lưu"}
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input className="input" readOnly value={pv.key_display || "(chưa có key)"} />
+                    <button className="btn btn-secondary" style={{ fontSize: 12, padding: "0 10px", flex: "none" }} onClick={() => startEditKey(pv.id)}>
+                      Sửa
+                    </button>
+                  </div>
                 )}
               </div>
             ) : (
@@ -256,20 +299,96 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
   const [modelName, setModelName] = useState("qwen2.5:32b");
   const [saving, setSaving] = useState(false);
 
+  // Sau khi thêm, test connection NGAY trong dialog (không bắt tự bấm Test riêng sau
+  // khi đã đóng dialog) — createdId != null nghĩa là đã lưu provider, dialog chuyển
+  // sang hiển thị kết quả test thay vì form nhập liệu.
+  const [createdId, setCreatedId] = useState<number | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [retryKey, setRetryKey] = useState("");
+  const [retrying, setRetrying] = useState(false);
+
   const selectedCatalog = CLOUD_CATALOG[group].find((c) => c.provider_name === providerName);
+
+  async function runTest(id: number) {
+    setTesting(true);
+    try {
+      setTestResult(await api.testProvider(id));
+    } catch (e) {
+      setTestResult({ ok: false, message: e instanceof ApiError ? e.message : "Có lỗi khi test kết nối." });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function save() {
     setSaving(true);
     try {
-      if (connectionType === "cloud_api") {
-        await api.createProvider({ task: group, provider_name: providerName, display_name: displayName, connection_type: "cloud_api", api_key: apiKey, model_name: cloudModel });
-      } else {
-        await api.createProvider({ task: "llm", provider_name: "local", display_name: localDisplayName, connection_type: "local_endpoint", endpoint_url: endpointUrl, model_name: modelName });
-      }
-      onCreated();
+      const pv =
+        connectionType === "cloud_api"
+          ? await api.createProvider({ task: group, provider_name: providerName, display_name: displayName, connection_type: "cloud_api", api_key: apiKey, model_name: cloudModel })
+          : await api.createProvider({ task: "llm", provider_name: "local", display_name: localDisplayName, connection_type: "local_endpoint", endpoint_url: endpointUrl, model_name: modelName });
+      setCreatedId(pv.id);
+      await runTest(pv.id);
     } finally {
       setSaving(false);
     }
+  }
+
+  async function saveAndRetry() {
+    if (!createdId || !retryKey.trim()) return;
+    setRetrying(true);
+    try {
+      await api.patchProvider(createdId, { api_key: retryKey.trim() });
+      setRetryKey("");
+      await runTest(createdId);
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  if (createdId != null) {
+    return (
+      <div className="dialog-backdrop" onClick={onCreated}>
+        <div className="dialog" style={{ width: "min(460px,100%)" }} onClick={(e) => e.stopPropagation()}>
+          <div className="dialog-title">Kết quả kết nối — {displayName || GROUP_LABEL[group]}</div>
+          {testing ? (
+            <div className="dialog-body">Đang test kết nối...</div>
+          ) : (
+            testResult && (
+              <div
+                style={{
+                  fontSize: 13,
+                  padding: "8px 10px",
+                  borderRadius: "var(--radius-sm)",
+                  background: testResult.ok ? "var(--color-accent-900)" : "var(--color-danger-bg)",
+                  color: testResult.ok ? "var(--color-accent-100)" : "var(--color-danger)",
+                }}
+              >
+                {testResult.ok ? "✓ " : "✗ "}
+                {testResult.message}
+              </div>
+            )
+          )}
+          {!testing && testResult && !testResult.ok && (
+            <div className="field" style={{ marginTop: "var(--space-3)" }}>
+              <label>Sửa lại API Key &amp; thử lại</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input className="input" type="password" value={retryKey} onChange={(e) => setRetryKey(e.target.value)} placeholder="sk-..." />
+                <button className="btn btn-secondary" style={{ flex: "none" }} disabled={!retryKey.trim() || retrying} onClick={saveAndRetry}>
+                  {retrying ? "Đang thử..." : "Lưu & Test lại"}
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="dialog-actions">
+            <button className="btn btn-primary" onClick={onCreated}>
+              {testResult?.ok ? "Xong" : "Đóng (vẫn giữ provider đã lưu)"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -355,7 +474,7 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
             Hủy
           </button>
           <button className="btn btn-primary" disabled={saving} onClick={save}>
-            {saving ? "Đang lưu..." : "Thêm provider"}
+            {saving ? "Đang lưu & test..." : "Thêm provider"}
           </button>
         </div>
       </div>

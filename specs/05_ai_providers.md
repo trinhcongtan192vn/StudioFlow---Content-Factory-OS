@@ -125,32 +125,75 @@ tự thêm thủ công qua UI nếu muốn 1 provider "luôn sẵn sàng" cho vi
 tốn phí. Khi có GPU: thêm 1 provider Local Endpoint trỏ Ollama/vLLM (dùng chung
 `LocalOpenAICompatProvider`) và đặt làm mặc định — không cần sửa code pipeline.
 
-## 8c. M2 — Provider TTS/Image/Video thực thi thật (2026-08-12)
+## 8c. M2 — Provider TTS/Image/Video thực thi thật
 
-3 provider đã thực thi sinh asset THẬT (khác mọi provider tts/image/video khác vẫn chỉ
-khai báo interface, xem `app/providers/stubs.py`):
+6 provider đã thực thi sinh asset THẬT (khác Vbee/Flux/Midjourney/Runway vẫn chỉ khai
+báo interface, xem `app/providers/stubs.py`):
 
 | Task | Provider | File adapter | Ghi chú |
 |---|---|---|---|
-| `tts` | ElevenLabs | `app/providers/tts_elevenlabs.py` | Đồng bộ — 1 request trả thẳng audio bytes. `voice_id` tái dùng cột `endpoint_url` (không thêm cột DB mới) — để trống dùng giọng demo công khai mặc định. |
+| `tts` | ElevenLabs | `app/providers/tts_elevenlabs.py` | Đồng bộ — 1 request trả thẳng audio bytes MP3. `voice_id` tái dùng cột `endpoint_url` (không thêm cột DB mới) — để trống dùng giọng demo công khai mặc định. |
+| `tts` | Gemini TTS | `app/providers/tts_gemini.py` | Đồng bộ — trả PCM thô (`inlineData`, `mimeType` dạng `audio/L16;rate=...`), phải tự bọc WAV header (`_wrap_pcm_as_wav`) trước khi lưu — browser không phát được PCM trần. |
 | `image` | OpenAI (GPT Image) | `app/providers/image_openai.py` | Đồng bộ — base64 response, size cố định 1792x1024 (16:9). |
-| `video` | OpenAI Sora | `app/providers/video_sora.py` | **Bất đồng bộ** — gửi job (`start_generation`) rồi poll (`poll_generation`) tới khi `completed`, có thể mất vài phút. Đây là điểm rủi ro cao nhất: request/response shape dựng theo suy luận pattern chung OpenAI, CHƯA verify với key thật lúc code — nếu sai, sửa theo message lỗi thật (đã có `raise_for_status_with_body`, xem §8b). |
+| `image` | Gemini (Nano Banana) | `app/providers/image_gemini.py` | Đồng bộ — base64 qua `inlineData`, decode thẳng (không cần bọc gì thêm, khác TTS). |
+| `video` | OpenAI Sora | `app/providers/video_sora.py` | **Bất đồng bộ** — gửi job (`start_generation`) rồi poll (`poll_generation`) tới khi `completed`, có thể mất vài phút. Rủi ro: request/response shape dựng theo suy luận pattern chung OpenAI, CHƯA verify với key thật lúc code. |
+| `video` | Google Veo | `app/providers/video_veo.py` | **Bất đồng bộ** — pattern "long-running operation" riêng của Gemini API (`predictLongRunning` → poll `operations/{id}` → tải `video.uri`), khác hẳn cấu trúc REST job của Sora. **Rủi ro cao nhất trong toàn bộ app** — hoàn toàn suy luận từ tài liệu pattern chung, chưa verify với key thật. |
 
-`VideoProvider` (interface, `app/providers/base.py`) mở rộng thêm `start_generation(prompt, *, seconds=8) -> job_id` và `poll_generation(job_id) -> (status, bytes|None)` — provider bất đồng bộ dùng 2 method này thay vì `generate()` đồng bộ cũ (`generate()` raise `NotImplementedError` ở Sora).
+`VideoProvider` (interface, `app/providers/base.py`) mở rộng thêm `start_generation(prompt, *, seconds=8) -> job_id` và `poll_generation(job_id) -> (status, bytes|None)` — provider bất đồng bộ dùng 2 method này thay vì `generate()` đồng bộ cũ (`generate()` raise `NotImplementedError` ở Sora/Veo).
 
-`app/providers/factory.py` có thêm `get_tts(db)`/`get_image(db)`/`get_video(db)` — cùng pattern `get_llm()`: raise `NoProviderConfiguredError` khi chưa cấu hình/khởi tạo được provider cho task đó, không âm thầm bỏ qua.
+### Provider mặc định + fallback THẬT (không chỉ lưu cờ DB)
 
-**Orchestration** (`backend/app/render/`, module MỚI, tách biệt hoàn toàn script core — "Chống coupling: script core ⟂ render module", §09): `engine.py::run_asset_generation()` chạy trong `FastAPI BackgroundTasks` (không block request, vì Sora poll có thể mất tới ~8 phút — giới hạn `VIDEO_MAX_WAIT_SEC`), sinh **2 thứ** cho mỗi shot — visual (ảnh/video từ `visual_fx`) và **narration** (TTS hoá `beat.audio` — lời thoại thật, dùng `beat.direction`/`audio_sfx` chỉ làm gợi ý emotion, KHÔNG TTS hoá `audio_sfx` vì đó là mô tả nhạc nền chứ không phải lời đọc — xem §07 mục 7). Trạng thái từng shot (`pending|generating|ready|error` + đường dẫn asset + cờ `approved` cho human review) lưu ở `render.json` riêng trong `project_dir()`, KHÔNG ghi vào `pack.json`.
+`ProviderConfig.is_fallback` trước đây chỉ là cờ lưu DB, hiển thị lại trên UI nhưng
+KHÔNG có logic nào đọc — đặt "Fallback" ở Cài đặt không có tác dụng gì. Đã sửa:
+`app/providers/factory.py::get_tts_chain(db)`/`get_image_chain(db)`/`get_video_chain(db)`
+trả về DANH SÁCH provider đã khởi tạo theo thứ tự ưu tiên (`_candidate_configs()`:
+default trước, fallback sau nếu có cấu hình VÀ khác default). `app/render/engine.py`
+(2 hàm `generate_visual_asset`/`generate_narration_asset`) và
+`app/routers/pack.py::generate_thumbnail` thử LẦN LƯỢT từng provider trong chain —
+dừng ở provider đầu tiên gọi API thành công; chỉ báo lỗi khi TẤT CẢ đều lỗi, gộp lý do
+từng lần thử (VD `"openai: 401 Unauthorized...; gemini: <lỗi>"`). Phạm vi: chỉ áp dụng
+cho `tts`/`image`/`video` — `get_llm()` (LLM) CHƯA có fallback (7+ điểm gọi rải khắp
+`pipeline/generation.py`, để làm riêng sau nếu cần). `get_tts`/`get_image`/`get_video`
+(số ít, không fallback) vẫn giữ lại, dùng cho `routers/providers.py::test_provider`.
+
+### Đã chuyển sinh asset thật sang Visual Studio (KHÔNG còn ở Render Studio)
+
+Theo phản hồi người dùng: M2 ban đầu đặt việc sinh asset ở "Render Studio" (chỉ mở
+được SAU Gate #2) — sai vị trí, người dùng cần sinh + duyệt asset ngay khi đang thao
+tác từng shot ở **Visual Studio** (bước ④, TRƯỚC Gate #2). Sửa bằng cách BỎ điều kiện
+`project.status` ở `POST /render/start` (trước đó yêu cầu `ready_output`/`exported`/
+`published`) — chỉ cần đã có `shots` (giống `/visual/generate` đã yêu cầu
+`script.body`). `approve`/`regenerate-visual`/`regenerate-narration` vốn không có
+status gate, không đổi gì. **`POST /render/assemble` (ghép MP4) vẫn giữ status gate**
+(chuyển từ `start_render` sang đây) — ghép MP4 vẫn chỉ làm được sau Gate #2, đúng vai
+trò còn lại của Render Studio (Output Center). Kiến trúc `render.json`/`BackgroundTasks`
+không đổi gì, chỉ đổi CHỖ GỌI (frontend) + điều kiện status (backend).
+
+**Orchestration** (`backend/app/render/`, module tách biệt hoàn toàn script core —
+"Chống coupling: script core ⟂ render module", §09): `engine.py::run_asset_generation()`
+chạy trong `FastAPI BackgroundTasks` (không block request, vì Sora/Veo poll có thể mất
+tới ~8 phút — giới hạn `VIDEO_MAX_WAIT_SEC`), sinh **2 thứ** cho mỗi shot — visual
+(ảnh/video từ `visual_fx`) và **narration** (TTS hoá `beat.audio` — lời thoại thật,
+dùng `beat.direction`/`audio_sfx` chỉ làm gợi ý emotion, KHÔNG TTS hoá `audio_sfx` vì
+đó là mô tả nhạc nền chứ không phải lời đọc — xem §07 mục 7). Trạng thái từng shot
+(`pending|generating|ready|error` + đường dẫn asset + cờ `approved` cho human review)
+lưu ở `render.json` riêng trong `project_dir()`, KHÔNG ghi vào `pack.json`.
 
 **Ghép MP4** (`app/render/assembly.py`): ffmpeg qua `subprocess` — mỗi shot render 1 segment (ảnh: `-loop 1` + trim theo duration beat; video: trim theo duration), mux narration làm audio track, rồi `ffmpeg -f concat` nối toàn bộ segment theo thứ tự timestamp. Bắt buộc **MỌI shot phải `visual_status=="ready"` VÀ `approved=True`** trước khi ghép (human review, đúng yêu cầu §09 M2). Yêu cầu `ffmpeg` có sẵn trên `PATH` — không bundle binary (xem README.md).
 
-**Chi phí**: mỗi lần sinh asset thành công ghi qua `record_asset_usage()` (`app/routers/pipeline.py`, cạnh `record_usage()` gốc cho LLM) vào cùng `AuditLog`/`Budget` — giá ước tính (không phải hoá đơn chính xác): ElevenLabs ~$0.30/1K ký tự, OpenAI Image ~$0.06/ảnh (1792x1024), Sora ~$0.10/giây (`sora-2`) hoặc ~$0.30/giây (`sora-2-pro`).
+**Chi phí**: mỗi lần sinh asset thành công ghi qua `record_asset_usage()` (`app/routers/pipeline.py`, cạnh `record_usage()` gốc cho LLM) vào cùng `AuditLog`/`Budget` — giá ước tính (không phải hoá đơn chính xác): ElevenLabs ~$0.30/1K ký tự, Gemini TTS ~$1-20/1M token, OpenAI Image ~$0.06/ảnh, Gemini Image ~$0.04-0.12/ảnh tuỳ model, Sora ~$0.10-0.30/giây, Veo ~$0.15-0.40/giây.
 
-**API mới**: `POST/GET /projects/{id}/render/{start,status}`, `POST .../render/shots/{shot_id}/{approve,regenerate-visual,regenerate-narration}`, `POST .../render/assemble`, `GET .../render/{download, shots/{shot_id}/asset/{visual|narration}}` — xem `app/routers/render.py`.
+**API**: `POST/GET /projects/{id}/render/{start,status}`, `POST .../render/shots/{shot_id}/{approve,regenerate-visual,regenerate-narration}`, `POST .../render/assemble`, `GET .../render/{download, shots/{shot_id}/asset/{visual|narration}}` — xem `app/routers/render.py`.
 
-**Frontend**: `RenderStudio.tsx` (nhúng trong Output Center, thẻ "Render in-app" — KHÔNG phải step Stepper mới, khớp §06 mục 2 màn ⑦) — bấm "Bắt đầu sinh asset" → poll trạng thái mỗi 3s → xem trước ảnh/video/audio thật từng shot → "Duyệt" từng shot → "Ghép MP4" khi mọi shot đã duyệt → preview + tải file cuối.
+**Frontend**: sinh + duyệt asset THẬT nằm ở `VisualStudio.tsx` (mỗi shot: preview thật
+`<img>`/`<video>`/`<audio>`, nút "Tạo ảnh/video"/"Tạo giọng đọc" gọi `/render/*`, nút
+"Duyệt", cộng nút hàng loạt "Sinh asset cho toàn bộ block"; 2 nút cũ đổi tên "✎ Viết
+lại mô tả bằng AI" — chỉ sửa PROMPT text qua LLM, không sinh asset thật). `RenderStudio.tsx`
+(nhúng trong Output Center, thẻ "Render in-app") giờ CHỈ còn đọc `render/status` (tóm
+tắt X/Y shot đã duyệt) + nút "Ghép MP4" + preview/tải file cuối — không sinh/duyệt gì
+nữa (đã chuyển hết sang Visual Studio).
 
 ## 9. Ràng buộc MVP
 
-- TTS/Image config có mặt trong màn Provider AI — **3 provider (ElevenLabs/OpenAI Image/Sora) đã thực thi thật từ M2** (§8c), còn lại (Vbee, Flux, Midjourney, Runway, Veo, Gemini TTS/Image) vẫn chỉ khai báo interface + prompt sinh trong Pack, không thực thi.
-- Video (Runway/Veo): chỉ khai báo interface, chưa implement — Sora đã implement (§8c).
+- TTS/Image/Video config có mặt trong màn Provider AI — **6 provider (ElevenLabs, Gemini TTS, OpenAI Image, Gemini Image, Sora, Veo) đã thực thi thật** (§8c), còn lại (Vbee, Flux, Midjourney, Runway) vẫn chỉ khai báo interface + prompt sinh trong Pack, không thực thi.
+- Provider mặc định + fallback thật cho `tts`/`image`/`video` (§8c) — `llm` chưa có fallback.

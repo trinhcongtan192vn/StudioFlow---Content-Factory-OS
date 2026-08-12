@@ -84,18 +84,21 @@ Thứ tự triển khai M1 (theo dependency): Foundation → DB → Provider AI 
 
 ### M2 — Production Layer (Beta)
 
-> **Đã build 1 phần (2026-08-12):** thực thi thật 3 provider — **ElevenLabs** (TTS),
-> **OpenAI Image/GPT Image** (ảnh), **OpenAI Sora** (video) — cộng `/render` ghép MP4
-> bằng ffmpeg, có human review từng shot trước khi ghép. Module `backend/app/render/`
-> tách biệt hoàn toàn script core (chỉ đọc `pack.json`, trạng thái riêng ở
-> `render.json`). Chi phí ghi vào AuditLog/Budget như LLM (màn 💳 hiện đúng tổng, CHƯA
-> tách theo loại tts/image/video — giới hạn đã biết). Chi tiết: `IMPLEMENTATION_REPORT.md`
-> mục "Cập nhật vòng M2", `specs/05_ai_providers.md` §8c.
+> **Đã build 1 phần (2026-08-12, cập nhật):** thực thi thật 6 provider — **ElevenLabs**
+> + **Gemini TTS** (TTS), **OpenAI Image** + **Gemini Image** (ảnh), **Sora** +
+> **Google Veo** (video) — mỗi task có provider mặc định + **fallback THẬT** (tự động
+> thử provider dự phòng khi provider mặc định gọi API lỗi, xem `specs/05` §8c). Sinh
+> asset đã CHUYỂN sang **Visual Studio** (bước ④, trước Gate #2) theo phản hồi người
+> dùng — không còn chờ tới Output Center; Render Studio giờ CHỈ còn ghép MP4 (vẫn yêu
+> cầu qua Gate #2). Module `backend/app/render/` vẫn tách biệt hoàn toàn script core
+> (chỉ đọc `pack.json`, trạng thái riêng ở `render.json`). Chi phí ghi vào AuditLog/
+> Budget như LLM (màn 💳 hiện đúng tổng, CHƯA tách theo loại tts/image/video — giới
+> hạn đã biết). Chi tiết: `IMPLEMENTATION_REPORT.md`, `specs/05_ai_providers.md` §8c.
 >
-> **Chưa build:** provider còn lại (Vbee, Flux, Midjourney, Runway, Veo, Gemini
-> TTS/Image) vẫn chỉ khai báo interface; giới hạn số shot cho `/render` (đang cho phép
-> bất kỳ số lượng); UI chọn thời lượng clip video thủ công (đang tự tính từ
-> `end_sec - timestamp_sec` của beat, clamp 4-20s).
+> **Chưa build:** provider còn lại (Vbee, Flux, Midjourney, Runway) vẫn chỉ khai báo
+> interface; fallback thật cho `llm` (chỉ `tts`/`image`/`video` có); giới hạn số shot
+> cho `/render` (đang cho phép bất kỳ số lượng); UI chọn thời lượng clip video thủ
+> công (đang tự tính từ `end_sec - timestamp_sec` của beat, clamp 4-20s).
 
 - Thực thi adapter TTS/Image/Video; sinh asset thật.
 - `/render`: ghép MP4 "đủ đăng", giới hạn số shot; human review asset trước ghép.

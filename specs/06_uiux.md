@@ -48,7 +48,7 @@ Ba vùng cố định + stepper trên cùng:
 | ② | **Brief Editor** | Form 4 khối gập/mở (4 nhóm input §04). Trường thiếu → chip "cần bổ sung" màu hổ phách (không lỗi đỏ). Nút "Bắt đầu Research" sáng khi đủ input tối thiểu. |
 | ③ | **Outline & Hook (Gate #1)** — **đã build, tách khỏi Script Studio** | Dàn ý AI Research (chọn 1) + **Hook Variants** (3 thẻ kiểu tâm lý, **không điểm số**) hiển thị CÙNG màn, chọn xong sửa trực tiếp hook. Duyệt → mới sinh Full Script. **Đã build vòng 4:** header có thêm nút "Nhập kịch bản từ file (CSV/Excel)" — đường tắt bỏ qua toàn bộ chọn outline/hook + AI viết Full Script, nhảy thẳng Script Studio với script đã có sẵn (xem `03_api.md` mục Script Import). Dialog xác nhận hiện số block/số từ/thời lượng ước tính trước khi ghi đè. |
 | ④ | **Script Studio** (xương sống) | Trước duyệt: 1 cột Full Script liền mạch + ô góp ý "tạo lại". Sau duyệt & bóc tách: kịch bản đa cột theo timeline (Audio/Visual/Direction), 1 cột (đã build vòng 4: bỏ mini-panel Hook đang dùng — xem ghi chú dưới). Cảnh báo retention = **gạch chân + ghi chú lề** tại đoạn có vấn đề — không popup chặn. |
-| ⑤ | **Visual Studio** — **đã build, màn mới** | 1 card/shot (= 1 beat script): Visual/FX + Audio/SFX cùng lúc (đã build vòng 4: đổi tên field, tách 2 nút "Tạo lại Visual"/"Tạo lại giọng đọc"), toggle Image⇄Video. Khớp nguyên tắc "shot chuẩn hoá" nhưng tương tác trực tiếp thay vì chỉ liệt kê trong Pack Review. |
+| ⑤ | **Visual Studio** — **đã build, màn mới** | 1 card/shot (= 1 beat script): Visual/FX + Audio/SFX cùng lúc, toggle Image⇄Video. Khớp nguyên tắc "shot chuẩn hoá" nhưng tương tác trực tiếp thay vì chỉ liệt kê trong Pack Review. |
 | ⑥ | **Pack Review** (Gate #2) | Xem tổng hợp Pack dạng tab: Full Script & Shot List / Title & Thumbnail. Dải trạng thái đầu trang liệt kê số cảnh báo chưa xử lý. 2 nút: **Approve** (mở khoá Output) / **Trả về** (ô ghi chú bắt buộc, quay lại Script Studio). |
 
 > **Đã build (2026-08-12):** bỏ tab "Repurposing" khỏi Pack Review (chờ tới M3 mới có
@@ -63,14 +63,21 @@ Ba vùng cố định + stepper trên cùng:
 >   — xem `specs/05_ai_providers.md` §8c), preview + nút tải ảnh khi xong.
 | ⑦ | **Output Center** | 2 thẻ lớn: "Export Pack" và "Render in-app" (thẻ 2 nhãn "Beta · M2"). Sau khi chạy: tiến độ + link tải. |
 
-> **Đã build 1 phần M2 (2026-08-12):** thẻ "Render in-app" không còn `disabled` — bấm
-> mở `RenderStudio.tsx` (thay thế 2 thẻ, có nút "← Quay lại"), KHÔNG phải step Stepper
-> mới. Luồng: "Bắt đầu sinh asset" → sinh ảnh/video (OpenAI Image/Sora) + giọng đọc
-> (ElevenLabs) thật cho từng shot, poll tiến độ mỗi 3s (trạng thái pending/generating/
-> ready/error hiện qua tag màu) → mỗi shot xem trước ảnh/video/audio thật (`<img>`/
-> `<video>`/`<audio>`, KHÔNG còn placeholder text như Visual Studio §5) + nút "Tạo lại
-> Visual"/"Tạo lại giọng đọc" riêng lẻ + nút "Duyệt" (human review bắt buộc trước khi
-> ghép) → khi mọi shot đã duyệt, nút "Ghép MP4" (ffmpeg) → preview + tải file cuối.
+> **Đã build (2026-08-12, cập nhật):** sinh asset thật (ảnh/video/giọng đọc) đã CHUYỂN
+> sang **Visual Studio** (§5) — người dùng phản hồi "Render in-app" ở Output Center
+> (chỉ mở được SAU Gate #2) sai vị trí, cần sinh + duyệt ngay khi đang thao tác từng
+> shot. Visual Studio giờ có: preview thật `<img>`/`<video>`/`<audio>` (KHÔNG còn
+> placeholder text), nút "Tạo ảnh/video"/"Tạo giọng đọc" (gọi OpenAI Image/Gemini
+> Image/Sora/Veo/ElevenLabs/Gemini TTS THẬT, có fallback tự động — xem
+> `specs/05_ai_providers.md` §8c), nút "Duyệt" per-shot, nút hàng loạt "Sinh asset cho
+> toàn bộ block". 2 nút cũ "Tạo lại Visual"/"Tạo lại giọng đọc" đổi tên "✎ Viết lại mô
+> tả bằng AI" (chỉ sửa PROMPT text qua LLM, không sinh asset thật).
+>
+> Thẻ "Render in-app" ở Output Center KHÔNG còn `disabled` nhưng giờ CHỈ còn bước
+> **ghép MP4** — mở `RenderStudio.tsx` (thay thế 2 thẻ, nút "← Quay lại"), đọc lại
+> đúng trạng thái asset đã duyệt ở Visual Studio (tóm tắt "X/Y shot đã duyệt"), nút
+> "Ghép MP4" (ffmpeg, chỉ bấm được khi MỌI shot đã duyệt — vẫn yêu cầu qua Gate #2) →
+> preview + tải file cuối.
 > Xem `specs/05_ai_providers.md` §8c.
 | ⑧ | **Retention Nhập tay** — **đã build, đặt lại vị trí** | Design KHÔNG có màn riêng cho mục này (thiếu so với PRD §10.4/MVP bắt buộc) — bản build đặt dưới dạng card gọn ngay trong **Output Center** (⑦), sau khi Pack đã export. Form nhập 4 nhóm số liệu (§08); sau lưu hiện thanh so sánh chênh lệch vs benchmark. |
 
@@ -106,8 +113,16 @@ Vào bằng ⚙. Sidebar phụ dạng **icon + nhãn** (single-user, không RBAC
   > → `true` bằng dữ liệu giả, KHÔNG có form "+ Thêm provider" hay lựa chọn Cloud/Local
   > thật. Vì đây là yêu cầu bắt buộc của PRD §10.2b (model local GPU-ready) và yêu
   > cầu triển khai #4, bản build bổ sung dialog "+ Thêm provider" đúng như mô tả gốc.
-- API key che (`sk-••••1234`), hiện khi bấm mắt.
-- Dropdown chọn **provider mặc định** cho từng task (gộp cả model cloud + local).
+- **Đã build (2026-08-12):** Test connection chạy **NGAY sau khi thêm provider**
+  (trong dialog "+ Thêm provider", không cần đóng dialog rồi tự bấm Test riêng ở thẻ
+  sau đó) — kết quả (✓/✗ + message) hiện ngay trong dialog; nếu fail, cho sửa lại API
+  Key và "Lưu & Test lại" ngay tại chỗ, không bắt đóng dialog trước. Nút Test ở từng
+  thẻ VẪN giữ (re-verify sau này, VD xoay key/hết quota), chỉ không còn là bước bắt
+  buộc ngay sau khi thêm.
+- API key che (`sk-••••1234`); nút **"Sửa"** bật ô nhập key mới thật sự nhập được +
+  nút Lưu/Hủy (trước đây có nút "mắt" nhưng ô luôn `readOnly` — không sửa được dù chữ
+  ghi "nhập lại để đổi", đã sửa bug này).
+- Dropdown chọn **provider mặc định** cho từng task (gộp cả model cloud + local) + dropdown **Fallback** — với `tts`/`image`/`video`, fallback THẬT SỰ được dùng: provider mặc định gọi API lỗi → tự động thử provider fallback (xem `specs/05_ai_providers.md` §8c). `llm` chưa có fallback thật (chỉ lưu cờ).
 - Trạng thái rỗng: chưa có provider → chặn tuyến sản xuất, điều hướng tới đây kèm thông báo "Cần cấu hình Provider AI".
 
 ## 5. Nguyên tắc tương tác (đảm bảo mượt)

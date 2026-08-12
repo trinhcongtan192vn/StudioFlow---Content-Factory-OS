@@ -6,9 +6,12 @@ from app.config import project_dir
 from app.db import get_db
 from app.filestore import read_json, write_bytes, write_json, write_versioned
 from app.models import PackVersion, Project
-from app.providers.factory import NoProviderConfiguredError, get_image
-from app.providers.image_openai import estimate_cost as estimate_image_cost
+from app.providers.factory import NoProviderConfiguredError, get_image_chain
+from app.providers.image_gemini import estimate_cost as estimate_gemini_image_cost
+from app.providers.image_openai import estimate_cost as estimate_openai_image_cost
 from app.routers.pipeline import record_asset_usage
+
+_IMAGE_COST_FN = {"openai": estimate_openai_image_cost, "gemini": estimate_gemini_image_cost}
 
 router = APIRouter(tags=["pack"])
 
@@ -72,16 +75,28 @@ def generate_thumbnail(project_id: str, db: Session = Depends(get_db)):
     write_json(pdir / "pack.json", pack)
 
     try:
-        provider = get_image(db)
-        data = provider.generate(prompt)
-        path = pdir / "assets" / "thumbnail.png"
-        write_bytes(path, data)
-        ym.update(thumbnail_status="ready", thumbnail_asset_path=str(path), thumbnail_provider=provider.provider_name, thumbnail_error=None)
-        record_asset_usage(db, p.channel_id, p.title, provider=provider.provider_name, stage="thumbnail", unit_label="1 ảnh", cost=estimate_image_cost(1))
+        providers = get_image_chain(db)
     except NoProviderConfiguredError as e:
         ym.update(thumbnail_status="error", thumbnail_error=str(e))
-    except Exception as e:  # noqa: BLE001
-        ym.update(thumbnail_status="error", thumbnail_error=str(e))
+        pack["youtube_meta"] = ym
+        write_json(pdir / "pack.json", pack)
+        db.commit()
+        return pack
+
+    errors = []
+    for provider in providers:
+        try:
+            data = provider.generate(prompt)
+            path = pdir / "assets" / "thumbnail.png"
+            write_bytes(path, data)
+            ym.update(thumbnail_status="ready", thumbnail_asset_path=str(path), thumbnail_provider=provider.provider_name, thumbnail_error=None)
+            cost = _IMAGE_COST_FN.get(provider.provider_name, estimate_openai_image_cost)(1, getattr(provider, "model_name", ""))
+            record_asset_usage(db, p.channel_id, p.title, provider=provider.provider_name, stage="thumbnail", unit_label="1 ảnh", cost=cost)
+            break
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{provider.provider_name}: {e}")
+    else:
+        ym.update(thumbnail_status="error", thumbnail_error="; ".join(errors))
 
     pack["youtube_meta"] = ym
     write_json(pdir / "pack.json", pack)

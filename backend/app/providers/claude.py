@@ -37,11 +37,15 @@ class ClaudeProvider(LLMProvider):
         }
 
     def complete(self, system, messages: list[LLMMessage], *, temperature=0.7, max_tokens=4000) -> LLMResult:
+        # `temperature` KHÔNG gửi lên API nữa — model dòng Claude 5 (Opus 5/Sonnet 5/
+        # Fable 5) trả thẳng HTTP 400 "`temperature` is deprecated for this model" (lỗi
+        # thật gặp khi người dùng bấm Test, xác nhận qua raise_for_status_with_body).
+        # Giữ tham số trong chữ ký hàm để tương thích interface LLMProvider (OpenAI/
+        # Gemini vẫn dùng), chỉ Claude bỏ qua giá trị này khi dựng request.
         body = {
             "model": self.model_name,
             "system": system,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
         with httpx.Client(timeout=120) as client:

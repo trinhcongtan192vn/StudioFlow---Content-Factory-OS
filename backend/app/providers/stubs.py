@@ -2,11 +2,11 @@
 Test kết nối vẫn hoạt động (chỉ kiểm tra đã lưu key, không gọi API thật) — chuẩn bị
 provider trước khi có adapter thật.
 
-M2 (2026-08-12) đã thực thi thật 3 provider — KHÔNG còn ở file này: ElevenLabs (TTS,
-xem app/providers/tts_elevenlabs.py), OpenAI Image (xem app/providers/image_openai.py),
-Sora (Video, xem app/providers/video_sora.py). Các provider còn lại dưới đây (Vbee,
-Flux, Midjourney, Runway, OpenAI TTS, Gemini TTS/Image, Veo) vẫn chỉ là khai báo
-interface — chưa research/implement, để làm ở đợt sau.
+Đã thực thi thật — KHÔNG còn ở file này: ElevenLabs (TTS, tts_elevenlabs.py), OpenAI
+Image (image_openai.py), Sora (video_sora.py) — M2; Gemini TTS (tts_gemini.py), Gemini
+Image (image_gemini.py), Google Veo (video_veo.py) — đợt 2. Các provider còn lại dưới
+đây (Vbee, Flux, Midjourney, Runway, OpenAI TTS) vẫn chỉ là khai báo interface — chưa
+research/implement, để làm ở đợt sau.
 """
 from app.providers.base import ImageProvider, ProviderStatus, TTSProvider, VideoProvider
 
@@ -89,40 +89,3 @@ class OpenAITTSProvider(TTSProvider, NotImplementedMixin):
         return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
 
 
-class GeminiTTSProvider(TTSProvider, NotImplementedMixin):
-    provider_name = "gemini"
-
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-
-    def synthesize(self, text: str, *, emotion: str = "") -> bytes:
-        self._not_implemented("Gemini TTS synthesize")
-
-    def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
-
-
-class GeminiImageProvider(ImageProvider, NotImplementedMixin):
-    provider_name = "gemini"
-
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-
-    def generate(self, prompt: str) -> bytes:
-        self._not_implemented("Gemini (Nano Banana) image generate")
-
-    def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
-
-
-class VeoVideoProvider(VideoProvider, NotImplementedMixin):
-    provider_name = "veo"
-
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-
-    def generate(self, prompt: str) -> bytes:
-        self._not_implemented("Google Veo video generate")
-
-    def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")

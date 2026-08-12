@@ -378,6 +378,107 @@ không hứa hẹn quá mức những gì thật sự đã kiểm tra. 3 provide
 **Test mới**: `backend/tests/test_pack_thumbnail.py` (4 test — mock qua `respx`, không
 tốn phí). Tổng **117 test, tất cả pass** (113 cũ + 4 mới). Frontend typecheck sạch.
 
+## 15. Chuyển sinh asset thật vào Visual Studio + Fallback provider thật + UX Provider AI + Gemini TTS/Image/Veo thật (2026-08-12)
+
+Người dùng phản hồi 4 việc sau khi dùng thử M2. Đã lập plan qua Claude Code plan mode
+trước khi code (approve trước khi implement) do đây là đổi kiến trúc thật, không chỉ
+thêm tính năng nhỏ.
+
+### 15.1 Sinh asset thật chuyển từ Render Studio sang Visual Studio
+
+Tin tốt: kiến trúc `app/render/engine.py`/`render.json`/`BackgroundTasks` ở M2 đã đúng
+sẵn — thứ DUY NHẤT sai là `POST /render/start` chặn bằng
+`if p.status not in READY_STATUSES` (chỉ cho phép SAU Gate #2). Xoá điều kiện này
+(chỉ cần có `shots`) là gọi được ngay từ Visual Studio (status lúc đó là
+`"generating"`, step 3, TRƯỚC Gate #2) — không cần viết lại engine.py, không đổi tên
+endpoint `/render/*`. Đã hỏi & xác nhận với người dùng: **Render Studio chỉ còn giữ
+lại bước ghép MP4** — thêm status gate (`READY_STATUSES`) vào `POST /render/assemble`
+(trước đó KHÔNG có gate nào) để ghép vẫn chỉ làm được sau Gate #2, đúng vai trò còn
+lại (xuất thành phẩm ở Output Center, tách khỏi "duyệt nội dung" ở Visual Studio).
+
+Frontend: `VisualStudio.tsx` port nguyên UI per-shot của `RenderStudio.tsx` cũ (preview
+thật, badge trạng thái, nút Duyệt) vào — 2 nút cũ "Tạo lại Visual"/"Tạo lại giọng đọc"
+(chỉ sửa PROMPT text qua LLM) đổi tên "✎ Viết lại mô tả bằng AI" để không nhầm với nút
+sinh asset THẬT mới ("Tạo ảnh/video"/"Tạo giọng đọc"). `RenderStudio.tsx` cắt còn
+~90 dòng (từ ~200) — chỉ đọc `render/status` tóm tắt + nút Ghép MP4 + preview/tải.
+
+### 15.2 Fallback provider THẬT cho tts/image/video
+
+`ProviderConfig.is_fallback` trước đó chỉ là cờ DB, KHÔNG có logic nào đọc — đặt
+"Fallback" ở Cài đặt không có tác dụng gì (xác nhận bằng cách grep toàn backend,
+`is_fallback` chỉ xuất hiện ở model + CRUD router, không ở `factory.py`/pipeline nào).
+
+Thêm `factory.py::get_tts_chain()`/`get_image_chain()`/`get_video_chain()` — trả về
+danh sách provider ĐÃ KHỞI TẠO theo thứ tự ưu tiên (`_candidate_configs()`: default
+trước, fallback sau nếu có VÀ khác default). `app/render/engine.py` (2 hàm generate)
++ `app/routers/pack.py::generate_thumbnail` thử LẦN LƯỢT từng provider, dừng ở provider
+đầu tiên thành công; lỗi TẤT CẢ mới báo, gộp lý do từng lần thử. Phạm vi: **chỉ
+tts/image/video** — `get_llm()` có 7+ điểm gọi rải khắp `pipeline/generation.py`, để
+riêng sau nếu cần (rủi ro đổi lớn hơn lợi ích ngay lúc này).
+
+Vì fallback chain có thể rơi vào provider KHÁC HÃNG (VD default OpenAI Image lỗi →
+fallback Gemini Image), phải chuẩn hoá chữ ký `estimate_cost()` giữa các adapter cùng
+task (`(count, model_name="")`) để tính đúng giá theo provider THỰC SỰ THÀNH CÔNG,
+không phải provider default. Cũng phát hiện & sửa 1 bug liên quan lúc làm: TTS
+narration luôn lưu đuôi file cố định `.mp3` — ElevenLabs đúng, nhưng Gemini TTS trả
+WAV (xem 15.3), lưu sai đuôi khiến `FileResponse` đoán nhầm `Content-Type` theo phần
+mở rộng → browser phát audio có thể lỗi. Sửa bằng map `_TTS_EXT = {"elevenlabs":
+"mp3", "gemini": "wav"}`.
+
+### 15.3 Adapter thật mới: Gemini TTS, Gemini Image, Google Veo
+
+- `app/providers/tts_gemini.py`: `generateContent` + `responseModalities:["AUDIO"]`.
+  Gemini trả **PCM thô** (`inlineData`, `mimeType` dạng `audio/L16;rate=...`) — trình
+  duyệt không phát được PCM trần qua `<audio>`, phải tự bọc WAV header 44-byte
+  (`_wrap_pcm_as_wav()`, chuẩn RIFF/WAVE, không cần thư viện ngoài) trước khi lưu.
+- `app/providers/image_gemini.py`: `generateContent` + `responseModalities:["IMAGE"]`,
+  decode base64 thẳng — đơn giản hơn TTS, không cần bọc gì thêm.
+- `app/providers/video_veo.py`: **rủi ro cao nhất trong toàn bộ app** — Veo dùng
+  pattern "long-running operation" riêng của Gemini API (`predictLongRunning` → poll
+  `operations/{id}` → tải `video.uri`), khác hẳn cấu trúc REST job-polling của Sora.
+  Hoàn toàn suy luận theo tài liệu pattern chung, CHƯA verify với key thật lúc code —
+  giống Sora ở M2, cần người dùng tự thử + sửa theo lỗi thật nếu request/response lệch
+  (đã có `raise_for_status_with_body` để lộ rõ lỗi thật thay vì generic).
+- Cả 3 dùng `test_connection()` gọi `GET /v1beta/models` (miễn phí) — không tốn phí
+  sinh thử audio/ảnh/video thật mỗi lần bấm "Test" trong Cài đặt. Xoá 3 class stub
+  tương ứng khỏi `app/providers/stubs.py` (promote thành real).
+
+### 15.4 UX màn Provider AI
+
+- **Test khi thêm, không phải sau khi thêm**: `AddProviderDialog` (frontend) — sau
+  `createProvider()` gọi luôn `testProvider()`, hiện kết quả (✓/✗ + message) NGAY
+  TRONG dialog thay vì tự đóng. Nếu fail: cho sửa lại API Key + "Lưu & Test lại" ngay
+  tại chỗ (không bắt đóng dialog rồi tìm nút Sửa ở thẻ). Nút "Đóng"/"Xong" luôn có —
+  test fail KHÔNG có nghĩa là không lưu provider, chỉ cảnh báo. Nút "Test" ở từng thẻ
+  vẫn giữ nguyên (re-verify sau này, VD xoay key/hết quota).
+- **Sửa bug: không sửa được API key**: khối "API Key" cũ dùng `<input readOnly>` LUÔN
+  LUÔN, kể cả sau khi bấm icon "mắt" hiện chữ "(ẩn — nhập lại để đổi)" — chữ hứa hẹn
+  sửa được nhưng input vẫn `readOnly`, không có cách nào thực sự đổi key sau khi tạo
+  provider. Thay bằng nút "Sửa" bật `<input type="password">` THẬT SỰ nhập được + nút
+  Lưu (`patchProvider(id, {api_key})`)/Hủy.
+- **Sửa bug liên quan phát hiện lúc sửa**: khối hiển thị/sửa API Key trước đó bị ẩn
+  hoàn toàn với `group === "video" || group === "image"` (`{group !== "video" &&
+  group !== "image" && (...)}`) — nghĩa là card provider Image/Video KHÔNG BAO GIỜ
+  hiện được API key, dù mọi provider Image/Video đều là `cloud_api` cần key (bug tồn
+  tại từ trước M2, không ai phát hiện vì Image/Video chưa thực thi thật để cần sửa
+  key). Xoá điều kiện thừa này — API key hiện/sửa được cho MỌI task cloud_api.
+
+### 15.5 Kiểm thử & xác nhận thật
+
+`backend/tests/test_render.py` bổ sung: `test_render_start_works_from_visual_studio_before_gate2`
+(xác nhận đúng thay đổi chính — gọi được TRƯỚC Gate #2), `test_assemble_requires_gate2`
+(xác nhận gate dời đúng chỗ), `test_image_fallback_used_when_default_fails` (default
+OpenAI Image trả 401 → fallback Gemini Image được dùng, `visual_provider == "gemini"`
+— xác nhận fallback THẬT hoạt động, không chỉ code compile), `test_gemini_tts_wraps_pcm_as_wav`,
+`test_gemini_image_decodes_base64`, `test_veo_start_and_poll_downloads_video`,
+`test_veo_poll_not_done_returns_no_bytes`, `test_gemini_and_veo_test_connection_via_api`.
+Tổng **125 test, tất cả pass** (117 cũ + 8 mới). Frontend typecheck sạch.
+
+Verify thật qua API (không tốn phí, mock hết HTTP qua `respx`): xác nhận `render/start`
+trả 200 khi `project.status == "generating"` (trước đây 400) và `render/assemble` trả
+400 đúng lúc chưa qua Gate #2 (trước đây không gate gì). Đã restart backend dev +
+Electron để xác nhận sống trên app đang chạy.
+
 ## 6. File specs đã cập nhật
 
 `02_database.md`, `03_api.md`, `04_data_schemas.md`, `05_ai_providers.md`, `06_uiux.md`, `07_prompt_templates.md`, `09_sprint_tasks.md` — mỗi chỗ lệch đánh dấu bằng blockquote `> **Đã build...`, giữ nguyên nội dung gốc bên cạnh để thấy được ý định ban đầu vs. thực tế.

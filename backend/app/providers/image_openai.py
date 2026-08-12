@@ -48,5 +48,8 @@ class OpenAIImageProvider(ImageProvider):
             return ProviderStatus(ok=False, message=str(e))
 
 
-def estimate_cost(image_count: int) -> float:
+def estimate_cost(image_count: int, model_name: str = "") -> float:
+    # model_name nhận cho ĐỒNG NHẤT chữ ký với estimate_cost() các adapter khác (image_gemini.py)
+    # — engine.py gọi chung 1 cách bất kể fallback chain rơi vào provider nào. Chưa có
+    # bảng giá theo model cho OpenAI Image (1 mức cố định), tham số này hiện bỏ qua.
     return image_count * PRICE_PER_IMAGE
