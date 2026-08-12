@@ -48,7 +48,7 @@ M1 (MVP) đã được build theo design Nocturne (`StudioFlow Prototype.dc.html
 
 ### Chạy dự án (dev)
 
-Yêu cầu: Node.js 18+, Python 3.11+. Muốn dùng **Render Studio** (M2 — ghép MP4 từ asset đã sinh) cần cài thêm **ffmpeg** và có sẵn trên `PATH` (`ffmpeg -version` chạy được từ terminal) — không bắt buộc cho phần còn lại của app.
+Yêu cầu: Node.js 18+, Python 3.11+. Muốn dùng **Render Studio** (M2 — ghép MP4 từ asset đã sinh) cần cài thêm **ffmpeg** và có sẵn trên `PATH` (`ffmpeg -version` chạy được từ terminal) — không bắt buộc cho phần còn lại của app. `ffprobe` (đi kèm cùng bộ cài ffmpeg) dùng để đo thời lượng giọng đọc thật cho thống kê ở Pack Review — thiếu cũng không chặn app, thống kê chỉ hiện "—".
 
 ```bash
 # 1. Backend (tạo venv lần đầu, seed dữ liệu demo tự động)

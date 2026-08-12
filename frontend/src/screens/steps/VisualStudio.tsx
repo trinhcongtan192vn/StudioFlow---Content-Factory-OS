@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../../api/client";
 import type { RenderState, Shot, ShotRenderStatus } from "../../api/types";
 import AiErrorBanner from "../../components/AiErrorBanner";
+import { computeEstimatedStats } from "../../components/packStats";
+import StatsBar from "../../components/StatsBar";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 
@@ -114,7 +116,12 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
     <div>
       <StepHeader
         title="Visual Studio"
-        description="Viết mô tả, sinh ảnh/video và giọng đọc THẬT cho từng shot — theo đúng đoạn script tương ứng. Duyệt shot sau khi sinh xong, ghép MP4 ở Output Center."
+        description={
+          <>
+            Viết mô tả, sinh ảnh/video và giọng đọc THẬT cho từng shot — theo đúng đoạn script tương ứng. Duyệt shot sau khi sinh xong, ghép MP4 ở Output Center.
+            <StatsBar {...computeEstimatedStats(pack)} />
+          </>
+        }
         actions={
           <>
             <button className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 12px" }} onClick={startAssetGeneration} disabled={startingRender || hasInFlight}>

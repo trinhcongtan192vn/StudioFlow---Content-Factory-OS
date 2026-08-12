@@ -330,6 +330,26 @@ def test_veo_poll_not_done_returns_no_bytes():
     assert data is None
 
 
+def test_probe_audio_duration_invalid_file_returns_none(tmp_path):
+    """File không phải audio thật (VD FAKE_MP3 dùng trong test khác) — ffprobe (nếu có
+    cài) sẽ lỗi parse, hàm phải trả None thay vì raise, không được chặn việc lưu
+    narration_asset_path/ready ở generate_narration_asset()."""
+    from app.render.engine import _probe_audio_duration_sec
+
+    fake = tmp_path / "fake.mp3"
+    fake.write_bytes(FAKE_MP3)
+    assert _probe_audio_duration_sec(fake) is None
+
+
+def test_probe_audio_duration_missing_ffprobe_returns_none(tmp_path, monkeypatch):
+    from app.render import engine
+
+    monkeypatch.setattr(engine.shutil, "which", lambda name: None)
+    fake = tmp_path / "fake.wav"
+    fake.write_bytes(FAKE_WAV)
+    assert engine._probe_audio_duration_sec(fake) is None
+
+
 @respx.mock
 def test_gemini_and_veo_test_connection_via_api(client):
     """Test connection thật qua endpoint /providers/{id}/test cho 3 provider mới —

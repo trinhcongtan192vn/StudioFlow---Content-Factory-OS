@@ -263,6 +263,7 @@ export interface ShotRenderStatus {
   narration_asset_path: string | null;
   narration_provider: string | null;
   narration_error: string | null;
+  narration_duration_sec: number | null;
 }
 export interface RenderState {
   project_id: string;

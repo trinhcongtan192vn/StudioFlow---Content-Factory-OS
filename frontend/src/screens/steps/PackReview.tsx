@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../../api/client";
+import type { RenderState } from "../../api/types";
+import { computeRealStats } from "../../components/packStats";
+import StatsBar from "../../components/StatsBar";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 
@@ -63,11 +66,21 @@ export default function PackReview({ project, pack, refresh, busy, setBusy }: St
   const [generatingThumb, setGeneratingThumb] = useState(false);
   const [thumbError, setThumbError] = useState<string | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
+  const [renderState, setRenderState] = useState<RenderState | null>(null);
 
   useEffect(() => {
     setDescription(pack.youtube_meta?.description || "");
     setThumbDesc(pack.youtube_meta?.thumbnail_description || "");
   }, [pack.youtube_meta?.description, pack.youtube_meta?.thumbnail_description]);
+
+  useEffect(() => {
+    api
+      .getRenderStatus(project.id)
+      .then(setRenderState)
+      .catch(() => {
+        /* chưa từng sinh asset — bỏ qua, thời lượng thật hiện "—" */
+      });
+  }, [project.id]);
 
   function saveYoutubeMeta(patch: Partial<NonNullable<typeof pack.youtube_meta>>) {
     if (!pack.youtube_meta) return;
@@ -131,6 +144,7 @@ export default function PackReview({ project, pack, refresh, busy, setBusy }: St
     <div>
       <StepHeader
         title="Pack Review"
+        description={<StatsBar {...computeRealStats(pack, renderState)} />}
         actions={
           <>
             <button className="btn btn-primary" disabled={gate2Approved || busy} onClick={approve}>

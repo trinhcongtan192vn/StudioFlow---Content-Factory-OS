@@ -26,6 +26,7 @@ class ShotRenderStatus(BaseModel):
     narration_asset_path: Optional[str] = None
     narration_provider: Optional[str] = None
     narration_error: Optional[str] = None
+    narration_duration_sec: Optional[float] = None  # đo thật qua ffprobe — dùng cho thời lượng video THỰC ở Pack Review
 
 
 class RenderState(BaseModel):

@@ -225,9 +225,10 @@ RenderState
     visual_error: string | null
     approved: bool                        # human review — bắt buộc trước khi ghép
     narration_status: "pending" | "generating" | "ready" | "error"
-    narration_asset_path: string | null   # assets/<shot_id>.mp3 — TTS hoá script.body[].audio (lời thoại thật)
+    narration_asset_path: string | null   # assets/<shot_id>.{mp3|wav} — TTS hoá script.body[].audio (lời thoại thật)
     narration_provider: string | null
     narration_error: string | null
+    narration_duration_sec: float | null  # đo THẬT qua ffprobe khi sinh xong — dùng cho thời lượng video thật ở Pack Review
   assembly_status: "not_started" | "assembling" | "done" | "error"
   assembly_error: string | null
   final_video_path: string | null         # renders/final.mp4 sau khi ghép xong

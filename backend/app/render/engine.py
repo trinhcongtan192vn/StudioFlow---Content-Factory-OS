@@ -8,6 +8,8 @@ request thread, vì video (Sora) có thể mất vài phút để hoàn tất.
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import time
 
 from sqlalchemy.orm import Session
@@ -41,6 +43,25 @@ _TTS_COST_FN = {"elevenlabs": estimate_elevenlabs_tts_cost, "gemini": estimate_g
 # đuôi file SAI khiến FileResponse (app/routers/render.py::get_shot_asset) đoán nhầm
 # Content-Type theo phần mở rộng, browser phát âm thanh có thể lỗi.
 _TTS_EXT = {"elevenlabs": "mp3", "gemini": "wav"}
+
+
+def _probe_audio_duration_sec(path) -> float | None:
+    """Đo thời lượng thật (giây) của 1 file audio qua ffprobe — dùng cho thời lượng
+    video THỰC ở Pack Review (khác thời lượng ước tính từ timestamp kịch bản ở Script/
+    Visual Studio). Không bắt buộc cài ffprobe cho phần còn lại của app (giống ffmpeg
+    ở assembly.py) — lỗi/thiếu binary chỉ bỏ qua, trả None, KHÔNG chặn việc sinh giọng
+    đọc."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, check=True, text=True, timeout=15,
+        )
+        return float(result.stdout.strip())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _render_path(pdir):
@@ -264,6 +285,7 @@ def generate_narration_asset(db: Session, p: Project, pdir, beat: dict, status: 
             write_bytes(path, data)
             status.narration_asset_path = str(path)
             status.narration_provider = provider.provider_name
+            status.narration_duration_sec = _probe_audio_duration_sec(path)
             status.narration_status = "ready"
             status.narration_error = None
             cost = _TTS_COST_FN.get(provider.provider_name, estimate_elevenlabs_tts_cost)(len(text), getattr(provider, "model_name", ""))

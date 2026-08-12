@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../../api/client";
 import type { RenderState } from "../../api/types";
 import AiErrorBanner from "../../components/AiErrorBanner";
+import { computeEstimatedStats } from "../../components/packStats";
+import StatsBar from "../../components/StatsBar";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 
@@ -176,6 +178,7 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
           <>
             Master Production Script — Âm thanh / Hình ảnh / Chỉ dẫn, theo timeline.
             {warningCount > 0 && <span style={{ marginLeft: 8 }}>· {warningCount} cảnh báo</span>}
+            {hasBody && <StatsBar {...computeEstimatedStats(pack)} />}
           </>
         }
         actions={
