@@ -96,3 +96,76 @@ class SoraVideoProvider(VideoProvider, NotImplementedMixin):
 
     def test_connection(self) -> ProviderStatus:
         return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — render video thật sẽ mở ở M2")
+
+
+# ---------------------------------------------------------------------------
+# TTS/Image/Video của OpenAI & Google Gemini (§05 — bổ sung theo yêu cầu người
+# dùng: cùng 1 provider công nghệ (OpenAI/Gemini) có thể vừa là LLM (task=llm)
+# vừa là TTS/Image ở đây (task=tts/image, cùng provider_name="openai"/"gemini",
+# khác API key/model riêng theo từng task). Anthropic KHÔNG có sản phẩm TTS/Image/
+# Video công khai (Claude chỉ nhận ảnh làm input qua vision, không sinh ảnh/audio/
+# video) nên không có adapter tương ứng.
+# ---------------------------------------------------------------------------
+class OpenAITTSProvider(TTSProvider, NotImplementedMixin):
+    provider_name = "openai"
+
+    def __init__(self, api_key: str = ""):
+        self.api_key = api_key
+
+    def synthesize(self, text: str, *, emotion: str = "") -> bytes:
+        self._not_implemented("OpenAI TTS synthesize")
+
+    def test_connection(self) -> ProviderStatus:
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh giọng đọc thật sẽ mở ở M2")
+
+
+class GeminiTTSProvider(TTSProvider, NotImplementedMixin):
+    provider_name = "gemini"
+
+    def __init__(self, api_key: str = ""):
+        self.api_key = api_key
+
+    def synthesize(self, text: str, *, emotion: str = "") -> bytes:
+        self._not_implemented("Gemini TTS synthesize")
+
+    def test_connection(self) -> ProviderStatus:
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh giọng đọc thật sẽ mở ở M2")
+
+
+class OpenAIImageProvider(ImageProvider, NotImplementedMixin):
+    provider_name = "openai"
+
+    def __init__(self, api_key: str = ""):
+        self.api_key = api_key
+
+    def generate(self, prompt: str) -> bytes:
+        self._not_implemented("OpenAI (GPT Image) generate")
+
+    def test_connection(self) -> ProviderStatus:
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh ảnh thật sẽ mở ở M2")
+
+
+class GeminiImageProvider(ImageProvider, NotImplementedMixin):
+    provider_name = "gemini"
+
+    def __init__(self, api_key: str = ""):
+        self.api_key = api_key
+
+    def generate(self, prompt: str) -> bytes:
+        self._not_implemented("Gemini (Nano Banana) image generate")
+
+    def test_connection(self) -> ProviderStatus:
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh ảnh thật sẽ mở ở M2")
+
+
+class VeoVideoProvider(VideoProvider, NotImplementedMixin):
+    provider_name = "veo"
+
+    def __init__(self, api_key: str = ""):
+        self.api_key = api_key
+
+    def generate(self, prompt: str) -> bytes:
+        self._not_implemented("Google Veo video generate")
+
+    def test_connection(self) -> ProviderStatus:
+        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — render video thật sẽ mở ở M2")

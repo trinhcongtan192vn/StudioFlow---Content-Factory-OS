@@ -237,9 +237,28 @@ Danh sách model trong `CLOUD_MODELS` (backend) / `CLOUD_CATALOG` (frontend) đ�
 
 Cập nhật: `backend/app/routers/providers.py` (`CLOUD_MODELS`), `frontend/src/screens/settings/ProviderSettings.tsx` (`CLOUD_CATALOG`) — 2 nơi phải khớp nhau. Đồng thời phát hiện thêm 1 vấn đề liên quan trong lúc rà soát: cả 3 adapter (`app/providers/claude.py`/`openai_provider.py`/`gemini.py`) trước đó tính `estimated_cost_usd` bằng 1 mức giá CỐ ĐỊNH DUY NHẤT bất kể model nào đang cấu hình (VD Claude luôn tính $3/$15 dù đang dùng Opus $5/$25 hay Haiku $1/$5) — sai số lớn cho tính năng Chi phí & Ngân sách. Thêm dict `PRICING: dict[model_name, (price_in, price_out)]` cho từng adapter (khớp bảng giá chính thức ở trên, gồm cả vài model thế hệ trước còn dùng được) + `DEFAULT_PRICING` làm fallback khi model không có trong bảng (model snapshot cũ/tự nhập), cost tính theo đúng model đang cấu hình. Default `model_name` của từng adapter khi tạo mới cũng đổi sang tier "cân bằng" hiện tại (`claude-sonnet-5`/`gpt-5.6-terra`/`gemini-3.6-flash`).
 
-**Chưa cập nhật (ngoài phạm vi vòng này):** danh sách model TTS/Image/Video (`elevenlabs`, `vbee`, `flux`, `midjourney`, `runway`, `sora`) — các nhóm này chỉ khai báo interface, chưa dùng thật ở M1 (§05 mục 9), nên không research lại lần này; để làm khi bắt đầu M2 (render thật).
+**Chưa cập nhật ở vòng này:** danh sách model của `elevenlabs`/`vbee`/`flux`/`midjourney`/`runway` — không research lại lần này (giữ nguyên); OpenAI/Gemini cho tts/image/video đã bổ sung ở vòng 7 (mục 12 dưới đây).
 
 Verify: tạo 1 provider Claude qua API thật (không truyền `model_name`) → xác nhận `model_name` mặc định trả về là `claude-opus-5` (model đầu danh sách mới) và `available_models` đúng 4 model mới; dọn provider tạm sau khi test. Restart lại backend dev (8756) + Electron (backend con của Electron không tự nhận code mới vì chạy `uvicorn` không có `--reload`) để code mới thật sự có hiệu lực trên app đang chạy. Tổng vẫn **103 test, tất cả pass**, frontend typecheck sạch.
+
+## 12. Cập nhật vòng 7 (2026-08-12) — Bổ sung provider TTS/Image/Video của OpenAI & Gemini
+
+Yêu cầu: bổ sung provider AI từ các model của Gemini, OpenAI và Anthropic (nếu có) cho `tts`/`image`/`video` — trước đó 3 task này chỉ có Vbee/ElevenLabs (tts), Flux/Midjourney (image), Runway/Sora (video); dù `specs/05_ai_providers.md` mục 1 đã liệt kê ý định "Gemini TTS"/"Gemini (Veo)" từ trước, chưa từng build.
+
+**Research** (tài liệu chính thức, đối chiếu 2026-08-12 — không dùng số liệu trang tổng hợp giá bên thứ 3):
+- **Anthropic:** xác nhận KHÔNG có sản phẩm TTS/Image/Video công khai — Claude chỉ nhận ảnh làm input qua vision, không sinh ảnh/audio/video. Không có adapter Anthropic cho 3 task này.
+- **OpenAI:** TTS — `gpt-4o-mini-tts`, `tts-1-hd`, `tts-1`; Image — `gpt-image-2` (mới nhất), `gpt-image-1-mini` (rẻ); Video (Sora) — `sora-2`, `sora-2-pro` (danh sách Sora cũ `sora-1` đã lỗi thời, cập nhật lại).
+- **Google Gemini:** TTS — `gemini-3.1-flash-tts-preview`, `gemini-2.5-pro-preview-tts`, `gemini-2.5-flash-preview-tts`; Image (Nano Banana) — `gemini-3-pro-image`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image`; Video (Veo) — `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`.
+
+**Vấn đề kỹ thuật cần xử lý:** OpenAI và Gemini đã có mặt ở nhóm `llm` với model list riêng — cùng `provider_name` ("openai"/"gemini") nhưng khác `task` (tts/image) cần model list KHÁC NHAU. `CLOUD_MODELS` cũ chỉ tra theo `provider_name` (1 danh sách/provider, không phân biệt task) nên không đủ. Thêm `CLOUD_MODELS_BY_TASK: dict[(task, provider_name), list[str]]` trong `backend/app/routers/providers.py`, tra theo cặp `(task, provider_name)` trước, fallback về `CLOUD_MODELS` (tra theo `provider_name` — dùng cho `llm` và các provider chỉ có 1 task như Flux/Runway).
+
+**Thay đổi:**
+- `backend/app/providers/stubs.py`: thêm `OpenAITTSProvider`, `GeminiTTSProvider`, `OpenAIImageProvider`, `GeminiImageProvider`, `VeoVideoProvider` — cùng pattern `NotImplementedMixin` như các adapter TTS/Image/Video khác (chưa thực thi sinh asset thật ở M1, `test_connection()` chỉ kiểm tra đã lưu API key).
+- `backend/app/routers/providers.py`: đăng ký adapter mới vào `_TTS_ADAPTERS`/`_IMAGE_ADAPTERS`/`_VIDEO_ADAPTERS`; thêm `CLOUD_MODELS_BY_TASK` + hàm `_cloud_models_for(task, provider_name)`; cập nhật `sora` sang `["sora-2", "sora-2-pro"]`.
+- `frontend/src/screens/settings/ProviderSettings.tsx`: thêm 2 mục "OpenAI TTS"/"Gemini TTS" vào nhóm `tts`, "OpenAI Image (GPT Image)"/"Gemini Image (Nano Banana)" vào nhóm `image`, "Google Veo" vào nhóm `video` (giữ nguyên "Sora (OpenAI)" — chỉ đổi model list).
+- `specs/05_ai_providers.md` mục 1: cập nhật bảng provider theo task khớp thực tế.
+
+Verify: tạo 6 provider tạm (mỗi task tts/image/video × openai/gemini, cộng cả veo và sora) qua API thật → xác nhận `model_name` mặc định + `available_models` đúng theo `(task, provider_name)`, gọi `/providers/{id}/test` cho cả 6 → đều trả `ok:true`; dọn hết provider tạm sau khi test. Restart backend dev (8756) + Electron để code mới có hiệu lực. Tổng vẫn **103 test, tất cả pass**, frontend typecheck sạch.
 
 ## 6. File specs đã cập nhật
 

@@ -11,10 +11,15 @@ from app.providers.factory import build_llm_provider
 from app.providers.stubs import (
     ElevenLabsTTSProvider,
     FluxImageProvider,
+    GeminiImageProvider,
+    GeminiTTSProvider,
     MidjourneyImageProvider,
+    OpenAIImageProvider,
+    OpenAITTSProvider,
     RunwayVideoProvider,
     SoraVideoProvider,
     VbeeTTSProvider,
+    VeoVideoProvider,
 )
 
 router = APIRouter(tags=["providers"])
@@ -34,8 +39,23 @@ CLOUD_MODELS = {
     "flux": ["flux-1.1-pro", "flux-schnell"],
     "midjourney": ["v6"],
     "runway": ["gen-4", "gen-3-alpha"],
-    "sora": ["sora-1"],
+    "sora": ["sora-2", "sora-2-pro"],
 }
+
+# OpenAI/Gemini xuất hiện ở NHIỀU task khác nhau (llm ở trên + tts/image ở dưới) —
+# cùng provider_name nhưng model list riêng theo task, tra theo (task, provider_name).
+# Anthropic không có model TTS/Image/Video công khai nên không có mục nào ở đây.
+CLOUD_MODELS_BY_TASK = {
+    ("tts", "openai"): ["gpt-4o-mini-tts", "tts-1-hd", "tts-1"],
+    ("tts", "gemini"): ["gemini-3.1-flash-tts-preview", "gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts"],
+    ("image", "openai"): ["gpt-image-2", "gpt-image-1-mini"],
+    ("image", "gemini"): ["gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"],
+    ("video", "veo"): ["veo-3.1-generate-preview", "veo-3.1-fast-generate-preview"],
+}
+
+
+def _cloud_models_for(task: str, provider_name: str) -> list[str]:
+    return CLOUD_MODELS_BY_TASK.get((task, provider_name)) or CLOUD_MODELS.get(provider_name, [])
 
 
 def _out(pv: ProviderConfig) -> dict:
@@ -80,7 +100,7 @@ def create_provider(body: ProviderCreate, db: Session = Depends(get_db)):
         raise HTTPException(400, "connection_type phải là cloud_api hoặc local_endpoint")
     if body.connection_type == "local_endpoint" and body.task != "llm":
         raise HTTPException(400, "Local Endpoint hiện chỉ áp dụng cho LLM (§05 mục 9 / §10.2b PRD)")
-    models = CLOUD_MODELS.get(body.provider_name, [])
+    models = _cloud_models_for(body.task, body.provider_name)
     pv = ProviderConfig(
         task=body.task,
         provider_name=body.provider_name,
@@ -149,9 +169,9 @@ def delete_provider(provider_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-_TTS_ADAPTERS = {"vbee": VbeeTTSProvider, "elevenlabs": ElevenLabsTTSProvider}
-_IMAGE_ADAPTERS = {"flux": FluxImageProvider, "midjourney": MidjourneyImageProvider}
-_VIDEO_ADAPTERS = {"runway": RunwayVideoProvider, "sora": SoraVideoProvider}
+_TTS_ADAPTERS = {"vbee": VbeeTTSProvider, "elevenlabs": ElevenLabsTTSProvider, "openai": OpenAITTSProvider, "gemini": GeminiTTSProvider}
+_IMAGE_ADAPTERS = {"flux": FluxImageProvider, "midjourney": MidjourneyImageProvider, "openai": OpenAIImageProvider, "gemini": GeminiImageProvider}
+_VIDEO_ADAPTERS = {"runway": RunwayVideoProvider, "sora": SoraVideoProvider, "veo": VeoVideoProvider}
 
 
 @router.post("/providers/{provider_id}/test")

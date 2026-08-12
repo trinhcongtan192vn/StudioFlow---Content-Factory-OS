@@ -19,14 +19,19 @@ const CLOUD_CATALOG: Record<string, { provider_name: string; display_name: strin
   tts: [
     { provider_name: "vbee", display_name: "Vbee", models: ["vbee-female-01", "vbee-male-01"] },
     { provider_name: "elevenlabs", display_name: "ElevenLabs", models: ["eleven_v3", "eleven_turbo"] },
+    { provider_name: "openai", display_name: "OpenAI TTS", models: ["gpt-4o-mini-tts", "tts-1-hd", "tts-1"] },
+    { provider_name: "gemini", display_name: "Gemini TTS", models: ["gemini-3.1-flash-tts-preview", "gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts"] },
   ],
   image: [
     { provider_name: "flux", display_name: "Flux", models: ["flux-1.1-pro", "flux-schnell"] },
     { provider_name: "midjourney", display_name: "Midjourney", models: ["v6"] },
+    { provider_name: "openai", display_name: "OpenAI Image (GPT Image)", models: ["gpt-image-2", "gpt-image-1-mini"] },
+    { provider_name: "gemini", display_name: "Gemini Image (Nano Banana)", models: ["gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"] },
   ],
   video: [
     { provider_name: "runway", display_name: "Runway", models: ["gen-4", "gen-3-alpha"] },
-    { provider_name: "sora", display_name: "Sora", models: ["sora-1"] },
+    { provider_name: "sora", display_name: "Sora (OpenAI)", models: ["sora-2", "sora-2-pro"] },
+    { provider_name: "veo", display_name: "Google Veo", models: ["veo-3.1-generate-preview", "veo-3.1-fast-generate-preview"] },
   ],
 };
 

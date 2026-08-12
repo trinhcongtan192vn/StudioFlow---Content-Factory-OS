@@ -6,10 +6,24 @@ Provider AI ẩn sau **một interface chung**. Pipeline không biết đang g�
 
 | Task | Provider hỗ trợ | Mặc định đề xuất |
 |---|---|---|
-| `llm` | Claude (Anthropic), Gemini (Google), OpenAI (GPT), **+ Local**: Qwen, DeepSeek, Kimi | Claude |
-| `tts` | Vbee, ElevenLabs, Gemini TTS | Vbee |
-| `image` | Flux, Midjourney | Flux |
-| `video` (M2) | Runway, Sora, Gemini (Veo) | Runway |
+| `llm` | Claude (Anthropic), Gemini (Google), OpenAI (GPT), **+ Local**: Qwen, DeepSeek, Kimi | — (bắt buộc chọn thủ công, xem §8b) |
+| `tts` | Vbee, ElevenLabs, OpenAI TTS, Gemini TTS | Vbee |
+| `image` | Flux, Midjourney, OpenAI (GPT Image), Gemini (Nano Banana) | Flux |
+| `video` (M2) | Runway, Sora (OpenAI), Google Veo | Runway |
+
+> **Đã build vòng 7 (2026-08-12):** bổ sung provider TTS/Image/Video của OpenAI và
+> Gemini (`provider_name: "openai"`/`"gemini"` — CÙNG provider_name với `llm` nhưng
+> khác `task`, khác model list riêng — tra theo cặp `(task, provider_name)` trong
+> `CLOUD_MODELS_BY_TASK`, xem `backend/app/routers/providers.py`). **Anthropic
+> (Claude) không có sản phẩm TTS/Image/Video công khai** — chỉ nhận ảnh làm input qua
+> vision, không sinh ảnh/audio/video — nên không có adapter Anthropic ở 3 task này,
+> chỉ có ở `llm`. Model cụ thể + giá: xem `backend/app/routers/providers.py`
+> (`CLOUD_MODELS`/`CLOUD_MODELS_BY_TASK`) — đối chiếu tài liệu chính thức
+> `developers.openai.com/api/docs/pricing` và `ai.google.dev/gemini-api/docs/pricing`
+> 2026-08-12. Cũng như adapter LLM (§8b), các adapter này CHƯA thực thi sinh asset
+> thật ở M1 (`app/providers/stubs.py` — `NotImplementedMixin`), chỉ lưu key + test
+> kết nối (`test_connection()` trả `ok=True` khi có key, không gọi API thật) để chuẩn
+> bị sẵn cho M2.
 
 ## 2. Hai loại kết nối
 
