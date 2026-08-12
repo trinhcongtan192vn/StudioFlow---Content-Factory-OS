@@ -1,6 +1,6 @@
 import httpx
 
-from app.providers.base import LLMMessage, LLMProvider, LLMResult, ProviderStatus
+from app.providers.base import LLMMessage, LLMProvider, LLMResult, ProviderStatus, raise_for_status_with_body
 
 API_URL = "https://api.anthropic.com/v1/messages"
 
@@ -46,7 +46,7 @@ class ClaudeProvider(LLMProvider):
         }
         with httpx.Client(timeout=120) as client:
             resp = client.post(API_URL, headers=self._headers(), json=body)
-            resp.raise_for_status()
+            raise_for_status_with_body(resp)
             data = resp.json()
         text = "".join(b.get("text", "") for b in data.get("content", []))
         usage = data.get("usage", {})

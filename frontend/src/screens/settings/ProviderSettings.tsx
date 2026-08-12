@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../../api/client";
+import { api, ApiError } from "../../api/client";
 import type { ProviderOut } from "../../api/types";
 
 const GROUPS = ["llm", "tts", "image", "video"] as const;
@@ -40,6 +40,8 @@ export default function ProviderSettings() {
   const [providers, setProviders] = useState<ProviderOut[]>([]);
   const [addOpen, setAddOpen] = useState(false);
   const [revealed, setRevealed] = useState<Record<number, boolean>>({});
+  const [testing, setTesting] = useState<Record<number, boolean>>({});
+  const [testResult, setTestResult] = useState<Record<number, { ok: boolean; message: string }>>({});
 
   async function load() {
     setProviders(await api.listProviders());
@@ -54,8 +56,16 @@ export default function ProviderSettings() {
 
   async function test(id: number) {
     setProviders((ps) => ps.map((p) => (p.id === id ? { ...p, status: "untested" } : p)));
-    await api.testProvider(id);
-    await load();
+    setTesting((t) => ({ ...t, [id]: true }));
+    try {
+      const result = await api.testProvider(id);
+      setTestResult((r) => ({ ...r, [id]: result }));
+    } catch (e) {
+      setTestResult((r) => ({ ...r, [id]: { ok: false, message: e instanceof ApiError ? e.message : "Có lỗi khi test kết nối." } }));
+    } finally {
+      setTesting((t) => ({ ...t, [id]: false }));
+      await load();
+    }
   }
 
   async function setDefault(id: number) {
@@ -143,8 +153,8 @@ export default function ProviderSettings() {
                 </span>
               </div>
               <div style={{ display: "flex", gap: 4 }}>
-                <button className="btn btn-secondary" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => test(pv.id)}>
-                  Test
+                <button className="btn btn-secondary" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => test(pv.id)} disabled={testing[pv.id]}>
+                  {testing[pv.id] ? "Đang test..." : "Test"}
                 </button>
                 <button className="btn btn-icon btn-secondary" style={{ width: 28, height: 28, color: "var(--color-danger)" }} title="Xóa" onClick={() => remove(pv.id)}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -155,6 +165,21 @@ export default function ProviderSettings() {
                 </button>
               </div>
             </div>
+
+            {!testing[pv.id] && testResult[pv.id] && (
+              <div
+                style={{
+                  fontSize: 12,
+                  padding: "6px 8px",
+                  borderRadius: "var(--radius-sm)",
+                  background: testResult[pv.id].ok ? "var(--color-accent-900)" : "var(--color-danger-bg)",
+                  color: testResult[pv.id].ok ? "var(--color-accent-100)" : "var(--color-danger)",
+                }}
+              >
+                {testResult[pv.id].ok ? "✓ " : "✗ "}
+                {testResult[pv.id].message}
+              </div>
+            )}
 
             {pv.connection_type === "local_endpoint" && pv.provider_name !== "mock" ? (
               <div className="field" style={{ margin: 0 }}>

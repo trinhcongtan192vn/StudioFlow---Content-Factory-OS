@@ -92,3 +92,18 @@ class VideoProvider(ABC):
     @abstractmethod
     def test_connection(self) -> ProviderStatus:
         ...
+
+
+def raise_for_status_with_body(resp) -> None:
+    """`httpx.Response.raise_for_status()` bỏ mất response body (thường chứa lý do lỗi
+    thật — model không tồn tại, key sai quyền, hết quota...) trong message exception,
+    khiến "Test kết nối" chỉ hiện được "404 Not Found" chung chung, không đủ để tự
+    chẩn đoán. Dùng hàm này thay `resp.raise_for_status()` trực tiếp ở mọi adapter
+    cloud để `test_connection()`/lỗi pipeline luôn kèm nội dung lỗi thật từ API."""
+    if resp.status_code < 400:
+        return
+    try:
+        detail = resp.text[:500]
+    except Exception:  # noqa: BLE001
+        detail = ""
+    raise RuntimeError(f"HTTP {resp.status_code}: {detail}")

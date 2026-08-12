@@ -1,6 +1,6 @@
 import httpx
 
-from app.providers.base import LLMMessage, LLMProvider, LLMResult, ProviderStatus
+from app.providers.base import LLMMessage, LLMProvider, LLMResult, ProviderStatus, raise_for_status_with_body
 
 API_URL = "https://api.openai.com/v1/chat/completions"
 
@@ -39,7 +39,7 @@ class OpenAIProvider(LLMProvider):
         headers = {"Authorization": f"Bearer {self.api_key}", "content-type": "application/json"}
         with httpx.Client(timeout=120) as client:
             resp = client.post(API_URL, headers=headers, json=body)
-            resp.raise_for_status()
+            raise_for_status_with_body(resp)
             data = resp.json()
         text = data["choices"][0]["message"]["content"]
         usage = data.get("usage", {})

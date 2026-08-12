@@ -1,6 +1,6 @@
 import httpx
 
-from app.providers.base import LLMMessage, LLMProvider, LLMResult, ProviderStatus
+from app.providers.base import LLMMessage, LLMProvider, LLMResult, ProviderStatus, raise_for_status_with_body
 
 
 # USD / 1M token (input, output) — theo ai.google.dev/gemini-api/docs/pricing, đối
@@ -35,7 +35,7 @@ class GeminiProvider(LLMProvider):
         }
         with httpx.Client(timeout=120) as client:
             resp = client.post(self._url(), json=body)
-            resp.raise_for_status()
+            raise_for_status_with_body(resp)
             data = resp.json()
         text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
         usage = data.get("usageMetadata", {})

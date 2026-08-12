@@ -39,7 +39,7 @@ def _render_markdown(pack: dict, project_title: str) -> str:
     lines += ["", "## CTA", f"- {cta.get('spoken', '')} (→ {cta.get('conversion_point', 'none')})", ""]
     lines += ["## Shot List", ""]
     for s in pack.get("shots", []):
-        lines.append(f"- **{s.get('shot_id')}** [{s.get('asset_type')}] — {s.get('prompt')} (TTS: {s.get('tts_emotion', '')})")
+        lines.append(f"- **{s.get('shot_id')}** [{s.get('asset_type')}] — {s.get('visual_fx', '')} (Audio/SFX: {s.get('audio_sfx', '')})")
     lines += ["", "## Titles", ""]
     for t in pack.get("titles", []):
         lines.append(f"- {t.get('text')} ({t.get('angle', '')})")
