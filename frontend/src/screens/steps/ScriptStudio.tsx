@@ -1,5 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../../api/client";
+import type { RenderState } from "../../api/types";
 import AiErrorBanner from "../../components/AiErrorBanner";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
@@ -13,8 +14,89 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
   const [aiError, setAiError] = useState<string | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
 
+  const [renderState, setRenderState] = useState<RenderState | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [activeShotId, setActiveShotId] = useState<string | null>(null);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [playQueue, setPlayQueue] = useState<string[]>([]);
+  const [isPlayingAll, setIsPlayingAll] = useState(false);
+
+  useEffect(() => {
+    api
+      .getRenderStatus(project.id)
+      .then(setRenderState)
+      .catch(() => {
+        /* chưa từng sinh asset — bỏ qua, coi như chưa có giọng đọc nào */
+      });
+  }, [project.id]);
+
   const hasBody = (script?.body?.length || 0) > 0;
   const showEditor = !hasBody || editingAgain;
+
+  function shotForTimestamp(ts: number | null) {
+    return pack.shots.find((s) => s.linked_timestamp_sec === ts);
+  }
+
+  function narrationStatusFor(shotId: string | undefined) {
+    if (!shotId) return undefined;
+    return renderState?.shots.find((s) => s.shot_id === shotId);
+  }
+
+  function playShotAudio(shotId: string, queue: string[], all: boolean) {
+    if (!audioRef.current) return;
+    setActiveShotId(shotId);
+    setPlayQueue(queue);
+    setIsPlayingAll(all);
+    audioRef.current.src = api.renderShotAssetUrl(project.id, shotId, "narration");
+    audioRef.current.play();
+  }
+
+  function stopPlayback() {
+    audioRef.current?.pause();
+    setActiveShotId(null);
+    setPlayQueue([]);
+    setIsPlayingAll(false);
+  }
+
+  function togglePlaySingle(shotId: string) {
+    if (activeShotId === shotId && isAudioPlaying) {
+      audioRef.current?.pause();
+      return;
+    }
+    if (activeShotId === shotId && !isAudioPlaying && audioRef.current) {
+      setIsPlayingAll(false);
+      audioRef.current.play();
+      return;
+    }
+    playShotAudio(shotId, [], false);
+  }
+
+  function playAllNarration() {
+    if (isPlayingAll) {
+      stopPlayback();
+      return;
+    }
+    const ordered = (script?.body || [])
+      .map((b) => shotForTimestamp(b.timestamp_sec))
+      .filter((s) => !!s && narrationStatusFor(s.shot_id)?.narration_status === "ready")
+      .map((s) => s!.shot_id);
+    if (!ordered.length) return;
+    playShotAudio(ordered[0], ordered.slice(1), true);
+  }
+
+  function handleAudioEnded() {
+    if (playQueue.length === 0) {
+      setActiveShotId(null);
+      setIsPlayingAll(false);
+      return;
+    }
+    const [next, ...rest] = playQueue;
+    playShotAudio(next, rest, true);
+  }
+
+  const readyNarrationCount = (script?.body || []).filter(
+    (b) => narrationStatusFor(shotForTimestamp(b.timestamp_sec)?.shot_id)?.narration_status === "ready"
+  ).length;
 
   function onTextChange(v: string) {
     setFullText(v);
@@ -90,12 +172,26 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
               </button>
             </>
           ) : (
-            <button className="btn btn-primary" onClick={goVisualStudio} disabled={busy}>
-              {busy ? "Đang sinh shot..." : "Đi tới Visual Studio →"}
-            </button>
+            <>
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: 12, padding: "5px 12px" }}
+                onClick={playAllNarration}
+                disabled={!isPlayingAll && readyNarrationCount === 0}
+                title={readyNarrationCount === 0 ? "Chưa có giọng đọc nào sẵn sàng — sinh giọng đọc ở Visual Studio" : undefined}
+              >
+                {isPlayingAll ? "⏸ Dừng phát" : `▶ Nghe toàn bộ giọng đọc (${readyNarrationCount})`}
+              </button>
+              <button className="btn btn-primary" onClick={goVisualStudio} disabled={busy}>
+                {busy ? "Đang sinh shot..." : "Đi tới Visual Studio →"}
+              </button>
+            </>
           )
         }
       />
+
+      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+      <audio ref={audioRef} onEnded={handleAudioEnded} onPlay={() => setIsAudioPlaying(true)} onPause={() => setIsAudioPlaying(false)} style={{ display: "none" }} />
 
       {aiError && <AiErrorBanner message={aiError} onDismiss={() => setAiError(null)} />}
       {project.return_note && <ReturnBanner title="Đã trả về từ Pack Review:" text={project.return_note} />}
@@ -125,9 +221,13 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
             ← Quay lại chỉnh Full Script
           </a>
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "var(--space-2)", maxWidth: 900 }}>
-            {(script?.body || []).map((b, i) => (
+            {(script?.body || []).map((b, i) => {
+              const shot = shotForTimestamp(b.timestamp_sec);
+              const narration = narrationStatusFor(shot?.shot_id);
+              const isActive = !!shot && activeShotId === shot.shot_id;
+              return (
               <div key={i} className="card elev-sm" style={{ gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   {b.block_id && (
                     <span className="tag tag-outline" style={{ fontFamily: "ui-monospace,monospace" }}>
                       {b.block_id}
@@ -137,6 +237,21 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
                     {b.timestamp_sec}s{b.end_sec ? `–${b.end_sec}s` : ""}
                   </span>
                   {b.visual_type && <span className="tag tag-accent-2">{b.visual_type}</span>}
+                  {narration?.narration_status === "ready" && shot && (
+                    <button
+                      type="button"
+                      className="tag tag-accent"
+                      style={{ cursor: "pointer", border: "none" }}
+                      onClick={() => togglePlaySingle(shot.shot_id)}
+                    >
+                      {isActive && isAudioPlaying ? "⏸ Đang phát" : "▶ Nghe giọng đọc"}
+                    </button>
+                  )}
+                  {narration?.narration_status === "generating" && (
+                    <span className="tag tag-outline" style={{ fontSize: 10 }}>
+                      Đang tạo giọng đọc…
+                    </span>
+                  )}
                   {b.warning && (
                     <>
                       <span style={{ width: 6, height: 6, borderRadius: "50%", background: b.warning.severity === "red" ? "var(--color-danger)" : "var(--color-warning)" }} />
@@ -150,7 +265,8 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
                   <Col label={b.direction_label || "Direction"} value={b.direction} muted />
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </>
       )}
