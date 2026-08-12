@@ -35,4 +35,6 @@ def project_dir(channel_id: str, project_id: str) -> Path:
     d = channel_dir(channel_id) / "projects" / project_id
     d.mkdir(parents=True, exist_ok=True)
     (d / "exports").mkdir(exist_ok=True)
+    (d / "assets").mkdir(exist_ok=True)  # ảnh/audio từng shot sinh thật — M2 Production Layer
+    (d / "renders").mkdir(exist_ok=True)  # MP4 cuối cùng sau khi ghép — M2
     return d

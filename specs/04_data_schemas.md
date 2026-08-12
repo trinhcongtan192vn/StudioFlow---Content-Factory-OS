@@ -196,6 +196,35 @@ Generation" duy nhất. Để Pack vẫn là artifact trung tâm xuyên suốt t
 
 Chi tiết & lý do từng quyết định: xem `IMPLEMENTATION_REPORT.md` ở gốc repo, mục 9.
 
+## 3b. RenderState (M2, TÁCH KHỎI ProductionPack)
+
+> **Đã build 1 phần M2 (2026-08-12).** Trạng thái sinh asset thật + ghép MP4 sống
+> trong file **RIÊNG** `render.json` (`backend/app/render/schemas.py`), cố tình KHÔNG
+> phải 1 field của `ProductionPack`/`pack.json` — giữ nguyên tắc "script core ⟂
+> render module" (§09 Ràng buộc xuyên suốt). Render module chỉ ĐỌC `pack.json`
+> (`shots[]`, `script.body[]`), không bao giờ ghi lại vào đó.
+
+```
+RenderState
+  project_id: string
+  shots: ShotRenderStatus[]
+    shot_id: string
+    visual_status: "pending" | "generating" | "ready" | "error"
+    visual_asset_path: string | null      # đường dẫn file trong assets/<shot_id>.{png|mp4}
+    visual_provider: string | null
+    visual_error: string | null
+    approved: bool                        # human review — bắt buộc trước khi ghép
+    narration_status: "pending" | "generating" | "ready" | "error"
+    narration_asset_path: string | null   # assets/<shot_id>.mp3 — TTS hoá script.body[].audio (lời thoại thật)
+    narration_provider: string | null
+    narration_error: string | null
+  assembly_status: "not_started" | "assembling" | "done" | "error"
+  assembly_error: string | null
+  final_video_path: string | null         # renders/final.mp4 sau khi ghép xong
+```
+
+Chi tiết: `specs/05_ai_providers.md` §8c, `IMPLEMENTATION_REPORT.md`.
+
 ## 4. Bản người-đọc (export)
 
 Sinh từ ProductionPack:

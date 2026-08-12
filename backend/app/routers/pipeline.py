@@ -73,6 +73,36 @@ def record_usage(db: Session, channel_id: str, project_title: str, usage: list[d
         budget.spent = (budget.spent or 0) + total_cost
 
 
+def record_asset_usage(db: Session, channel_id: str, project_title: str, *, provider: str, stage: str, unit_label: str, cost: float) -> None:
+    """Bản tương đương record_usage() cho chi phí sinh asset TTS/Image/Video (M2
+    Production Layer) — không có input/output token nên không tái dùng nguyên
+    record_usage(), nhưng ghi vào cùng AuditLog/Budget theo đúng convention (type
+    "expense", cộng dồn Budget.spent) để màn Chi phí & Ngân sách hiện đúng, không cần
+    sửa gì ở đó. Gọi từ app/render/engine.py (module tách biệt script core) — hàm này
+    thuộc nhóm tiện ích billing dùng chung, không phải business logic của script core,
+    nên đặt cạnh record_usage() là hợp lý (giống cách routers/guardrail.py đã import
+    record_usage từ đây)."""
+    if cost <= 0:
+        return
+    ch = db.query(Channel).filter(Channel.id == channel_id).first()
+    channel_name = ch.name if ch else channel_id
+    db.add(
+        AuditLog(
+            action="Chi phí AI",
+            detail=json.dumps({"project": project_title, "provider": provider, "model": provider, "stage": stage, "tokens": unit_label}, ensure_ascii=False),
+            entity=channel_name,
+            type="expense",
+            cost=cost,
+        )
+    )
+    budget = db.query(Budget).filter(Budget.channel_id == channel_id).first()
+    if not budget:
+        budget = Budget(channel_id=channel_id, soft_limit=8, threshold_pct=60, spent=0)
+        db.add(budget)
+        db.flush()
+    budget.spent = (budget.spent or 0) + cost
+
+
 def _get_project_or_404(db: Session, project_id: str) -> Project:
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:

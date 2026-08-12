@@ -20,6 +20,12 @@ def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def write_bytes(path: Path, data: bytes) -> None:
+    """Ghi asset nhị phân (ảnh/audio/video sinh từ provider — M2 Production Layer)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
 def write_versioned(dir_path: Path, base_name: str, data: dict, version: int) -> tuple[Path, Path]:
     """Ghi bản hiện hành `<base_name>.json` + snapshot `<base_name>.v{n}.json`.
     Trả (current_path, version_path)."""

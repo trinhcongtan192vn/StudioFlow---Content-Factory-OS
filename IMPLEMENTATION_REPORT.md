@@ -260,6 +260,66 @@ Yêu cầu: bổ sung provider AI từ các model của Gemini, OpenAI và Anthr
 
 Verify: tạo 6 provider tạm (mỗi task tts/image/video × openai/gemini, cộng cả veo và sora) qua API thật → xác nhận `model_name` mặc định + `available_models` đúng theo `(task, provider_name)`, gọi `/providers/{id}/test` cho cả 6 → đều trả `ok:true`; dọn hết provider tạm sau khi test. Restart backend dev (8756) + Electron để code mới có hiệu lực. Tổng vẫn **103 test, tất cả pass**, frontend typecheck sạch.
 
+## 13. M2 — Production Layer: TTS/Image/Video thật + ghép MP4 (2026-08-12)
+
+Người dùng yêu cầu triển khai M2 (thực thi adapter TTS/Image/Video + ghép MP4 —
+trước đó chỉ khai báo interface). Do khối lượng lớn (research provider, kiến trúc
+async, ffmpeg — dependency hoàn toàn mới), đã lập plan riêng qua Claude Code plan mode
+trước khi code (approve trước khi implement). Quyết định phạm vi: người dùng chọn làm
+**trọn vẹn cả 3 loại (TTS+Image+Video) + ghép MP4 trong 1 đợt**, mỗi loại 1 provider
+đầu tiên — **ElevenLabs** (TTS), **OpenAI Image** (ảnh), **quyết định tự chủ động:
+OpenAI Sora** (video, thay vì Runway/Veo — lý do: chung hệ sinh thái API key với
+Image, đỡ 1 tài khoản; pattern job-polling của OpenAI là dạng tự tin nhất về cấu trúc
+chung trong 3 lựa chọn).
+
+**Kiến trúc chính** (chi tiết: `specs/05_ai_providers.md` §8c, `specs/04_data_schemas.md`
+§3b): module mới `backend/app/render/` (engine.py sinh asset, assembly.py ghép ffmpeg,
+schemas.py) tách biệt hoàn toàn `ProductionPack`/`pack.json` — trạng thái sinh asset +
+ghép video sống ở file riêng `render.json` trong `project_dir()`, script core chỉ bị
+ĐỌC không bao giờ bị ghi. Router mới `backend/app/routers/render.py` (8 endpoint: start/
+status/approve/regenerate-visual/regenerate-narration/assemble/download/asset). Chạy
+qua `FastAPI BackgroundTasks` (không block request — Sora poll có thể mất tới 8 phút).
+
+**3 quyết định kỹ thuật đáng chú ý:**
+1. **`VideoProvider` interface mở rộng** — thêm `start_generation()`/`poll_generation()`
+   bất đồng bộ bên cạnh `generate()` đồng bộ cũ, vì Sora/Runway/Veo đều là job-based
+   (gửi job → chờ → poll → tải), khác hẳn TTS/Image (1 request trả thẳng bytes).
+2. **Narration TTS hoá `script.body[].audio` (lời thoại thật), KHÔNG PHẢI `shot.audio_sfx`**
+   (đó là mô tả nhạc nền/cảm xúc, không phải lời đọc — đã ghi rõ trong `specs/07` mục 7
+   từ vòng trước) — `audio_sfx`/`direction` chỉ dùng làm gợi ý emotion cho TTS.
+3. **Bug thực tế phát hiện & sửa khi implement**: endpoint regenerate-visual/regenerate-
+   narration ban đầu định dùng closure bắt session `db` request-scoped (`Depends(get_db)`)
+   bên trong `BackgroundTasks` — session này bị FastAPI đóng NGAY khi response trả về,
+   TRƯỚC KHI background task chạy, sẽ lỗi "session is closed". Sửa bằng cách viết
+   `regenerate_single_visual()`/`regenerate_single_narration()` trong `engine.py` tự mở/
+   đóng `SessionLocal()` riêng — cùng pattern với `run_asset_generation()` (batch).
+
+**Cost tracking**: `record_asset_usage()` mới (cạnh `record_usage()` gốc cho LLM, cùng
+file `routers/pipeline.py`) — ghi cùng `AuditLog`/`Budget`, giá ước tính theo ký tự
+(TTS)/số ảnh (Image)/số giây (Video), xem PRICING trong từng adapter.
+
+**Frontend**: `RenderStudio.tsx` (mới) nhúng trong `OutputCenter.tsx` (thẻ "Render
+in-app" hết `disabled`, mở panel thay vì cả 2 thẻ) — KHÔNG thêm step Stepper mới, khớp
+đúng vị trí design gốc (§06 màn ⑦). Preview thật `<img>`/`<video>`/`<audio>` — khác hẳn
+placeholder text ở Visual Studio (§06 màn ⑤, vẫn giữ nguyên, chỉ sinh prompt).
+
+**Test**: `backend/tests/test_render.py` (10 test mới) — mock TOÀN BỘ HTTP ra ngoài qua
+`respx` (thêm dependency mới), không gọi API thật/không tốn phí trong lúc test. Bug tự
+phát hiện khi viết test: 1 test dự định kiểm tra "chưa cấu hình provider" vô tình gọi ra
+INTERNET THẬT (401 từ OpenAI với key giả `sk-oai-test`) vì `client` là session-scoped
+dùng chung với test khác đã tạo sẵn provider — sửa bằng cách chủ động xoá hết provider
+tts/image/video ở đầu test (cùng pattern `_delete_all_llm_providers` đã dùng ở
+`test_no_provider.py`) + thêm `@respx.mock` làm lưới an toàn kép (request lọt qua sẽ bị
+respx chặn thay vì ra mạng thật). Tổng **113 test, tất cả pass** (103 cũ + 10 mới).
+
+**Verify**: KHÔNG gọi API thật tốn phí trong lúc implement (đúng theo plan) — chỉ verify
+cấu trúc + mock. Việc request/response của Sora khớp thực tế (rủi ro cao nhất, ghi rõ
+trong code comment `video_sora.py`) cần người dùng tự bấm thử trong Render Studio với
+key thật; nếu lệch, sửa theo message lỗi thật (đã có `raise_for_status_with_body`).
+`ffmpeg` cần cài riêng trên máy chạy backend (không bundle) — đã thêm check rõ ràng
+(`shutil.which`) + ghi vào README.md, test `assemble` khi thiếu ffmpeg dùng `monkeypatch`
+thay vì cần cài thật trên máy dev/CI.
+
 ## 6. File specs đã cập nhật
 
 `02_database.md`, `03_api.md`, `04_data_schemas.md`, `05_ai_providers.md`, `06_uiux.md`, `07_prompt_templates.md`, `09_sprint_tasks.md` — mỗi chỗ lệch đánh dấu bằng blockquote `> **Đã build...`, giữ nguyên nội dung gốc bên cạnh để thấy được ý định ban đầu vs. thực tế.

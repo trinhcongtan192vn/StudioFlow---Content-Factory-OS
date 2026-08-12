@@ -48,7 +48,7 @@ M1 (MVP) đã được build theo design Nocturne (`StudioFlow Prototype.dc.html
 
 ### Chạy dự án (dev)
 
-Yêu cầu: Node.js 18+, Python 3.11+.
+Yêu cầu: Node.js 18+, Python 3.11+. Muốn dùng **Render Studio** (M2 — ghép MP4 từ asset đã sinh) cần cài thêm **ffmpeg** và có sẵn trên `PATH` (`ffmpeg -version` chạy được từ terminal) — không bắt buộc cho phần còn lại của app.
 
 ```bash
 # 1. Backend (tạo venv lần đầu, seed dữ liệu demo tự động)
@@ -72,4 +72,6 @@ node_modules/.bin/electron electron/dist/main.js
 
 Electron tự spawn thêm 1 tiến trình backend riêng (cổng ngẫu nhiên) khi mở app — không cần bước 1 nếu chỉ chạy qua Electron, bước 1 chỉ cần khi muốn gọi thẳng API để dev/debug backend độc lập.
 
-App chạy được ngay không cần API key/GPU nhờ provider LLM "Local Mock (Dev)" seed sẵn — vào **Cài đặt → Provider AI → "+ Thêm provider"** để kết nối Claude/GPT/Gemini (Cloud API) hoặc model local GPU (Local Endpoint, Ollama/vLLM) khi sẵn sàng.
+App **không** tự seed provider AI mặc định — vào **Cài đặt → Provider AI → "+ Thêm provider"** để kết nối Claude/GPT/Gemini (Cloud API) hoặc model local GPU (Local Endpoint, Ollama/vLLM) trước khi dùng bất kỳ tính năng cần AI nào; thiếu provider sẽ hiện cảnh báo rõ ràng thay vì âm thầm dùng nội dung giả lập (xem `specs/05_ai_providers.md` §8b).
+
+**M2 — Render Studio** (Output Center → "Render in-app"): sinh ảnh/video/giọng đọc **thật**, tốn phí API thật (ElevenLabs cho TTS, OpenAI Image cho ảnh, Sora cho video) — cấu hình đủ 3 provider này (task `tts`/`image`/`video`) trước khi bấm "Bắt đầu sinh asset". Danh sách provider TTS/Image/Video khác (Vbee, Flux, Midjourney, Runway, Veo, Gemini TTS/Image) mới chỉ khai báo interface, chưa thực thi thật.

@@ -83,6 +83,20 @@ Thứ tự triển khai M1 (theo dependency): Foundation → DB → Provider AI 
 ## MỐC SAU — CHƯA BUILD (giữ ranh giới)
 
 ### M2 — Production Layer (Beta)
+
+> **Đã build 1 phần (2026-08-12):** thực thi thật 3 provider — **ElevenLabs** (TTS),
+> **OpenAI Image/GPT Image** (ảnh), **OpenAI Sora** (video) — cộng `/render` ghép MP4
+> bằng ffmpeg, có human review từng shot trước khi ghép. Module `backend/app/render/`
+> tách biệt hoàn toàn script core (chỉ đọc `pack.json`, trạng thái riêng ở
+> `render.json`). Chi phí ghi vào AuditLog/Budget như LLM (màn 💳 hiện đúng tổng, CHƯA
+> tách theo loại tts/image/video — giới hạn đã biết). Chi tiết: `IMPLEMENTATION_REPORT.md`
+> mục "Cập nhật vòng M2", `specs/05_ai_providers.md` §8c.
+>
+> **Chưa build:** provider còn lại (Vbee, Flux, Midjourney, Runway, Veo, Gemini
+> TTS/Image) vẫn chỉ khai báo interface; giới hạn số shot cho `/render` (đang cho phép
+> bất kỳ số lượng); UI chọn thời lượng clip video thủ công (đang tự tính từ
+> `end_sec - timestamp_sec` của beat, clamp 4-20s).
+
 - Thực thi adapter TTS/Image/Video; sinh asset thật.
 - `/render`: ghép MP4 "đủ đăng", giới hạn số shot; human review asset trước ghép.
 - Module render **tách biệt** script core, chỉ đọc `pack.json`.

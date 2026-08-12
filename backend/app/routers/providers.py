@@ -7,20 +7,7 @@ from sqlalchemy.orm import Session
 from app.crypto import decrypt_secret, encrypt_secret, mask_secret
 from app.db import get_db
 from app.models import AuditLog, ProviderConfig
-from app.providers.factory import build_llm_provider
-from app.providers.stubs import (
-    ElevenLabsTTSProvider,
-    FluxImageProvider,
-    GeminiImageProvider,
-    GeminiTTSProvider,
-    MidjourneyImageProvider,
-    OpenAIImageProvider,
-    OpenAITTSProvider,
-    RunwayVideoProvider,
-    SoraVideoProvider,
-    VbeeTTSProvider,
-    VeoVideoProvider,
-)
+from app.providers.factory import _IMAGE_ADAPTERS, _TTS_ADAPTERS, _VIDEO_ADAPTERS, build_llm_provider
 
 router = APIRouter(tags=["providers"])
 
@@ -167,11 +154,6 @@ def delete_provider(provider_id: int, db: Session = Depends(get_db)):
     db.delete(pv)
     db.commit()
     return {"ok": True}
-
-
-_TTS_ADAPTERS = {"vbee": VbeeTTSProvider, "elevenlabs": ElevenLabsTTSProvider, "openai": OpenAITTSProvider, "gemini": GeminiTTSProvider}
-_IMAGE_ADAPTERS = {"flux": FluxImageProvider, "midjourney": MidjourneyImageProvider, "openai": OpenAIImageProvider, "gemini": GeminiImageProvider}
-_VIDEO_ADAPTERS = {"runway": RunwayVideoProvider, "sora": SoraVideoProvider, "veo": VeoVideoProvider}
 
 
 @router.post("/providers/{provider_id}/test")

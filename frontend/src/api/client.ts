@@ -10,6 +10,7 @@ import type {
   ProjectSummary,
   PromptTemplateOut,
   ProviderOut,
+  RenderState,
   RetentionOut,
 } from "./types";
 
@@ -126,6 +127,16 @@ export const api = {
   // Export
   exportPack: (id: string, format: "markdown" | "pdf" | "json") => post<{ path: string; filename: string }>(`/projects/${id}/export`, { format }),
   downloadUrl: (id: string, filename: string) => `${BASE}/projects/${id}/exports/${filename}`,
+
+  // Render Studio (M2 Production Layer — sinh asset thật + ghép MP4)
+  startRender: (id: string) => post<RenderState>(`/projects/${id}/render/start`),
+  getRenderStatus: (id: string) => get<RenderState>(`/projects/${id}/render/status`),
+  approveShotAsset: (id: string, shotId: string, approved = true) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/approve`, { approved }),
+  regenerateShotVisualAsset: (id: string, shotId: string) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/regenerate-visual`),
+  regenerateShotNarration: (id: string, shotId: string) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/regenerate-narration`),
+  assembleVideo: (id: string) => post<RenderState>(`/projects/${id}/render/assemble`),
+  renderShotAssetUrl: (id: string, shotId: string, kind: "visual" | "narration") => `${BASE}/projects/${id}/render/shots/${shotId}/asset/${kind}`,
+  renderDownloadUrl: (id: string) => `${BASE}/projects/${id}/render/download`,
 
   // Providers
   listProviders: () => get<ProviderOut[]>("/providers"),

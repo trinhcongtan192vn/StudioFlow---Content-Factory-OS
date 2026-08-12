@@ -125,7 +125,32 @@ tự thêm thủ công qua UI nếu muốn 1 provider "luôn sẵn sàng" cho vi
 tốn phí. Khi có GPU: thêm 1 provider Local Endpoint trỏ Ollama/vLLM (dùng chung
 `LocalOpenAICompatProvider`) và đặt làm mặc định — không cần sửa code pipeline.
 
+## 8c. M2 — Provider TTS/Image/Video thực thi thật (2026-08-12)
+
+3 provider đã thực thi sinh asset THẬT (khác mọi provider tts/image/video khác vẫn chỉ
+khai báo interface, xem `app/providers/stubs.py`):
+
+| Task | Provider | File adapter | Ghi chú |
+|---|---|---|---|
+| `tts` | ElevenLabs | `app/providers/tts_elevenlabs.py` | Đồng bộ — 1 request trả thẳng audio bytes. `voice_id` tái dùng cột `endpoint_url` (không thêm cột DB mới) — để trống dùng giọng demo công khai mặc định. |
+| `image` | OpenAI (GPT Image) | `app/providers/image_openai.py` | Đồng bộ — base64 response, size cố định 1792x1024 (16:9). |
+| `video` | OpenAI Sora | `app/providers/video_sora.py` | **Bất đồng bộ** — gửi job (`start_generation`) rồi poll (`poll_generation`) tới khi `completed`, có thể mất vài phút. Đây là điểm rủi ro cao nhất: request/response shape dựng theo suy luận pattern chung OpenAI, CHƯA verify với key thật lúc code — nếu sai, sửa theo message lỗi thật (đã có `raise_for_status_with_body`, xem §8b). |
+
+`VideoProvider` (interface, `app/providers/base.py`) mở rộng thêm `start_generation(prompt, *, seconds=8) -> job_id` và `poll_generation(job_id) -> (status, bytes|None)` — provider bất đồng bộ dùng 2 method này thay vì `generate()` đồng bộ cũ (`generate()` raise `NotImplementedError` ở Sora).
+
+`app/providers/factory.py` có thêm `get_tts(db)`/`get_image(db)`/`get_video(db)` — cùng pattern `get_llm()`: raise `NoProviderConfiguredError` khi chưa cấu hình/khởi tạo được provider cho task đó, không âm thầm bỏ qua.
+
+**Orchestration** (`backend/app/render/`, module MỚI, tách biệt hoàn toàn script core — "Chống coupling: script core ⟂ render module", §09): `engine.py::run_asset_generation()` chạy trong `FastAPI BackgroundTasks` (không block request, vì Sora poll có thể mất tới ~8 phút — giới hạn `VIDEO_MAX_WAIT_SEC`), sinh **2 thứ** cho mỗi shot — visual (ảnh/video từ `visual_fx`) và **narration** (TTS hoá `beat.audio` — lời thoại thật, dùng `beat.direction`/`audio_sfx` chỉ làm gợi ý emotion, KHÔNG TTS hoá `audio_sfx` vì đó là mô tả nhạc nền chứ không phải lời đọc — xem §07 mục 7). Trạng thái từng shot (`pending|generating|ready|error` + đường dẫn asset + cờ `approved` cho human review) lưu ở `render.json` riêng trong `project_dir()`, KHÔNG ghi vào `pack.json`.
+
+**Ghép MP4** (`app/render/assembly.py`): ffmpeg qua `subprocess` — mỗi shot render 1 segment (ảnh: `-loop 1` + trim theo duration beat; video: trim theo duration), mux narration làm audio track, rồi `ffmpeg -f concat` nối toàn bộ segment theo thứ tự timestamp. Bắt buộc **MỌI shot phải `visual_status=="ready"` VÀ `approved=True`** trước khi ghép (human review, đúng yêu cầu §09 M2). Yêu cầu `ffmpeg` có sẵn trên `PATH` — không bundle binary (xem README.md).
+
+**Chi phí**: mỗi lần sinh asset thành công ghi qua `record_asset_usage()` (`app/routers/pipeline.py`, cạnh `record_usage()` gốc cho LLM) vào cùng `AuditLog`/`Budget` — giá ước tính (không phải hoá đơn chính xác): ElevenLabs ~$0.30/1K ký tự, OpenAI Image ~$0.06/ảnh (1792x1024), Sora ~$0.10/giây (`sora-2`) hoặc ~$0.30/giây (`sora-2-pro`).
+
+**API mới**: `POST/GET /projects/{id}/render/{start,status}`, `POST .../render/shots/{shot_id}/{approve,regenerate-visual,regenerate-narration}`, `POST .../render/assemble`, `GET .../render/{download, shots/{shot_id}/asset/{visual|narration}}` — xem `app/routers/render.py`.
+
+**Frontend**: `RenderStudio.tsx` (nhúng trong Output Center, thẻ "Render in-app" — KHÔNG phải step Stepper mới, khớp §06 mục 2 màn ⑦) — bấm "Bắt đầu sinh asset" → poll trạng thái mỗi 3s → xem trước ảnh/video/audio thật từng shot → "Duyệt" từng shot → "Ghép MP4" khi mọi shot đã duyệt → preview + tải file cuối.
+
 ## 9. Ràng buộc MVP
 
-- TTS/Image config có mặt trong màn Provider AI nhưng **chỉ dùng thật ở M2** (khi có render). MVP chỉ cần LLM hoạt động đầy đủ + prompt cho image/tts được sinh ra trong Pack (không thực thi).
-- Video (Runway/Sora/Veo): chỉ khai báo interface, chưa implement (M2).
+- TTS/Image config có mặt trong màn Provider AI — **3 provider (ElevenLabs/OpenAI Image/Sora) đã thực thi thật từ M2** (§8c), còn lại (Vbee, Flux, Midjourney, Runway, Veo, Gemini TTS/Image) vẫn chỉ khai báo interface + prompt sinh trong Pack, không thực thi.
+- Video (Runway/Veo): chỉ khai báo interface, chưa implement — Sora đã implement (§8c).

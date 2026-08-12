@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 
 from app.db import Base, engine
 from app.providers.factory import NoProviderConfiguredError
-from app.routers import channels, export, guardrail, pack, pipeline, projects, providers, settings, system
+from app.routers import channels, export, guardrail, pack, pipeline, projects, providers, render, settings, system
 from app.seed import run_seed
 
 Base.metadata.create_all(bind=engine)
@@ -29,5 +29,5 @@ async def no_provider_configured_handler(request: Request, exc: NoProviderConfig
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
-for r in (system, channels, projects, pipeline, pack, guardrail, providers, settings, export):
+for r in (system, channels, projects, pipeline, pack, guardrail, providers, settings, export, render):
     app.include_router(r.router)

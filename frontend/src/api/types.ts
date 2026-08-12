@@ -242,3 +242,28 @@ export interface RetentionOut {
   guardrail_hook_strength: number | null;
   diff_vs_benchmark: number | null;
 }
+
+// M2 Production Layer — khớp backend/app/render/schemas.py. State này sống trong
+// render.json riêng, KHÔNG phải 1 phần của ProductionPack (module render tách biệt
+// script core — specs/09).
+export type AssetStatus = "pending" | "generating" | "ready" | "error";
+export type AssemblyStatus = "not_started" | "assembling" | "done" | "error";
+export interface ShotRenderStatus {
+  shot_id: string;
+  visual_status: AssetStatus;
+  visual_asset_path: string | null;
+  visual_provider: string | null;
+  visual_error: string | null;
+  approved: boolean;
+  narration_status: AssetStatus;
+  narration_asset_path: string | null;
+  narration_provider: string | null;
+  narration_error: string | null;
+}
+export interface RenderState {
+  project_id: string;
+  shots: ShotRenderStatus[];
+  assembly_status: AssemblyStatus;
+  assembly_error: string | null;
+  final_video_path: string | null;
+}

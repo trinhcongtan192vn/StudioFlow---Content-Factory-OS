@@ -50,7 +50,17 @@ Ba vùng cố định + stepper trên cùng:
 | ④ | **Script Studio** (xương sống) | Trước duyệt: 1 cột Full Script liền mạch + ô góp ý "tạo lại". Sau duyệt & bóc tách: kịch bản đa cột theo timeline (Audio/Visual/Direction), 1 cột (đã build vòng 4: bỏ mini-panel Hook đang dùng — xem ghi chú dưới). Cảnh báo retention = **gạch chân + ghi chú lề** tại đoạn có vấn đề — không popup chặn. |
 | ⑤ | **Visual Studio** — **đã build, màn mới** | 1 card/shot (= 1 beat script): Visual/FX + Audio/SFX cùng lúc (đã build vòng 4: đổi tên field, tách 2 nút "Tạo lại Visual"/"Tạo lại giọng đọc"), toggle Image⇄Video. Khớp nguyên tắc "shot chuẩn hoá" nhưng tương tác trực tiếp thay vì chỉ liệt kê trong Pack Review. |
 | ⑥ | **Pack Review** (Gate #2) | Xem tổng hợp Pack dạng tab: Full Script & Shot List / Title & Thumbnail / Repurposing (khoá tới M3). Dải trạng thái đầu trang liệt kê số cảnh báo chưa xử lý. 2 nút: **Approve** (mở khoá Output) / **Trả về** (ô ghi chú bắt buộc, quay lại Script Studio). |
-| ⑦ | **Output Center** | 2 thẻ lớn: "Export Pack" và "Render in-app" (thẻ 2 nhãn "Beta", disabled ở MVP). Sau khi chạy: tiến độ + link tải. |
+| ⑦ | **Output Center** | 2 thẻ lớn: "Export Pack" và "Render in-app" (thẻ 2 nhãn "Beta · M2"). Sau khi chạy: tiến độ + link tải. |
+
+> **Đã build 1 phần M2 (2026-08-12):** thẻ "Render in-app" không còn `disabled` — bấm
+> mở `RenderStudio.tsx` (thay thế 2 thẻ, có nút "← Quay lại"), KHÔNG phải step Stepper
+> mới. Luồng: "Bắt đầu sinh asset" → sinh ảnh/video (OpenAI Image/Sora) + giọng đọc
+> (ElevenLabs) thật cho từng shot, poll tiến độ mỗi 3s (trạng thái pending/generating/
+> ready/error hiện qua tag màu) → mỗi shot xem trước ảnh/video/audio thật (`<img>`/
+> `<video>`/`<audio>`, KHÔNG còn placeholder text như Visual Studio §5) + nút "Tạo lại
+> Visual"/"Tạo lại giọng đọc" riêng lẻ + nút "Duyệt" (human review bắt buộc trước khi
+> ghép) → khi mọi shot đã duyệt, nút "Ghép MP4" (ffmpeg) → preview + tải file cuối.
+> Xem `specs/05_ai_providers.md` §8c.
 | ⑧ | **Retention Nhập tay** — **đã build, đặt lại vị trí** | Design KHÔNG có màn riêng cho mục này (thiếu so với PRD §10.4/MVP bắt buộc) — bản build đặt dưới dạng card gọn ngay trong **Output Center** (⑦), sau khi Pack đã export. Form nhập 4 nhóm số liệu (§08); sau lưu hiện thanh so sánh chênh lệch vs benchmark. |
 
 ## 3. Khu Cài đặt (Admin) — sidebar icon

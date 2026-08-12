@@ -81,13 +81,30 @@ class ImageProvider(ABC):
 
 
 class VideoProvider(ABC):
-    """Chỉ khai báo interface — chưa implement, M2 (§05 mục 9)."""
+    """Sinh video — M2 (§05 mục 9). Khác TTS/Image (đồng bộ, 1 request trả thẳng
+    bytes), mọi provider video thật (Runway/Sora/Veo) đều theo mô hình BẤT ĐỒNG BỘ:
+    gửi job → chờ (thường 1-5+ phút) → poll trạng thái → tải kết quả khi xong. Provider
+    thực thi thật (VD `VideoProvider` cho Sora) implement `start_generation`/
+    `poll_generation`; `generate()` giữ lại cho tương thích ngược/provider giả lập
+    đồng bộ, nhưng provider bất đồng bộ thật PHẢI raise `NotImplementedError` ở đó và
+    dùng 2 method mới — gọi qua `app/render/engine.py`, không gọi trực tiếp trong
+    request handler (tránh block thread)."""
 
     provider_name: str = "base"
 
     @abstractmethod
     def generate(self, prompt: str) -> bytes:
         ...
+
+    def start_generation(self, prompt: str, *, seconds: int = 8) -> str:
+        """Gửi job sinh video, trả về job_id. Provider đồng bộ không cần override."""
+        raise NotImplementedError("Provider video này không hỗ trợ start_generation (dùng generate() nếu đồng bộ).")
+
+    def poll_generation(self, job_id: str) -> tuple[str, Optional[bytes]]:
+        """Kiểm tra trạng thái job: trả (status, bytes|None). status thường là
+        'queued'|'processing'|'completed'|'failed' (tuỳ provider); bytes chỉ khác None
+        khi status là trạng thái hoàn tất thành công."""
+        raise NotImplementedError("Provider video này không hỗ trợ poll_generation.")
 
     @abstractmethod
     def test_connection(self) -> ProviderStatus:

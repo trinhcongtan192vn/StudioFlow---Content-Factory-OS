@@ -1,9 +1,13 @@
-"""TTS/Image/Video: khai báo interface theo §05 mục 3, KHÔNG thực thi sinh asset thật
-ở M1 (§05 mục 9, §08.3 PRD) — Visual Studio chỉ sinh & lưu PROMPT, không gọi API asset.
-Test kết nối vẫn hoạt động (cho phép chuẩn bị provider trước khi M2 bật thực thi).
-"""
-import httpx
+"""TTS/Image/Video: khai báo interface theo §05 mục 3, KHÔNG thực thi sinh asset thật.
+Test kết nối vẫn hoạt động (chỉ kiểm tra đã lưu key, không gọi API thật) — chuẩn bị
+provider trước khi có adapter thật.
 
+M2 (2026-08-12) đã thực thi thật 3 provider — KHÔNG còn ở file này: ElevenLabs (TTS,
+xem app/providers/tts_elevenlabs.py), OpenAI Image (xem app/providers/image_openai.py),
+Sora (Video, xem app/providers/video_sora.py). Các provider còn lại dưới đây (Vbee,
+Flux, Midjourney, Runway, OpenAI TTS, Gemini TTS/Image, Veo) vẫn chỉ là khai báo
+interface — chưa research/implement, để làm ở đợt sau.
+"""
 from app.providers.base import ImageProvider, ProviderStatus, TTSProvider, VideoProvider
 
 
@@ -23,27 +27,6 @@ class VbeeTTSProvider(TTSProvider, NotImplementedMixin):
 
     def test_connection(self) -> ProviderStatus:
         return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh giọng đọc thật sẽ mở ở M2")
-
-
-class ElevenLabsTTSProvider(TTSProvider, NotImplementedMixin):
-    provider_name = "elevenlabs"
-
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-
-    def synthesize(self, text: str, *, emotion: str = "") -> bytes:
-        self._not_implemented("ElevenLabs TTS synthesize")
-
-    def test_connection(self) -> ProviderStatus:
-        if not self.api_key:
-            return ProviderStatus(ok=False, message="Thiếu API key")
-        try:
-            with httpx.Client(timeout=10) as client:
-                resp = client.get("https://api.elevenlabs.io/v1/user", headers={"xi-api-key": self.api_key})
-                ok = resp.status_code == 200
-            return ProviderStatus(ok=ok, message="Kết nối thành công" if ok else f"HTTP {resp.status_code}")
-        except Exception as e:  # noqa: BLE001
-            return ProviderStatus(ok=False, message=str(e))
 
 
 class FluxImageProvider(ImageProvider, NotImplementedMixin):
@@ -85,19 +68,6 @@ class RunwayVideoProvider(VideoProvider, NotImplementedMixin):
         return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — render video thật sẽ mở ở M2")
 
 
-class SoraVideoProvider(VideoProvider, NotImplementedMixin):
-    provider_name = "sora"
-
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-
-    def generate(self, prompt: str) -> bytes:
-        self._not_implemented("Sora video generate")
-
-    def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — render video thật sẽ mở ở M2")
-
-
 # ---------------------------------------------------------------------------
 # TTS/Image/Video của OpenAI & Google Gemini (§05 — bổ sung theo yêu cầu người
 # dùng: cùng 1 provider công nghệ (OpenAI/Gemini) có thể vừa là LLM (task=llm)
@@ -130,19 +100,6 @@ class GeminiTTSProvider(TTSProvider, NotImplementedMixin):
 
     def test_connection(self) -> ProviderStatus:
         return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh giọng đọc thật sẽ mở ở M2")
-
-
-class OpenAIImageProvider(ImageProvider, NotImplementedMixin):
-    provider_name = "openai"
-
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-
-    def generate(self, prompt: str) -> bytes:
-        self._not_implemented("OpenAI (GPT Image) generate")
-
-    def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — sinh ảnh thật sẽ mở ở M2")
 
 
 class GeminiImageProvider(ImageProvider, NotImplementedMixin):

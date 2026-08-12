@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { RetentionOut } from "../../api/types";
 import type { StepProps } from "../ProjectView";
+import RenderStudio from "./RenderStudio";
 
-export default function OutputCenter({ project }: StepProps) {
+export default function OutputCenter({ project, pack }: StepProps) {
   const [exporting, setExporting] = useState(false);
   const [files, setFiles] = useState<{ format: string; filename: string }[]>([]);
+  const [renderOpen, setRenderOpen] = useState(false);
 
   async function doExport(format: "json" | "markdown" | "pdf") {
     setExporting(true);
@@ -15,6 +17,10 @@ export default function OutputCenter({ project }: StepProps) {
     } finally {
       setExporting(false);
     }
+  }
+
+  if (renderOpen) {
+    return <RenderStudio project={project} pack={pack} onClose={() => setRenderOpen(false)} />;
   }
 
   return (
@@ -52,15 +58,15 @@ export default function OutputCenter({ project }: StepProps) {
             </div>
           )}
         </div>
-        <div className="card" style={{ gap: "var(--space-2)", opacity: 0.6 }}>
+        <div className="card elev-sm" style={{ gap: "var(--space-2)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div className="card-kicker">Output B</div>
             <span className="tag tag-outline">Beta · M2</span>
           </div>
           <div className="card-title">Render in-app</div>
-          <div className="card-body">Sinh asset qua API, ghép &amp; xuất MP4 "đủ đăng". Module tách riêng, phát triển độc lập.</div>
-          <button className="btn btn-secondary btn-block" disabled>
-            Chưa sẵn sàng
+          <div className="card-body">Sinh asset qua API, ghép &amp; xuất MP4 "đủ đăng". Tốn phí API thật (ElevenLabs/OpenAI Image/Sora).</div>
+          <button className="btn btn-secondary btn-block" onClick={() => setRenderOpen(true)} disabled={(pack.shots || []).length === 0}>
+            {(pack.shots || []).length === 0 ? "Chưa có shot — hoàn tất Visual Studio trước" : "Mở Render Studio"}
           </button>
         </div>
       </div>
