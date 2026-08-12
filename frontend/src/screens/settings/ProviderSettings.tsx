@@ -7,12 +7,14 @@ const GROUP_LABEL: Record<string, string> = { llm: "LLM", tts: "TTS", image: "Im
 
 // Khớp CLOUD_MODELS trong backend/app/routers/providers.py — danh sách model hiện có
 // mỗi provider, chọn ngay lúc thêm thay vì phải sửa lại sau (phản hồi phần "còn thiếu"
-// mục 3a: triển khai hỗ trợ model API ngay từ bước thêm provider).
+// mục 3a: triển khai hỗ trợ model API ngay từ bước thêm provider). Đối chiếu lại với
+// tài liệu chính thức từng hãng 2026-08-12 — xem PRICING trong từng adapter backend
+// (app/providers/claude.py|openai_provider.py|gemini.py) để biết giá mỗi model.
 const CLOUD_CATALOG: Record<string, { provider_name: string; display_name: string; models: string[] }[]> = {
   llm: [
-    { provider_name: "claude", display_name: "Anthropic Claude", models: ["claude-sonnet-4-5", "claude-haiku-4-5"] },
-    { provider_name: "openai", display_name: "OpenAI GPT", models: ["gpt-4.1", "gpt-4.1-mini"] },
-    { provider_name: "gemini", display_name: "Google Gemini", models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
+    { provider_name: "claude", display_name: "Anthropic Claude", models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "claude-fable-5"] },
+    { provider_name: "openai", display_name: "OpenAI GPT", models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] },
+    { provider_name: "gemini", display_name: "Google Gemini", models: ["gemini-3.6-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"] },
   ],
   tts: [
     { provider_name: "vbee", display_name: "Vbee", models: ["vbee-female-01", "vbee-male-01"] },

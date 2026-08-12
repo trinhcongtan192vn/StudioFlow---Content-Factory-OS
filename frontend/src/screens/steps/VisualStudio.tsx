@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api } from "../../api/client";
+import { api, ApiError } from "../../api/client";
+import AiErrorBanner from "../../components/AiErrorBanner";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 
@@ -8,7 +9,12 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
   const [regeneratingAudio, setRegeneratingAudio] = useState<Record<string, boolean>>({});
   const [bulkVisualLoading, setBulkVisualLoading] = useState(false);
   const [bulkTtsLoading, setBulkTtsLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const body = pack.script?.body || [];
+
+  function describeAiError(e: unknown, fallback: string): string {
+    return e instanceof ApiError ? e.message : fallback;
+  }
 
   function snippetFor(ts: number | null) {
     return body.find((b) => b.timestamp_sec === ts)?.audio || "";
@@ -26,9 +32,12 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
 
   async function regenerateVisual(shotId: string) {
     setRegeneratingVisual((s) => ({ ...s, [shotId]: true }));
+    setAiError(null);
     try {
       await api.regenerateShotVisual(project.id, shotId);
       await refresh();
+    } catch (e) {
+      setAiError(describeAiError(e, "Có lỗi khi tạo lại Visual cho shot này."));
     } finally {
       setRegeneratingVisual((s) => ({ ...s, [shotId]: false }));
     }
@@ -36,9 +45,12 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
 
   async function regenerateAudio(shotId: string) {
     setRegeneratingAudio((s) => ({ ...s, [shotId]: true }));
+    setAiError(null);
     try {
       await api.regenerateShotAudio(project.id, shotId);
       await refresh();
+    } catch (e) {
+      setAiError(describeAiError(e, "Có lỗi khi tạo lại giọng đọc cho shot này."));
     } finally {
       setRegeneratingAudio((s) => ({ ...s, [shotId]: false }));
     }
@@ -46,9 +58,12 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
 
   async function generateAllVisual() {
     setBulkVisualLoading(true);
+    setAiError(null);
     try {
       await api.generateAllVisual(project.id);
       await refresh();
+    } catch (e) {
+      setAiError(describeAiError(e, "Có lỗi khi tạo Visual cho toàn bộ block."));
     } finally {
       setBulkVisualLoading(false);
     }
@@ -56,9 +71,12 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
 
   async function generateAllTts() {
     setBulkTtsLoading(true);
+    setAiError(null);
     try {
       await api.generateAllTts(project.id);
       await refresh();
+    } catch (e) {
+      setAiError(describeAiError(e, "Có lỗi khi tạo giọng đọc cho toàn bộ block."));
     } finally {
       setBulkTtsLoading(false);
     }
@@ -66,9 +84,12 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
 
   async function goPackReview() {
     setBusy(true);
+    setAiError(null);
     try {
       await api.buildPack(project.id);
       await refresh();
+    } catch (e) {
+      setAiError(describeAiError(e, "Có lỗi khi tổng hợp Production Pack."));
     } finally {
       setBusy(false);
     }
@@ -93,6 +114,8 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
           </>
         }
       />
+
+      {aiError && <AiErrorBanner message={aiError} onDismiss={() => setAiError(null)} />}
 
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)", maxWidth: 900 }}>
         {pack.shots.map((v) => (

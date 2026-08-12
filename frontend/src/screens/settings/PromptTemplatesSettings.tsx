@@ -2,33 +2,101 @@ import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { PromptTemplateOut } from "../../api/types";
 
+// task key ↔ bước sản xuất thật sự gọi nó — xem backend/app/pipeline/generation.py.
+// Mỗi task key CHỈ ứng với đúng 1 điểm gọi LLM (1:1) để tham số {{...}} luôn đúng và
+// được thay thế đầy đủ — không tái dùng 1 task key cho 2 lệnh gọi có bộ tham số khác
+// nhau (từng là lỗi: "outline_hook" và "visual_image" trước đây bị dùng cho 2 lệnh gọi
+// khác tham số, khiến 1 số {{placeholder}} không bao giờ được thay thế).
 const STAGE_LABEL: Record<string, string> = {
-  brief: "Brief",
-  outline_hook: "Outline & Hook (Gate 1)",
-  script: "Script Studio",
+  outline: "Outline & Hook (Gate 1) — Sinh Outline",
+  hook: "Outline & Hook (Gate 1) — Sinh Hook",
+  script: "Script Studio — Viết Master Script",
   script_revise: "Script Studio — Tạo lại theo góp ý",
   script_breakdown: "Script Studio — Phân rã theo đoạn",
-  visual_image: "Visual Studio — Hình ảnh",
-  visual_video: "Visual Studio — Video",
-  visual_tts: "Visual Studio — Giọng đọc (TTS)",
+  visual_shots_init: "Visual Studio — Khởi tạo danh sách Shot",
+  visual_image: "Visual Studio — Tạo lại Visual (ảnh)",
+  visual_video: "Visual Studio — Tạo lại Visual (video)",
+  visual_tts: "Visual Studio — Tạo lại giọng đọc / Audio-SFX",
   thumbnail: "Title, Description & Thumbnail",
 };
 const STAGE_ORDER = Object.keys(STAGE_LABEL);
 
 // Gom nhóm theo bước quy trình (khớp prototype: PROCESS_STEPS + stageStep()) thay vì
 // liệt kê phẳng theo từng stage key — mỗi bước có thể chứa nhiều template.
-const PROCESS_STEPS = ["Brief", "Outline & Hook", "Script Studio", "Visual Studio"];
+const PROCESS_STEPS = ["Outline & Hook", "Script Studio", "Visual Studio"];
 const STAGE_TO_STEP: Record<string, string> = {
-  brief: "Brief",
-  outline_hook: "Outline & Hook",
+  outline: "Outline & Hook",
+  hook: "Outline & Hook",
   script: "Script Studio",
   script_revise: "Script Studio",
   script_breakdown: "Script Studio",
+  visual_shots_init: "Visual Studio",
   visual_image: "Visual Studio",
   visual_video: "Visual Studio",
   visual_tts: "Visual Studio",
   thumbnail: "Visual Studio",
 };
+
+// Tham số dùng chung cho hầu hết prompt (inject từ BrandProfile kênh) — trừ
+// script_breakdown (chỉ bóc tách thuần theo timestamp, không cần bản sắc kênh).
+const COMMON_PARAMS: { name: string; desc: string }[] = [
+  { name: "channel", desc: "ID kênh hiện tại" },
+  { name: "brand_voice", desc: "Giọng kênh (JSON: tone, formality, pacing, sample_lines)" },
+  { name: "forbidden", desc: "Từ khoá/chủ đề cấm kỵ của kênh, cách nhau bởi dấu phẩy" },
+  { name: "content_pillars", desc: "Trụ cột nội dung của kênh, cách nhau bởi dấu phẩy" },
+  { name: "hook_formats", desc: "Kiểu hook ưa dùng của kênh, cách nhau bởi dấu phẩy" },
+  { name: "visual_style_prompt", desc: "Mô tả style hình ảnh chuẩn của kênh" },
+  { name: "retention_benchmark", desc: "Chuẩn retention của kênh (JSON: target_hook_strength, max_anchor_gap_sec, target_body_len_min)" },
+];
+
+// Tham số riêng theo từng task — khớp CHÍNH XÁC dict `ctx` dựng trong
+// backend/app/pipeline/generation.py cho lệnh gọi tương ứng.
+const TASK_PARAMS: Record<string, { name: string; desc: string }[]> = {
+  outline: [
+    { name: "topic", desc: "Chủ đề video, lấy từ Brief" },
+    { name: "brief", desc: "Toàn bộ Brief hiện tại, dạng JSON" },
+    { name: "outline_count", desc: "Số lượng outline cần sinh (mặc định 3)" },
+  ],
+  hook: [
+    { name: "chosen_outline", desc: "Outline dùng làm ngữ cảnh sinh hook, dạng JSON" },
+    { name: "hook_count", desc: "Số lượng biến thể hook cần sinh (mặc định 3)" },
+  ],
+  script: [
+    { name: "outline", desc: "Outline đã chọn ở Gate #1, dạng JSON" },
+    { name: "hook", desc: "Hook đã chọn ở Gate #1, dạng JSON" },
+    { name: "framework", desc: "Khung kịch bản, VD AIDA/PAS (Cài đặt → Tham số AI)" },
+    { name: "length", desc: "Độ dài mong muốn, VD \"3-6 phút\"" },
+  ],
+  script_revise: [
+    { name: "current_script", desc: "Full Script hiện tại" },
+    { name: "user_feedback", desc: "Góp ý chỉnh sửa người dùng nhập ở Script Studio" },
+    { name: "length", desc: "Độ dài mong muốn" },
+  ],
+  script_breakdown: [{ name: "script_text", desc: "Full Script đã duyệt, cần bóc tách theo đoạn" }],
+  visual_shots_init: [{ name: "script", desc: "Toàn bộ script đã bóc tách theo đoạn, dạng JSON" }],
+  visual_image: [
+    { name: "script_snippet", desc: "Lời đọc (audio) của đoạn script gắn với shot này" },
+    { name: "visual_description", desc: "Mô tả hình ảnh hiện tại của đoạn script này" },
+  ],
+  visual_video: [
+    { name: "script_snippet", desc: "Lời đọc (audio) của đoạn script gắn với shot này" },
+    { name: "visual_description", desc: "Mô tả hình ảnh hiện tại của đoạn script này" },
+  ],
+  visual_tts: [
+    { name: "script_snippet", desc: "Lời đọc (audio) của đoạn script gắn với shot này" },
+    { name: "emotion_description", desc: "Chỉ dẫn cảm xúc/nhịp (cột Direction) của đoạn script này" },
+    { name: "voice_profile", desc: "Tông giọng đọc chuẩn của kênh" },
+  ],
+  thumbnail: [
+    { name: "brief", desc: "Toàn bộ Brief hiện tại, dạng JSON" },
+    { name: "script", desc: "Toàn bộ script đã bóc tách theo đoạn, dạng JSON" },
+  ],
+};
+
+function paramsForTask(task: string): { name: string; desc: string }[] {
+  const specific = TASK_PARAMS[task] || [];
+  return task === "script_breakdown" ? specific : [...specific, ...COMMON_PARAMS];
+}
 
 export default function PromptTemplatesSettings() {
   const [templates, setTemplates] = useState<PromptTemplateOut[]>([]);
@@ -142,6 +210,7 @@ export default function PromptTemplatesSettings() {
                           <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", opacity: 0.55, marginBottom: 3 }}>Prompt đang dùng ({t.active_version})</div>
                           <div style={{ fontFamily: "ui-monospace,monospace", fontSize: 12, background: "var(--color-bg)", borderRadius: "var(--radius-sm)", padding: 8, opacity: 0.85 }}>{t.body}</div>
                         </div>
+                        <ParamDictionary task={t.task} />
                         <div>
                           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 3 }}>
                             <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", opacity: 0.55 }}>Lịch sử phiên bản</div>
@@ -232,6 +301,30 @@ export default function PromptTemplatesSettings() {
   );
 }
 
+/** Danh sách {{tham số}} thật sự thay thế được cho task này khi render prompt (khớp
+ * `ctx` dựng trong backend/app/pipeline/generation.py) — soạn/sửa template nên chỉ
+ * dùng đúng các tham số này, đặt tham số khác sẽ để lại "{{...}}" nguyên văn trong
+ * prompt gửi tới AI. */
+function ParamDictionary({ task }: { task: string }) {
+  const params = paramsForTask(task);
+  if (!params.length) return null;
+  return (
+    <div>
+      <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", opacity: 0.55, marginBottom: 4 }}>Tham số khả dụng cho bước này</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        {params.map((p) => (
+          <div key={p.name} style={{ display: "flex", gap: 8, fontSize: 12, alignItems: "baseline" }}>
+            <code style={{ fontFamily: "ui-monospace,monospace", flex: "none", opacity: 0.9, background: "var(--color-bg)", borderRadius: "var(--radius-sm)", padding: "1px 5px" }}>
+              {"{{" + p.name + "}}"}
+            </code>
+            <span style={{ opacity: 0.6, minWidth: 0 }}>{p.desc}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function TemplateDialog({
   mode,
   initial,
@@ -244,7 +337,7 @@ function TemplateDialog({
   onSaved: () => void;
 }) {
   const [name, setName] = useState(initial?.name || "");
-  const [task, setTask] = useState(initial?.task || "brief");
+  const [task, setTask] = useState(initial?.task || "outline");
   const [body, setBody] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -282,6 +375,7 @@ function TemplateDialog({
             ))}
           </div>
         </div>
+        <ParamDictionary task={task} />
         {mode === "create" && (
           <div className="field">
             <label>Nội dung prompt (v1)</label>

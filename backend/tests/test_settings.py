@@ -38,7 +38,7 @@ def test_list_prompt_templates_seeded(client):
     assert resp.status_code == 200
     templates = resp.json()
     assert len(templates) >= 9  # PROMPT_SEED trong app/seed.py
-    outline_tpl = next(t for t in templates if t["task"] == "outline_hook")
+    outline_tpl = next(t for t in templates if t["task"] == "outline")
     assert outline_tpl["body"]  # active version phải có nội dung
     assert len(outline_tpl["versions"]) >= 1
 

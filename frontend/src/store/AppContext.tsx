@@ -13,6 +13,7 @@ interface AppState {
   rightPanelOpen: boolean;
   expandedChannels: Record<string, boolean>;
   hasLlmProvider: boolean;
+  projectsVersion: Record<string, number>;
   goDashboard: () => void;
   goSettings: () => void;
   openProject: (channelId: string, projectId: string) => void;
@@ -21,6 +22,7 @@ interface AppState {
   toggleRightPanel: () => void;
   refreshChannels: () => Promise<void>;
   refreshBootstrap: () => Promise<void>;
+  bumpProjectsVersion: (channelId: string) => void;
 }
 
 const AppCtx = createContext<AppState | null>(null);
@@ -34,6 +36,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [expandedChannels, setExpandedChannels] = useState<Record<string, boolean>>({});
   const [hasLlmProvider, setHasLlmProvider] = useState(true);
+  const [projectsVersion, setProjectsVersion] = useState<Record<string, number>>({});
 
   const refreshChannels = useCallback(async () => {
     const list = await api.listChannels();
@@ -64,6 +67,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const toggleChannel = (channelId: string) => setExpandedChannels((s) => ({ ...s, [channelId]: !s[channelId] }));
   const toggleSidebar = () => setSidebarCollapsed((s) => !s);
   const toggleRightPanel = () => setRightPanelOpen((s) => !s);
+  const bumpProjectsVersion = (channelId: string) => setProjectsVersion((s) => ({ ...s, [channelId]: (s[channelId] || 0) + 1 }));
 
   const value: AppState = {
     view,
@@ -74,6 +78,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     rightPanelOpen,
     expandedChannels,
     hasLlmProvider,
+    projectsVersion,
     goDashboard,
     goSettings,
     openProject,
@@ -82,6 +87,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     toggleRightPanel,
     refreshChannels,
     refreshBootstrap,
+    bumpProjectsVersion,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

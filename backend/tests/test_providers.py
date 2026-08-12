@@ -1,4 +1,7 @@
-def test_list_providers_includes_seeded_mock(client):
+def test_list_providers_includes_test_mock(client):
+    """App thật KHÔNG tự seed provider Mock nữa (đổi theo yêu cầu — thiếu provider phải
+    báo lỗi rõ ràng). Provider mock trong list này tới từ fixture `_ensure_mock_llm_is_default`
+    (conftest.py) để test suite chạy được mà không cần mạng thật."""
     resp = client.get("/providers")
     assert resp.status_code == 200
     providers = resp.json()

@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
-import { api } from "../../api/client";
+import { api, ApiError } from "../../api/client";
+import AiErrorBanner from "../../components/AiErrorBanner";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 
@@ -9,6 +10,7 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
   const [feedback, setFeedback] = useState("");
   const [lastFeedback, setLastFeedback] = useState("");
   const [editingAgain, setEditingAgain] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
 
   const hasBody = (script?.body?.length || 0) > 0;
@@ -23,11 +25,14 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
   async function regenerate() {
     if (!feedback.trim()) return;
     setBusy(true);
+    setAiError(null);
     try {
       const updated = await api.regenerateScript(project.id, feedback);
       setFullText(updated.script?.full_text || "");
       setLastFeedback(feedback);
       setFeedback("");
+    } catch (e) {
+      setAiError(e instanceof ApiError ? e.message : "Có lỗi khi tạo lại Full Script.");
     } finally {
       setBusy(false);
     }
@@ -35,11 +40,14 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
 
   async function approve() {
     setBusy(true);
+    setAiError(null);
     try {
       await api.editScriptText(project.id, fullText);
       await api.approveScript(project.id);
       setEditingAgain(false);
       await refresh();
+    } catch (e) {
+      setAiError(e instanceof ApiError ? e.message : "Có lỗi khi duyệt Full Script.");
     } finally {
       setBusy(false);
     }
@@ -47,9 +55,12 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
 
   async function goVisualStudio() {
     setBusy(true);
+    setAiError(null);
     try {
       await api.generateVisualShots(project.id);
       await refresh();
+    } catch (e) {
+      setAiError(e instanceof ApiError ? e.message : "Có lỗi khi sinh shot cho Visual Studio.");
     } finally {
       setBusy(false);
     }
@@ -86,6 +97,7 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
         }
       />
 
+      {aiError && <AiErrorBanner message={aiError} onDismiss={() => setAiError(null)} />}
       {project.return_note && <ReturnBanner title="Đã trả về từ Pack Review:" text={project.return_note} />}
 
       {showEditor ? (

@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 import re
 
+from sqlalchemy.orm import Session
+
 from app.providers.base import LLMMessage, LLMProvider
+from app.providers.factory import get_llm
 
 HOOK_RUBRIC_SYSTEM = (
     "Bạn là bộ chấm điểm nội bộ cho guardrail retention. KHÔNG hiển thị điểm này cho người dùng ở bước chọn Hook — "
@@ -85,8 +88,28 @@ def check_brand_fit(body: list[dict], forbidden: list[str]) -> list[dict]:
     return warnings
 
 
-def run_guardrail_check(llm: LLMProvider, *, hook_spoken: str, body: list[dict], benchmark: dict, forbidden: list[str], pain_points: list[str], usage: list | None = None) -> dict:
-    hook_strength = score_hook_strength(llm, hook_spoken, pain_points, usage=usage) if hook_spoken else None
+def run_guardrail_check(
+    *,
+    hook_spoken: str,
+    body: list[dict],
+    benchmark: dict,
+    forbidden: list[str],
+    pain_points: list[str],
+    llm: LLMProvider | None = None,
+    db: Session | None = None,
+    usage: list | None = None,
+) -> dict:
+    """Truyền `db` (khuyến nghị, dùng ở router) để CHỈ gọi `get_llm()` — có thể raise
+    `NoProviderConfiguredError` — khi thật sự cần chấm Hook Strength (`hook_spoken`
+    khác rỗng); script import không có hook nên không đòi hỏi cấu hình Provider AI mới
+    chạy được guardrail. Truyền `llm` trực tiếp khi đã có sẵn provider (test thuần,
+    không cần DB)."""
+    hook_strength = None
+    if hook_spoken:
+        resolved_llm = llm if llm is not None else (get_llm(db, task_role="guardrail") if db is not None else None)
+        if resolved_llm is None:
+            raise ValueError("run_guardrail_check cần truyền `llm` hoặc `db` khi hook_spoken khác rỗng")
+        hook_strength = score_hook_strength(resolved_llm, hook_spoken, pain_points, usage=usage)
     max_gap = compute_anchor_gap(body)
     warnings: list[dict] = []
 

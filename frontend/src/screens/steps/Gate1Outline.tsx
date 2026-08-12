@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, ApiError } from "../../api/client";
 import type { ImportPreview } from "../../api/types";
+import AiErrorBanner from "../../components/AiErrorBanner";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 
@@ -14,6 +15,7 @@ export default function Gate1Outline({ project, pack, refresh, busy, setBusy }: 
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const chosenHook = hooks.find((h) => h.id === selectedHook);
   const hookText = editedHookText !== null ? editedHookText : chosenHook?.spoken || "";
@@ -27,6 +29,7 @@ export default function Gate1Outline({ project, pack, refresh, busy, setBusy }: 
   async function approve() {
     if (!selectedOutline || !selectedHook) return;
     setBusy(true);
+    setAiError(null);
     try {
       await api.approveGate1(project.id, {
         chosen_outline_id: selectedOutline,
@@ -34,6 +37,8 @@ export default function Gate1Outline({ project, pack, refresh, busy, setBusy }: 
         edited_hook_text: editedHookText || undefined,
       });
       await refresh();
+    } catch (e) {
+      setAiError(e instanceof ApiError ? e.message : "Có lỗi khi duyệt Gate #1 & viết kịch bản chi tiết.");
     } finally {
       setBusy(false);
     }
@@ -126,6 +131,8 @@ export default function Gate1Outline({ project, pack, refresh, busy, setBusy }: 
           <strong style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}>★ Human Gate #1</strong> — Chọn 1 dàn ý &amp; 1 Hook. Bắt buộc trước khi viết kịch bản chi tiết.
         </div>
       </div>
+
+      {aiError && <AiErrorBanner message={aiError} onDismiss={() => setAiError(null)} />}
 
       <h4 style={{ marginBottom: "var(--space-2)" }}>AI Research — Dàn ý đề xuất</h4>
       {pack.research?.synthesis && <p style={{ fontSize: 13, opacity: 0.75, marginTop: -4 }}>{pack.research.synthesis}</p>}

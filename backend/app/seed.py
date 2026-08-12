@@ -6,6 +6,7 @@ app/providers/mock.py), và dữ liệu demo 3 kênh + vài project ở các bư
 để trải nghiệm lần đầu giống hệt bản design.
 """
 import json
+import os
 
 from app.config import channel_dir, project_dir
 from app.db import SessionLocal
@@ -22,37 +23,39 @@ from app.models import (
 from app.schemas import Brief, ProductionPack
 
 PROMPT_SEED = [
-    ("pt_brief", "Gợi ý Brief từ ý tưởng", "brief", [
-        ("v1", "Khởi tạo", "Hải Yến", "Từ chủ đề {{topic}}, gợi ý insight, đối tượng khán giả và mục tiêu nội dung phù hợp kênh {{channel}}."),
-        ("v2", "Thêm câu hỏi gợi insight", "Hải Yến", "Từ chủ đề {{topic}} và BrandProfile kênh {{channel}}, gợi ý insight, đối tượng khán giả và mục tiêu nội dung. Đặt 1 câu hỏi giúp làm rõ insight nếu chủ đề còn mơ hồ."),
+    ("pt_outline", "Sinh Outline (Research)", "outline", [
+        ("v1", "Khởi tạo", "Hệ thống", "Từ Brief {{brief}} về chủ đề {{topic}}, sinh {{outline_count}} outline khác góc tiếp cận."),
+        ("v2", "Ràng buộc bám sát BrandProfile", "Hệ thống", "Từ Brief {{brief}} về chủ đề {{topic}}, sinh {{outline_count}} outline khác góc tiếp cận, bám sát trụ cột nội dung {{content_pillars}} và giọng kênh {{channel}}, tránh {{forbidden}}."),
     ]),
-    ("pt_outline", "Sinh Outline & Hook variants", "outline_hook", [
-        ("v1", "Khởi tạo", "Hải Yến", "Từ Brief {{brief}}, sinh outline và hook variants."),
-        ("v2", "Thêm tham số framework", "Minh Anh", "Từ Brief {{brief}}, sinh {{outline_count}} outline và {{hook_count}} biến thể hook theo framework {{framework}}."),
-        ("v3", "Ràng buộc hook dưới 12 từ", "Hải Yến", "Từ Brief {{brief}}, sinh {{outline_count}} outline khác góc tiếp cận và {{hook_count}} biến thể hook theo framework {{framework}}. Mỗi hook dưới 12 từ, không clickbait sai sự thật."),
+    ("pt_hook", "Sinh Hook Variants", "hook", [
+        ("v1", "Khởi tạo", "Hệ thống", "Từ dàn ý {{chosen_outline}}, viết {{hook_count}} biến thể hook theo các kiểu tâm lý khác nhau."),
+        ("v2", "Ràng buộc hook dưới 12 từ", "Hệ thống", "Từ dàn ý {{chosen_outline}}, viết {{hook_count}} biến thể hook theo kiểu ưa dùng của kênh {{hook_formats}}. Mỗi hook dưới 12 từ, không clickbait sai sự thật, tránh {{forbidden}}."),
     ]),
     ("pt_script", "Viết Master Script", "script", [
-        ("v1", "Khởi tạo", "Hải Yến", "Viết Master Script từ Outline {{outline}} và Hook {{hook}}, độ dài {{length}}."),
-        ("v2", "Thêm chỉ dẫn nhịp câu ngắn", "Đức Long", "Viết Master Script hoàn chỉnh từ Outline {{outline}} và Hook {{hook}}, giọng văn theo BrandProfile {{channel}}, câu ngắn, tránh thuật ngữ khó, độ dài {{length}}."),
+        ("v1", "Khởi tạo", "Hệ thống", "Viết Master Script từ Outline {{outline}} và Hook {{hook}}, độ dài {{length}}."),
+        ("v2", "Thêm chỉ dẫn nhịp câu ngắn", "Hệ thống", "Viết Master Script hoàn chỉnh từ Outline {{outline}} và Hook {{hook}}, giọng văn theo BrandProfile kênh {{channel}}, câu ngắn, tránh thuật ngữ khó, độ dài {{length}}, theo framework {{framework}}."),
     ]),
     ("pt_script_revise", "Tạo lại Full Script theo góp ý", "script_revise", [
-        ("v1", "Khởi tạo", "Đức Long", "Viết lại Full Script {{current_script}} theo góp ý của người dùng: {{user_feedback}}. Giữ nguyên giọng văn BrandProfile {{channel}} và độ dài {{length}}, chỉ điều chỉnh đúng phần được góp ý, không thay đổi các đoạn khác."),
+        ("v1", "Khởi tạo", "Hệ thống", "Viết lại Full Script {{current_script}} theo góp ý của người dùng: {{user_feedback}}. Giữ nguyên giọng văn BrandProfile kênh {{channel}} và độ dài {{length}}, chỉ điều chỉnh đúng phần được góp ý, không thay đổi các đoạn khác."),
     ]),
     ("pt_script_breakdown", "Phân rã Full Script theo đoạn (Audio/Visual/Direction)", "script_breakdown", [
-        ("v1", "Khởi tạo", "Hải Yến", "Phân rã Full Script {{script_text}} thành các đoạn theo timestamp, audio, visual và direction."),
-        ("v2", "Giới hạn 8s/shot", "Hải Yến", "Phân rã Full Script {{script_text}} đã duyệt thành các đoạn theo timeline: mỗi đoạn gồm {timestamp, audio (nguyên văn lời đọc), visual (mô tả hình ảnh/video), direction (chỉ dẫn nhịp, cảm xúc)}, tối đa 8s/đoạn."),
+        ("v1", "Khởi tạo", "Hệ thống", "Phân rã Full Script {{script_text}} thành các đoạn theo timestamp, audio, visual và direction."),
+        ("v2", "Giới hạn 8s/shot", "Hệ thống", "Phân rã Full Script {{script_text}} đã duyệt thành các đoạn theo timeline: mỗi đoạn gồm {timestamp, audio (nguyên văn lời đọc), visual (mô tả hình ảnh/video), direction (chỉ dẫn nhịp, cảm xúc)}, tối đa 8s/đoạn."),
     ]),
     ("pt_thumb", "Title, Description & Thumbnail concept", "thumbnail", [
-        ("v1", "Khởi tạo", "Minh Anh", "Từ Brief {{brief}} và kịch bản {{script}}, sinh 5-10 tiêu đề tối ưu SEO+CTR, mô tả SEO, hashtags và concept thumbnail theo style kênh {{visual_style_prompt}}."),
+        ("v1", "Khởi tạo", "Hệ thống", "Từ Brief {{brief}} và kịch bản {{script}}, sinh 5-10 tiêu đề tối ưu SEO+CTR, mô tả SEO, hashtags và concept thumbnail theo style kênh {{visual_style_prompt}}."),
     ]),
-    ("pt_visual_image", "Visual Studio — Image prompt theo shot", "visual_image", [
-        ("v1", "Khởi tạo", "Hải Yến", "Từ đoạn script {{script}} và style kênh {{visual_style_prompt}}, sinh prompt ảnh cho từng shot: muted palette, single accent color, no text, aspect 16:9."),
+    ("pt_visual_shots_init", "Visual Studio — Khởi tạo danh sách Shot", "visual_shots_init", [
+        ("v1", "Khởi tạo", "Hệ thống", "Từ toàn bộ script {{script}} và style kênh {{visual_style_prompt}}, sinh prompt hình ảnh/video cho từng shot: muted palette, single accent color, no text, aspect 16:9."),
     ]),
-    ("pt_visual_video", "Visual Studio — Video prompt theo shot", "visual_video", [
-        ("v1", "Khởi tạo", "Hải Yến", "Từ đoạn script {{script_snippet}} và mô tả visual {{visual_description}}, sinh video 6s loopable theo style kênh {{channel}}: muted color grade, grain overlay nhẹ, no on-screen text."),
+    ("pt_visual_image", "Visual Studio — Tạo lại Visual (ảnh)", "visual_image", [
+        ("v1", "Khởi tạo", "Hệ thống", "Từ đoạn script {{script_snippet}} và mô tả visual hiện tại {{visual_description}}, sinh lại 1 prompt ảnh cho shot này theo style kênh {{visual_style_prompt}}: muted palette, single accent color, no text, aspect 16:9."),
     ]),
-    ("pt_visual_tts", "Visual Studio — TTS theo emotion mô tả", "visual_tts", [
-        ("v1", "Khởi tạo", "Đức Long", "Đọc đoạn script {{script_snippet}} với giọng {{voice_profile}} theo emotion mô tả: {{emotion_description}}. Giữ tông BrandProfile kênh {{channel}}."),
+    ("pt_visual_video", "Visual Studio — Tạo lại Visual (video)", "visual_video", [
+        ("v1", "Khởi tạo", "Hệ thống", "Từ đoạn script {{script_snippet}} và mô tả visual hiện tại {{visual_description}}, sinh video 6s loopable theo style kênh {{channel}}: muted color grade, grain overlay nhẹ, no on-screen text."),
+    ]),
+    ("pt_visual_tts", "Visual Studio — Tạo lại giọng đọc / Audio-SFX", "visual_tts", [
+        ("v1", "Khởi tạo", "Hệ thống", "Đọc đoạn script {{script_snippet}} với giọng {{voice_profile}} theo emotion mô tả: {{emotion_description}}. Giữ tông BrandProfile kênh {{channel}}."),
     ]),
 ]
 
@@ -82,30 +85,44 @@ DEMO_CHANNELS = [
 
 
 def run_seed():
+    """Seed từng nhóm ĐỘC LẬP theo bảng rỗng hay không — KHÔNG dùng chung 1 điều kiện
+    "Channel rỗng" cho tất cả như bản đầu (bug: xoá hết kênh rồi restart app sẽ chạy
+    lại toàn bộ seed, đụng primary key cố định của app_setting/prompt_template/
+    provider_config → crash). Nhờ vậy, xoá hết kênh/project để test lại từ đầu (không
+    đụng cấu hình admin) là thao tác an toàn — khởi động lại app không hề gì.
+
+    Cờ `STUDIOFLOW_SKIP_SEED=1` (dùng khi vận hành/dọn dữ liệu, KHÔNG dùng cho cài đặt
+    thật) bỏ qua luôn cả seed dữ liệu demo (3 kênh mẫu) — dùng khi muốn app khởi động ở
+    trạng thái trắng hoàn toàn thay vì tự có lại 3 kênh demo.
+    """
+    skip_demo = os.environ.get("STUDIOFLOW_SKIP_SEED", "").lower() in ("1", "true", "yes")
     db = SessionLocal()
     try:
-        if db.query(Channel).count() > 0:
-            return  # đã seed trước đó
+        if db.query(AppSetting).count() == 0:
+            for key, value in {
+                "general": {"org_name": "Media House VN", "language": "vi", "timezone": "Asia/Ho_Chi_Minh", "export_format": "markdown", "naming_convention": "[Kênh]_[YYMMDD]_[Chủ đề ngắn]"},
+                "ai_params": {"temperature": 0.7, "length": "3-6 phút", "hook_count": 3, "framework": "AIDA"},
+                "app_branding": {"name": "Media House VN", "accent_swatch": 0},
+            }.items():
+                db.add(AppSetting(key=key, value=json.dumps(value, ensure_ascii=False)))
 
-        # app_setting mặc định
-        for key, value in {
-            "general": {"org_name": "Media House VN", "language": "vi", "timezone": "Asia/Ho_Chi_Minh", "export_format": "markdown", "naming_convention": "[Kênh]_[YYMMDD]_[Chủ đề ngắn]"},
-            "ai_params": {"temperature": 0.7, "length": "3-6 phút", "hook_count": 3, "framework": "AIDA"},
-            "app_branding": {"name": "Media House VN", "accent_swatch": 0},
-        }.items():
-            db.add(AppSetting(key=key, value=json.dumps(value, ensure_ascii=False)))
+        if db.query(PromptTemplate).count() == 0:
+            for tid, name, task, versions in PROMPT_SEED:
+                active = versions[-1][0]
+                db.add(PromptTemplate(id=tid, name=name, task=task, active_version=active))
+                for version, note, updated_by, body in versions:
+                    db.add(PromptTemplateVersion(template_id=tid, version=version, content=body, note=note, updated_by=updated_by))
 
-        # prompt templates
-        for tid, name, task, versions in PROMPT_SEED:
-            active = versions[-1][0]
-            db.add(PromptTemplate(id=tid, name=name, task=task, active_version=active))
-            for version, note, updated_by, body in versions:
-                db.add(PromptTemplateVersion(template_id=tid, version=version, content=body, note=note, updated_by=updated_by))
+        # KHÔNG seed provider Mock mặc định (đổi theo yêu cầu người dùng) — cài đặt mới
+        # phải chủ động vào Cài đặt → Provider AI kết nối Claude/GPT/Gemini hoặc model
+        # local (GPU) thật. Thiếu provider → mọi bước cần AI trả lỗi rõ ràng thay vì
+        # âm thầm sinh nội dung giả lập (xem app/providers/factory.py
+        # NoProviderConfiguredError, IMPLEMENTATION_REPORT.md).
 
-        # provider mock mặc định — luôn sẵn sàng, không cần key/GPU (xem app/providers/mock.py)
-        db.add(ProviderConfig(task="llm", provider_name="mock", display_name="Local Mock (Dev)", connection_type="local_endpoint",
-                               endpoint_url=None, model_name="mock-deterministic", available_models="[]",
-                               is_default=True, enabled=True, status="ok"))
+        db.commit()
+
+        if skip_demo or db.query(Channel).count() > 0:
+            return
 
         # kênh + brandprofile + budget demo
         for c in DEMO_CHANNELS:

@@ -33,15 +33,22 @@ def client():
 
 @pytest.fixture(autouse=True)
 def _ensure_mock_llm_is_default(client):
-    """DB dùng chung cho cả session test (xem docstring module) — nếu 1 test nào đó
-    đổi provider LLM mặc định (vd. test_patch_provider_set_default_unsets_others) mà
-    quên khôi phục, các test khác gọi pipeline thật sẽ âm thầm rơi vào fallback content
-    (network lỗi với key giả) thay vì dùng Mock, khiến usage/audit log không được ghi —
-    lỗi khó nhìn ra vì API vẫn trả 200. Fixture này chạy trước MỌI test, đảm bảo Mock
-    luôn là default cho task 'llm' bất kể thứ tự/test khác làm gì."""
+    """Ứng dụng thật KHÔNG còn tự seed provider Mock (đổi theo yêu cầu — thiếu provider
+    phải báo lỗi rõ ràng cho người dùng, không âm thầm dùng Mock, xem
+    app/providers/factory.py::NoProviderConfiguredError). Test suite vẫn cần chạy
+    pipeline mà không đụng mạng thật, nên TỰ tạo 1 provider Mock ở đây (idempotent —
+    chỉ tạo nếu chưa có) và đảm bảo nó luôn là default cho task 'llm' trước MỌI test,
+    kể cả khi 1 test khác lỡ đổi default (vd. test_patch_provider_set_default_unsets_others)
+    mà quên khôi phục — DB dùng chung cho cả session test (xem docstring module)."""
     providers = client.get("/providers").json()
     mock = next((p for p in providers if p["provider_name"] == "mock"), None)
-    if mock and not mock["is_default"]:
+    if mock is None:
+        mock = client.post(
+            "/providers",
+            json={"task": "llm", "provider_name": "mock", "display_name": "Test Mock LLM", "connection_type": "local_endpoint", "model_name": "mock-deterministic"},
+        ).json()
+        client.patch(f"/providers/{mock['id']}", json={"is_default": True})
+    elif not mock["is_default"]:
         client.patch(f"/providers/{mock['id']}", json={"is_default": True})
     yield
 

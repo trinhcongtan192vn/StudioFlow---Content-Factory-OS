@@ -4,11 +4,28 @@ from app.providers.base import LLMMessage, LLMProvider, LLMResult, ProviderStatu
 
 API_URL = "https://api.anthropic.com/v1/messages"
 
+# USD / 1M token (input, output) — theo bảng giá chính thức docs.claude.com/en/docs/
+# about-claude/models/overview, đối chiếu lại 2026-08-12. Model không có trong bảng
+# (snapshot cũ, alias tự nhập...) rơi vào DEFAULT_PRICING — ước tính giữa Sonnet/Opus,
+# đủ cho cảnh báo ngân sách mềm (§05 mục 7), không phải hoá đơn chính xác.
+PRICING: dict[str, tuple[float, float]] = {
+    "claude-fable-5": (10.0, 50.0),
+    "claude-mythos-5": (10.0, 50.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-5": (5.0, 25.0),
+    "claude-sonnet-4-5": (3.0, 15.0),
+}
+DEFAULT_PRICING = (3.0, 15.0)
+
 
 class ClaudeProvider(LLMProvider):
     provider_name = "claude"
 
-    def __init__(self, api_key: str, model_name: str = "claude-sonnet-4-5"):
+    def __init__(self, api_key: str, model_name: str = "claude-sonnet-5"):
         self.api_key = api_key
         self.model_name = model_name
 
@@ -34,8 +51,8 @@ class ClaudeProvider(LLMProvider):
         text = "".join(b.get("text", "") for b in data.get("content", []))
         usage = data.get("usage", {})
         in_tok, out_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
-        # Ước tính chi phí ở mức tương đối — đủ cho cảnh báo ngân sách mềm (§05 mục 7), không phải hoá đơn chính xác.
-        cost = in_tok / 1_000_000 * 3.0 + out_tok / 1_000_000 * 15.0
+        price_in, price_out = PRICING.get(self.model_name, DEFAULT_PRICING)
+        cost = in_tok / 1_000_000 * price_in + out_tok / 1_000_000 * price_out
         return LLMResult(text=text, input_tokens=in_tok, output_tokens=out_tok, estimated_cost_usd=cost, model=self.model_name)
 
     def test_connection(self) -> ProviderStatus:

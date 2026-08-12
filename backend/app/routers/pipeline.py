@@ -262,12 +262,11 @@ def import_script_confirm(project_id: str, body: ImportConfirmBody, db: Session 
         "source": "import",
     }
 
-    check_llm = get_llm(db, task_role="guardrail")
     benchmark = brand.get("retention_benchmark", {})
     usage: list[dict] = []
     result = run_guardrail_check(
-        check_llm,
-        hook_spoken="",  # import không có Hook được chọn qua Gate 1 — không chấm Hook Strength
+        db=db,
+        hook_spoken="",  # import không có Hook được chọn qua Gate 1 — không chấm Hook Strength, không cần Provider AI
         body=body.beats,
         benchmark=benchmark,
         forbidden=brand.get("forbidden", []),
@@ -301,9 +300,8 @@ def approve_script(project_id: str, db: Session = Depends(get_db)):
     usage: list[dict] = []
     body_items = gen.breakdown_script(llm, db, script["full_text"], benchmark.get("max_anchor_gap_sec", 45), usage=usage)
 
-    check_llm = get_llm(db, task_role="guardrail")
     result = run_guardrail_check(
-        check_llm,
+        db=db,
         hook_spoken=script.get("hook", {}).get("spoken", ""),
         body=body_items,
         benchmark=benchmark,
@@ -407,7 +405,7 @@ def regenerate_shot_visual(project_id: str, shot_id: str, db: Session = Depends(
     target, beat = _find_shot_and_beat(pack, shot_id)
     llm = get_llm(db, task_role="shots")
     usage: list[dict] = []
-    target["visual_fx"] = gen.regenerate_shot_visual_fx(llm, db, brand, beat, usage=usage)
+    target["visual_fx"] = gen.regenerate_shot_visual_fx(llm, db, brand, beat, visual_type=target.get("visual_type", "image"), usage=usage)
     write_json(pdir / "pack.json", pack)
     record_usage(db, p.channel_id, p.title, usage)
     db.commit()
@@ -441,7 +439,7 @@ def generate_all_visual(project_id: str, db: Session = Depends(get_db)):
     usage: list[dict] = []
     for s in shots:
         beat = next((b for b in body if b.get("timestamp_sec") == s.get("linked_timestamp_sec")), body[0] if body else {})
-        s["visual_fx"] = gen.regenerate_shot_visual_fx(llm, db, brand, beat, usage=usage)
+        s["visual_fx"] = gen.regenerate_shot_visual_fx(llm, db, brand, beat, visual_type=s.get("visual_type", "image"), usage=usage)
     write_json(pdir / "pack.json", pack)
     record_usage(db, p.channel_id, p.title, usage)
     db.commit()
@@ -484,10 +482,9 @@ def build_pack(project_id: str, db: Session = Depends(get_db)):
     if not pack.get("thumbnail_concepts"):
         pack["thumbnail_concepts"] = [{"prompt": meta["youtube_meta"]["thumbnail_description"]}]
 
-    check_llm = get_llm(db, task_role="guardrail")
     benchmark = brand.get("retention_benchmark", {})
     result = run_guardrail_check(
-        check_llm,
+        db=db,
         hook_spoken=(pack.get("script") or {}).get("hook", {}).get("spoken", ""),
         body=body,
         benchmark=benchmark,

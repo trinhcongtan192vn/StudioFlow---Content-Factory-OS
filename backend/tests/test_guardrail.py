@@ -104,7 +104,7 @@ def test_score_hook_strength_mock_provider_uses_fallback():
 
 def test_run_guardrail_check_flags_low_hook_strength():
     result = run_guardrail_check(
-        _JsonLLM(0.3),
+        llm=_JsonLLM(0.3),
         hook_spoken="Hook yếu",
         body=[{"timestamp_sec": 0, "audio": "a", "direction": "", "anchor": True}] * 8,
         benchmark={"target_hook_strength": 0.7, "max_anchor_gap_sec": 45, "target_body_len_min": 8},
@@ -122,7 +122,7 @@ def test_run_guardrail_check_flags_anchor_gap_and_body_length():
         {"timestamp_sec": 100, "audio": "b", "direction": "", "anchor": True},
     ]
     result = run_guardrail_check(
-        _JsonLLM(0.9),
+        llm=_JsonLLM(0.9),
         hook_spoken="",
         body=body,
         benchmark={"target_hook_strength": 0.7, "max_anchor_gap_sec": 45, "target_body_len_min": 8},
@@ -140,7 +140,7 @@ def test_run_guardrail_check_flags_anchor_gap_and_body_length():
 def test_run_guardrail_check_brand_fit_red_severity():
     body = [{"timestamp_sec": 0, "audio": "hứa hẹn lợi nhuận cố định", "direction": "", "anchor": True}] * 8
     result = run_guardrail_check(
-        _JsonLLM(0.9),
+        llm=_JsonLLM(0.9),
         hook_spoken="",
         body=body,
         benchmark={"target_hook_strength": 0.7, "max_anchor_gap_sec": 45, "target_body_len_min": 4},

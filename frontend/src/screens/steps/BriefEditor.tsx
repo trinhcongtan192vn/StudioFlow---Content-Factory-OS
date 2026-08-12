@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../../api/client";
+import { api, ApiError } from "../../api/client";
 import type { Brief } from "../../api/types";
+import AiErrorBanner from "../../components/AiErrorBanner";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 
@@ -32,6 +33,7 @@ export default function BriefEditor({ project, refresh, busy, setBusy }: StepPro
   const [addingYoutube, setAddingYoutube] = useState(false);
   const [addingFile, setAddingFile] = useState(false);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -54,10 +56,13 @@ export default function BriefEditor({ project, refresh, busy, setBusy }: StepPro
 
   async function startResearch() {
     setBusy(true);
+    setAiError(null);
     try {
       await api.putBrief(project.id, brief!);
       await api.runResearch(project.id);
       await refresh();
+    } catch (e) {
+      setAiError(e instanceof ApiError ? e.message : "Có lỗi khi chạy Research.");
     } finally {
       setBusy(false);
     }
@@ -115,6 +120,7 @@ export default function BriefEditor({ project, refresh, busy, setBusy }: StepPro
       />
 
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)", maxWidth: 640 }}>
+        {aiError && <AiErrorBanner message={aiError} onDismiss={() => setAiError(null)} />}
         <div className="card" style={{ gap: "var(--space-3)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div className="card-kicker">1 · Chủ đề &amp; Insight</div>

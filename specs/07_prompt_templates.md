@@ -5,34 +5,53 @@ Các prompt cho pipeline AI. Lưu trong bảng `prompt_template`/`prompt_templat
 Quy ước placeholder: `{{brand_voice}}`, `{{forbidden}}`, `{{content_pillars}}`, `{{brief}}`, `{{hook_formats}}`, `{{retention_benchmark}}`, `{{visual_style_prompt}}`.
 
 > **Đã build — thư viện template thực tế khớp design, task key khác tên mục dưới đây.**
-> `StudioFlow Prototype.dc.html` định nghĩa sẵn 9 template với placeholder riêng
-> (`{{topic}}`, `{{channel}}`, `{{brief}}`, `{{outline_count}}`, `{{hook_count}}`,
-> `{{framework}}`, `{{outline}}`, `{{hook}}`, `{{length}}`, `{{current_script}}`,
-> `{{user_feedback}}`, `{{script_text}}`, `{{script_snippet}}`,
-> `{{visual_description}}`, `{{voice_profile}}`, `{{emotion_description}}`,
-> `{{hook_keyword}}`) — bản build seed đúng các template này làm nguồn sự thật thay vì
-> văn bản dưới đây (giữ dưới đây làm tài liệu về Ý ĐỊNH rubric/luồng, không phải nội
-> dung final). Ánh xạ `task` key trong DB ↔ mục bên dưới:
+> `StudioFlow Prototype.dc.html` định nghĩa sẵn nhiều template với placeholder riêng
+> — bản build seed đúng các template này làm nguồn sự thật thay vì văn bản dưới đây
+> (giữ dưới đây làm tài liệu về Ý ĐỊNH rubric/luồng, không phải nội dung final).
 >
-> | task key (DB) | Tương ứng mục | Ghi chú |
+> **Nguyên tắc bắt buộc (đã sửa lỗi vòng review):** mỗi `task` key CHỈ ứng với ĐÚNG 1
+> điểm gọi LLM trong `backend/app/pipeline/generation.py` (quan hệ 1:1). Trước đây
+> `outline_hook` và `visual_image` bị dùng chung cho 2 lệnh gọi có bộ tham số khác
+> nhau (VD sinh outline dùng `{{topic}}/{{brief}}/{{outline_count}}` nhưng sinh hook
+> dùng `{{chosen_outline}}/{{hook_count}}` — cùng 1 template render 2 lần, mỗi lần chỉ
+> 1 nửa placeholder được thay, nửa còn lại giữ nguyên `{{...}}` trong prompt gửi AI).
+> Đã tách lại theo bảng dưới; task nào không có điểm gọi thật (VD `brief` cũ — Brief
+> Editor không có bước AI-assist nào) đã bị GỠ khỏi seed thay vì để mồ côi trên màn
+> Prompt Templates.
+>
+> | task key (DB) | Điểm gọi (generation.py) | Tham số `{{...}}` riêng (ngoài BrandProfile chung) |
 > |---|---|---|
-> | `brief` | (mới) Gợi ý Brief từ ý tưởng | không có trong bản gốc, hỗ trợ Brief Editor |
-> | `outline_hook` | mục 1 + mục 2 gộp | 1 template sinh CẢ outline lẫn hook (khớp §06 UI) |
-> | `script` | mục 3 | viết Full Script liền mạch, chưa bóc tách |
-> | `script_revise` | (mới) | viết lại Full Script theo góp ý — endpoint `/script/regenerate` |
-> | `script_breakdown` | (mới, tách khỏi mục 3) | bóc tách Full Script → body đa cột |
-> | `visual_image` / `visual_video` / `visual_tts` | mục 4 (mở rộng) | Shot Prompt Builder tách theo loại asset + thêm TTS |
-> | `thumbnail` | mục 5 | gộp thêm description SEO + hashtags (`youtube_meta`) |
+> | `outline` | `generate_research` — mục 1 | `topic`, `brief`, `outline_count` |
+> | `hook` | `generate_hooks` — mục 2 | `chosen_outline`, `hook_count` |
+> | `script` | `generate_full_script` — mục 3 | `outline`, `hook`, `framework`, `length` |
+> | `script_revise` | `regenerate_full_script` — endpoint `/script/regenerate` | `current_script`, `user_feedback`, `length` |
+> | `script_breakdown` | `breakdown_script` — bóc tách Full Script → body đa cột | CHỈ `script_text` (không inject BrandProfile) |
+> | `visual_shots_init` | `generate_shots` — sinh HÀNG LOẠT shot ban đầu khi vào Visual Studio | `script` |
+> | `visual_image` | `regenerate_shot_visual_fx` khi shot `visual_type=image` — nút "Tạo lại Visual" | `script_snippet`, `visual_description` |
+> | `visual_video` | `regenerate_shot_visual_fx` khi shot `visual_type=video` — nút "Tạo lại Visual" | `script_snippet`, `visual_description` |
+> | `visual_tts` | `regenerate_shot_audio_sfx` — nút "Tạo lại giọng đọc" | `script_snippet`, `emotion_description`, `voice_profile` |
+> | `thumbnail` | `generate_titles_and_meta` — mục 5, gộp thêm description SEO + hashtags (`youtube_meta`) | `brief`, `script` |
+>
+> Tham số BrandProfile chung (mọi task trừ `script_breakdown`): `channel`,
+> `brand_voice`, `forbidden`, `content_pillars`, `hook_formats`, `visual_style_prompt`,
+> `retention_benchmark` — dựng trong `_brand_ctx()`. Danh sách tham số đầy đủ theo
+> từng task cũng hiển thị trực tiếp trên màn 🧩 Prompt Templates (mở rộng 1 template
+> hoặc mở dialog Sửa/Tạo mới) để không phải tra code khi soạn prompt.
 >
 > Chi tiết nội dung từng version: xem `backend/app/seed.py` (`PROMPT_SEED`).
 >
-> **Đã build vòng 4:** `visual_image` dùng cho endpoint `regenerate-visual`/
-> `generate-all-visual` (sinh `Shot.visual_fx`), `visual_tts` dùng cho
+> **Đã build vòng 4:** `visual_image`/`visual_video` dùng cho endpoint
+> `regenerate-visual`/`generate-all-visual` (sinh `Shot.visual_fx`) — chọn template
+> theo đúng `visual_type` hiện tại của shot; `visual_tts` dùng cho
 > `regenerate-audio`/`generate-all-tts` (sinh `Shot.audio_sfx` — phạm vi rộng hơn tên
 > gốc "TTS emotion", giờ là mô tả âm thanh/nhạc nền/emotion giọng đọc nói chung, khớp
 > tên cột import "Âm thanh & Nhạc nền — Audio/SFX"). Khi `script.source == "import"`,
-> 2 template này KHÔNG được gọi lúc tạo shot ban đầu (seed thẳng từ nội dung file) —
+> các template này KHÔNG được gọi lúc tạo shot ban đầu (seed thẳng từ nội dung file) —
 > chỉ dùng khi người dùng chủ động bấm "Tạo lại" sau đó.
+>
+> **`updated_by` của các version seed sẵn ghi "Hệ thống"** (không phải tên người thật)
+> — app single-user không có quản lý user (§CLAUDE.md nguyên tắc 5); version do người
+> dùng tự sửa trong app ghi "Bạn".
 
 ## 1. AI Research
 
@@ -136,3 +155,8 @@ Trả JSON: { "hook_strength": 0.0-1.0, "reasons": ["..."] }. Chỉ trả JSON.
 - Mọi prompt **bắt LLM trả JSON thuần** (không markdown fence) → backend parse thẳng vào Pydantic (§04).
 - BrandProfile luôn được inject; `forbidden` là ràng buộc cứng trong mọi prompt.
 - Prompt template chỉnh được ở runtime (màn 🧩) mà không sửa code.
+- Mỗi `task` key ứng với ĐÚNG 1 điểm gọi LLM (1:1) — không tái dùng 1 task key cho 2
+  lệnh gọi có bộ tham số khác nhau. Thêm bước AI mới → thêm task key mới, không gắn
+  vào task key sẵn có.
+- Không seed/hiển thị template cho task key KHÔNG có điểm gọi thật trong code — màn
+  Prompt Templates chỉ liệt kê những gì thật sự ảnh hưởng tới output khi sửa.

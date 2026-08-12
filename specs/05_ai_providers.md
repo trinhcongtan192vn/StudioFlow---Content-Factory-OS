@@ -74,16 +74,42 @@ Mỗi task có thể đặt một provider `is_fallback`. Khi provider chính tr
 - API key mã hoá at-rest, giải mã trong bộ nhớ khi gọi, **không** trả về client dạng thô (§01, §03).
 - Local endpoint URL lưu plaintext (không nhạy cảm).
 
-## 8b. Đã build — provider Mock (dev/demo, không có trong đặc tả gốc)
+## 8b. Provider Mock — chỉ dùng thủ công (dev/test), KHÔNG seed mặc định
 
 `app/providers/mock.py` — `MockLLMProvider` implement đúng interface `LLMProvider`
-(§3), trả nội dung placeholder xác định (deterministic) mà không gọi mạng. Seed data
-đăng ký nó làm provider LLM mặc định (`connection_type: local_endpoint`, tên
-"Local Mock (Dev)") để app chạy được ngay sau khi cài đặt mà không cần API key hay
-GPU — đúng yêu cầu "chưa cần triển khai model local vì máy chưa có GPU, nhưng code
-phải sẵn sàng chạy trên PC có GPU". Khi có GPU: thêm 1 provider Local Endpoint trỏ
-Ollama/vLLM (dùng chung `LocalOpenAICompatProvider`) và đặt làm mặc định — không cần
-sửa code pipeline.
+(§3), trả nội dung placeholder xác định (deterministic) mà không gọi mạng. **Đổi theo
+yêu cầu người dùng:** cài đặt mới KHÔNG còn tự động seed provider Mock làm mặc định
+nữa — người dùng phải chủ động vào Cài đặt → Provider AI kết nối 1 provider thật
+(Claude/GPT/Gemini hoặc local endpoint Ollama/vLLM) trước khi chạy được các bước cần
+AI. Lý do: seed Mock ngầm khiến pipeline "chạy được" nhưng sinh nội dung giả lập vô
+nghĩa mà người dùng không hề hay biết — sai với nguyên tắc "chất lượng kịch bản là ưu
+tiên số 1" (§CLAUDE.md).
+
+Khi chưa có provider LLM khả dụng (`enabled=True, is_default=True`, hoặc bất kỳ
+provider `enabled` nào cho task `llm`), `app/providers/factory.py::get_llm()` raise
+`NoProviderConfiguredError` thay vì âm thầm fallback về Mock; tương tự khi provider đã
+cấu hình nhưng khởi tạo lỗi (VD sai API key). Lỗi này được 1 exception handler toàn
+cục trong `app/main.py` bắt và trả về **HTTP 400** với `{"detail": "<thông điệp tiếng
+Việt, có hướng dẫn vào Cài đặt>"}` — cùng format với mọi `HTTPException` khác trong
+app (không dùng format `{error:{code,message}}` ở §03).
+
+Frontend bắt lỗi này ở mọi hành động cần AI (Bắt đầu Research, Duyệt Gate #1, Tạo lại/
+Duyệt Script, Tạo Visual, Xem Production Pack, …) qua `ApiError` (`api/client.ts`) và
+hiển thị banner `<AiErrorBanner>` (`components/AiErrorBanner.tsx`) với nút "Cấu hình
+ngay →" điều hướng thẳng tới màn Cài đặt. Ngoài ra có 1 banner nổi góc dưới-phải toàn
+cục (`App.tsx`, dựa trên `GET /bootstrap → has_llm_provider`) hiển thị bất cứ khi nào
+chưa có provider LLM nào — kể cả trước khi người dùng bấm hành động nào.
+
+Guardrail check (§08) là NGOẠI LỆ có điều kiện: chỉ cần Provider AI khi
+`hook_spoken` khác rỗng (chấm Hook Strength) — script nhập từ file CSV/Excel (không có
+hook) chạy guardrail được mà KHÔNG cần provider (`run_guardrail_check(..., db=db)` chỉ
+gọi `get_llm()` khi thật sự cần, xem `app/guardrail/check.py`).
+
+`MockLLMProvider` vẫn hữu ích để: (a) pytest suite tạo 1 provider Mock riêng trong
+`conftest.py` (không đụng tới seed thật) chạy pipeline test offline, (b) người dùng
+tự thêm thủ công qua UI nếu muốn 1 provider "luôn sẵn sàng" cho việc dev/demo không
+tốn phí. Khi có GPU: thêm 1 provider Local Endpoint trỏ Ollama/vLLM (dùng chung
+`LocalOpenAICompatProvider`) và đặt làm mặc định — không cần sửa code pipeline.
 
 ## 9. Ràng buộc MVP
 

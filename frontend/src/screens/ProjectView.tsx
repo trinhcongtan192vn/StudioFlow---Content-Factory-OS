@@ -25,6 +25,8 @@ export default function ProjectView() {
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [pack, setPack] = useState<ProductionPack | null>(null);
   const [busy, setBusy] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const channelName = app.channels.find((c) => c.id === app.activeChannelId)?.name || "";
 
   const refresh = useCallback(async () => {
@@ -43,6 +45,22 @@ export default function ProjectView() {
     if (!project) return;
     const updated = await api.patchProject(project.id, { step: i });
     setProject(updated);
+  }
+
+  function startEditTitle() {
+    if (!project) return;
+    setTitleDraft(project.title);
+    setEditingTitle(true);
+  }
+
+  async function saveTitle() {
+    if (!project) return;
+    const next = titleDraft.trim();
+    setEditingTitle(false);
+    if (!next || next === project.title) return;
+    const updated = await api.patchProject(project.id, { title: next });
+    setProject(updated);
+    app.bumpProjectsVersion(project.channel_id);
   }
 
   if (!project || !pack) {
@@ -66,7 +84,32 @@ export default function ProjectView() {
         <span style={{ color: "color-mix(in srgb, var(--color-text) 30%, transparent)" }}>/</span>
         <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>{channelName}</div>
         <span style={{ color: "color-mix(in srgb, var(--color-text) 30%, transparent)" }}>/</span>
-        <div style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 14 }}>{project.title}</div>
+        {editingTitle ? (
+          <input
+            className="input"
+            autoFocus
+            value={titleDraft}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onBlur={saveTitle}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              if (e.key === "Escape") setEditingTitle(false);
+            }}
+            style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 14, padding: "2px 6px", height: "auto", width: 260 }}
+          />
+        ) : (
+          <div
+            onClick={startEditTitle}
+            title="Bấm để đổi tên dự án"
+            style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}
+          >
+            {project.title}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.45, flex: "none" }}>
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+            </svg>
+          </div>
+        )}
       </div>
 
       <Stepper step={project.step} maxStepReached={project.max_step_reached} onJump={jumpStep} />

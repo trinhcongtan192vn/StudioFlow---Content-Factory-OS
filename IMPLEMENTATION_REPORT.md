@@ -190,6 +190,57 @@ Nút "Nhập kịch bản từ file (CSV/Excel)" đặt cạnh nút Duyệt Gate
 
 16 test mới trong `tests/test_script_import.py` (parser thuần + endpoint parse/confirm + nhánh seed-không-gọi-AI khi import) cộng thêm cập nhật `tests/test_pipeline_flow.py` cho field đổi tên + 2 endpoint regenerate mới + 2 endpoint bulk mới. Tổng **96 test, tất cả pass**. Đã smoke-test thêm bằng HTTP thật (không qua pytest) toàn bộ luồng: parse CSV → confirm → visual/generate (xác nhận seed đúng, không gọi AI) → regenerate-visual → pack/build → gate2 approve.
 
+## 10. Cập nhật vòng 5 (2026-08-12) — Bỏ Mock provider mặc định + sửa Prompt Templates
+
+### 10.1 Bỏ Mock provider mặc định — báo lỗi rõ ràng thay vì âm thầm dùng nội dung giả lập
+
+Theo yêu cầu người dùng: không cần Mock provider mặc định; nếu chưa cấu hình Provider AI thì phải hiện cảnh báo khi 1 bước cần AI, để người dùng chủ động vào Cài đặt xử lý — thay vì hành vi cũ (seed sẵn `MockLLMProvider` làm mặc định, mọi bước "chạy được" nhưng âm thầm sinh nội dung placeholder vô nghĩa).
+
+- `app/providers/factory.py`: thêm `NoProviderConfiguredError`; `get_llm()` raise exception này khi không có provider LLM `enabled` nào (thay vì trả về `MockLLMProvider()`), và cả khi provider đã cấu hình nhưng khởi tạo lỗi (VD sai key). Xoá `get_llm_with_fallback()`/`get_fallback_llm()` (dead code sau khi bỏ fallback).
+- `app/main.py`: thêm exception handler toàn cục cho `NoProviderConfiguredError` → HTTP 400, `{"detail": "<thông điệp tiếng Việt>"}` (cùng format `HTTPException` khác, không đổi format theo §03).
+- `app/guardrail/check.py`: `run_guardrail_check()` đổi sang resolve LLM **lazy** (`db` thay vì `llm` bắt buộc) — chỉ thật sự cần Provider AI khi `hook_spoken` khác rỗng (chấm Hook Strength). Script nhập từ CSV/Excel (không có hook) chạy guardrail được mà không cần provider.
+- `app/seed.py`: bỏ hẳn khối seed provider Mock mặc định.
+- `backend/tests/conftest.py`: fixture `_ensure_mock_llm_is_default` tự tạo 1 provider Mock **riêng cho test suite** (không đụng seed thật) để pytest chạy pipeline offline.
+- `tests/test_no_provider.py` (mới, 7 test): xác nhận `/bootstrap.has_llm_provider=False`, và từng endpoint cần AI (`/research`, `/gate1`, `/guardrail/check` khi có hook, `/pack/build`, `/visual/generate` khi script nguồn AI) trả 400 kèm thông điệp đúng khi không có provider — đồng thời xác nhận luồng import (không hook, không gọi AI ở `/visual/generate`) chạy được **không cần provider nào**.
+- **Frontend**: banner nổi toàn cục góc dưới-phải (`App.tsx`, dựa vào `GET /bootstrap`) đã có sẵn từ trước, cảnh báo ngay cả khi chưa bấm hành động nào. Bổ sung mới: component `components/AiErrorBanner.tsx` + bắt lỗi (`try/catch` với `ApiError`) ở MỌI hành động gọi AI trong `BriefEditor` (Bắt đầu Research), `Gate1Outline` (Duyệt Gate #1), `ScriptStudio` (Tạo lại theo góp ý, Duyệt Script, Đi tới Visual Studio), `VisualStudio` (Tạo lại Visual/giọng đọc từng shot, 2 nút hàng loạt, Xem Production Pack) — trước đó các hành động này chạy trong `try {...} finally {...}` KHÔNG có `catch`, nên lỗi 400 mới sẽ thất bại lặng lẽ (cùng lớp lỗi đã gặp và sửa với luồng import YouTube ở vòng 2).
+- Đã verify end-to-end bằng HTTP thật (tạo project tạm, tắt hết provider → `/research` trả đúng 400 kèm thông điệp; bật lại provider → chạy bình thường trả 200; dọn project tạm sau khi test) — không chỉ dựa vào pytest.
+- Tổng **103 test, tất cả pass** (96 cũ + 7 mới).
+
+### 10.2 Sửa Prompt Templates — khớp đúng luồng, tham số đúng, bỏ thông tin giả
+
+Người dùng yêu cầu review màn Prompt Templates theo 4 tiêu chí: (1) mọi prompt phải thật sự được dùng và gắn với 1 bước trong luồng, (2) tham số truyền vào khớp đúng field thật, (3) hiển thị "từ điển" tham số ngay trên UI khi soạn/sửa, (4) bỏ thông tin không có thật (VD tên người soạn giả trong app single-user).
+
+Rà lại `backend/app/pipeline/generation.py` (từng lệnh gọi `get_template_body(db, task_key)` và đúng bộ tham số `ctx` truyền vào), phát hiện 2 lớp lỗi:
+
+- **Task key mồ côi** (seed sẵn nhưng không có điểm gọi thật nào trong code): `brief` ("Gợi ý Brief từ ý tưởng" — Brief Editor không có bước AI-assist nào gọi tới) và `visual_video` (`regenerate_shot_visual_fx` LUÔN dùng template `visual_image` bất kể `visual_type` của shot là ảnh hay video). → Gỡ `brief` khỏi seed (không có tính năng thật đứng sau); wire `visual_video` vào đúng nhánh khi shot có `visual_type == "video"` (tham số `visual_type` mới truyền qua `regenerate_shot_visual_fx`, lấy từ `target.get("visual_type")`/`s.get("visual_type")` ở 2 điểm gọi trong `routers/pipeline.py`).
+- **1 task key dùng cho 2 lệnh gọi có bộ tham số khác nhau** (khiến 1 nửa `{{placeholder}}` không bao giờ được thay thế, giữ nguyên dạng `{{...}}` trong prompt gửi AI): `outline_hook` dùng chung cho cả `generate_research` (tham số `topic`/`brief`/`outline_count`) lẫn `generate_hooks` (tham số `chosen_outline`/`hook_count`); `visual_image` dùng chung cho cả `generate_shots` — sinh HÀNG LOẠT shot ban đầu (tham số `script`) — lẫn `regenerate_shot_visual_fx` — sinh lại 1 shot riêng lẻ (tham số `script_snippet`/`visual_description`). → Tách `outline_hook` thành 2 task key riêng `outline`/`hook`; tách phần batch của `visual_image` ra task key mới `visual_shots_init`. Nguyên tắc mới ghi vào specs/07 mục 7: **mỗi task key chỉ ứng đúng 1 điểm gọi LLM (1:1)**.
+- `backend/app/seed.py` (`PROMPT_SEED`): viết lại theo cấu trúc 10 task key mới (`outline`, `hook`, `script`, `script_revise`, `script_breakdown`, `visual_shots_init`, `visual_image`, `visual_video`, `visual_tts`, `thumbnail`), mỗi bản seed chỉ dùng đúng placeholder mà `ctx` thật sự cung cấp cho điểm gọi tương ứng. Đổi mọi `updated_by` từ tên người giả (Hải Yến/Minh Anh/Đức Long) sang **"Hệ thống"** — app single-user không có quản lý user (§CLAUDE.md nguyên tắc 5); version do người dùng tự tạo qua UI vẫn ghi "Bạn" (không đổi, đã đúng từ trước).
+- `frontend/src/screens/settings/PromptTemplatesSettings.tsx`: cập nhật `STAGE_LABEL`/`STAGE_TO_STEP` theo task key mới; thêm `TASK_PARAMS`/`COMMON_PARAMS` — từ điển tham số khớp CHÍNH XÁC với `ctx` dựng trong `generation.py` cho từng task — hiển thị qua component `ParamDictionary` ở cả (a) card mở rộng của 1 template có sẵn và (b) dialog Tạo mới/Sửa (theo task đang chọn), để biết ngay nên dùng `{{...}}` nào mà không phải đọc code backend.
+- Dữ liệu prompt template cũ trong DB workspace thật (task key cũ, tên giả) đã được xoá và reseed lại theo cấu trúc mới (xác nhận với người dùng trước khi xoá vì đây là dữ liệu cục bộ đã tồn tại) — verify qua `GET /prompt-templates` sau khi khởi động lại backend: đủ 10 template, mọi `updated_by` đều là "Hệ thống".
+- `backend/tests/test_settings.py`: cập nhật assertion tra cứu theo task key `outline` (trước đây `outline_hook`).
+- Đã cập nhật `specs/07_prompt_templates.md` (bảng ánh xạ task key ↔ điểm gọi ↔ tham số, nguyên tắc 1:1 mới) làm nguồn sự thật khớp code.
+- Tổng vẫn **103 test, tất cả pass** sau refactor (không thêm test riêng cho phần này — đã có test hiện có phủ CRUD + `test_no_provider.py` phủ việc chọn template theo task key gián tiếp qua pipeline).
+
+## 11. Cập nhật vòng 6 (2026-08-12) — Sửa lỗi rename project + cập nhật danh sách/giá model AI thực tế
+
+### 11.1 Đổi tên project
+
+Không có UI nào cho phép đổi tên project dù backend `PATCH /projects/{id}` đã hỗ trợ field `title` từ trước — `ProjectView`/`Dashboard`/`Sidebar` chỉ hiển thị `project.title` dạng text tĩnh. Thêm click-to-edit ngay trên breadcrumb title ở `ProjectView.tsx` (bấm → input → Enter/blur lưu qua `patchProject`, Escape huỷ). Vì Sidebar cache danh sách project theo kênh và không có cơ chế tự làm mới khi có thay đổi ở nơi khác, thêm `AppContext.projectsVersion` + `bumpProjectsVersion(channelId)` — `ProjectView` gọi hàm này sau khi đổi tên thành công, `Sidebar` refetch khi version đổi.
+
+### 11.2 Cập nhật danh sách & giá model AI theo thực tế 2026-08-12
+
+Danh sách model trong `CLOUD_MODELS` (backend) / `CLOUD_CATALOG` (frontend) đã cũ (VD `claude-sonnet-4-5`, `gpt-4.1`, `gemini-2.5-pro` — đều là model thế hệ trước). Đã research lại qua tài liệu chính thức từng hãng (không dùng số liệu từ các trang tổng hợp giá bên thứ 3 — nhiều trang trong số đó có dấu hiệu nội dung SEO tự sinh, số liệu không đáng tin):
+
+- **Anthropic** (`docs.claude.com/en/docs/about-claude/models/overview`): model hiện hành `claude-fable-5` ($10/$50 mỗi 1M token input/output), `claude-opus-5` ($5/$25), `claude-sonnet-5` ($2/$10), `claude-haiku-4-5` ($1/$5).
+- **OpenAI** (`developers.openai.com/api/docs/pricing`, `/models`): dòng flagship hiện tại là GPT-5.6 với 3 tier `gpt-5.6-sol` ($5/$30, mạnh nhất), `gpt-5.6-terra` ($2/$12, cân bằng), `gpt-5.6-luna` ($0.20/$1.20, rẻ nhất).
+- **Google Gemini** (`ai.google.dev/gemini-api/docs/pricing`, `/models`): `gemini-3.6-flash` ($1.50/$7.50, flagship GA mới nhất), `gemini-2.5-pro` ($1.25/$10.00, vẫn là lựa chọn reasoning chất lượng cao nhất có giá GA chính thức — `gemini-3.1-pro-preview` mạnh hơn nhưng còn preview nên không đưa vào danh sách mặc định), `gemini-2.5-flash-lite` ($0.10/$0.40, rẻ nhất).
+
+Cập nhật: `backend/app/routers/providers.py` (`CLOUD_MODELS`), `frontend/src/screens/settings/ProviderSettings.tsx` (`CLOUD_CATALOG`) — 2 nơi phải khớp nhau. Đồng thời phát hiện thêm 1 vấn đề liên quan trong lúc rà soát: cả 3 adapter (`app/providers/claude.py`/`openai_provider.py`/`gemini.py`) trước đó tính `estimated_cost_usd` bằng 1 mức giá CỐ ĐỊNH DUY NHẤT bất kể model nào đang cấu hình (VD Claude luôn tính $3/$15 dù đang dùng Opus $5/$25 hay Haiku $1/$5) — sai số lớn cho tính năng Chi phí & Ngân sách. Thêm dict `PRICING: dict[model_name, (price_in, price_out)]` cho từng adapter (khớp bảng giá chính thức ở trên, gồm cả vài model thế hệ trước còn dùng được) + `DEFAULT_PRICING` làm fallback khi model không có trong bảng (model snapshot cũ/tự nhập), cost tính theo đúng model đang cấu hình. Default `model_name` của từng adapter khi tạo mới cũng đổi sang tier "cân bằng" hiện tại (`claude-sonnet-5`/`gpt-5.6-terra`/`gemini-3.6-flash`).
+
+**Chưa cập nhật (ngoài phạm vi vòng này):** danh sách model TTS/Image/Video (`elevenlabs`, `vbee`, `flux`, `midjourney`, `runway`, `sora`) — các nhóm này chỉ khai báo interface, chưa dùng thật ở M1 (§05 mục 9), nên không research lại lần này; để làm khi bắt đầu M2 (render thật).
+
+Verify: tạo 1 provider Claude qua API thật (không truyền `model_name`) → xác nhận `model_name` mặc định trả về là `claude-opus-5` (model đầu danh sách mới) và `available_models` đúng 4 model mới; dọn provider tạm sau khi test. Restart lại backend dev (8756) + Electron (backend con của Electron không tự nhận code mới vì chạy `uvicorn` không có `--reload`) để code mới thật sự có hiệu lực trên app đang chạy. Tổng vẫn **103 test, tất cả pass**, frontend typecheck sạch.
+
 ## 6. File specs đã cập nhật
 
 `02_database.md`, `03_api.md`, `04_data_schemas.md`, `05_ai_providers.md`, `06_uiux.md`, `07_prompt_templates.md`, `09_sprint_tasks.md` — mỗi chỗ lệch đánh dấu bằng blockquote `> **Đã build...`, giữ nguyên nội dung gốc bên cạnh để thấy được ý định ban đầu vs. thực tế.

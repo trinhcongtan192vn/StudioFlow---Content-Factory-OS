@@ -89,7 +89,7 @@ JSON_SUFFIX = "\n\nChỉ trả JSON thuần theo đúng cấu trúc yêu cầu, 
 
 def generate_research(llm: LLMProvider, db: Session, brand: dict, brief: dict, usage: list | None = None) -> dict:
     ctx = {**_brand_ctx(brand), "topic": brief.get("topic", ""), "brief": json.dumps(brief, ensure_ascii=False), "outline_count": 3}
-    tpl = get_template_body(db, "outline_hook") or "Từ Brief {{brief}}, sinh {{outline_count}} outline khác góc tiếp cận."
+    tpl = get_template_body(db, "outline") or "Từ Brief {{brief}}, sinh {{outline_count}} outline khác góc tiếp cận."
     prompt = render(tpl, ctx) + JSON_SUFFIX + '\nCấu trúc: {"synthesis": "...", "outlines": [{"id","title","points":[...]}]}'
     try:
         result = llm.complete("Bạn là trợ lý nghiên cứu nội dung YouTube tiếng Việt.", [LLMMessage("user", prompt)], max_tokens=1500)
@@ -107,7 +107,7 @@ def generate_research(llm: LLMProvider, db: Session, brand: dict, brief: dict, u
 
 def generate_hooks(llm: LLMProvider, db: Session, brand: dict, brief: dict, chosen_outline: dict, usage: list | None = None) -> list[dict]:
     ctx = {**_brand_ctx(brand), "chosen_outline": json.dumps(chosen_outline, ensure_ascii=False), "hook_count": 3}
-    tpl = get_template_body(db, "outline_hook") or "Viết 3 biến thể HOOK theo 3 kiểu tâm lý khác nhau."
+    tpl = get_template_body(db, "hook") or "Viết 3 biến thể HOOK theo 3 kiểu tâm lý khác nhau."
     prompt = render(tpl, ctx) + JSON_SUFFIX + '\nCấu trúc: {"hooks": [{"id","psychological_type","spoken","visual"}]}'
     try:
         result = llm.complete("Bạn là biên kịch hook video YouTube tiếng Việt.", [LLMMessage("user", prompt)], max_tokens=800)
@@ -175,9 +175,13 @@ def breakdown_script(llm: LLMProvider, db: Session, full_text: str, max_gap_sec:
 
 
 def generate_shots(llm: LLMProvider, db: Session, brand: dict, body: list[dict], usage: list | None = None) -> list[dict]:
+    """Sinh HÀNG LOẠT toàn bộ shot ban đầu từ script — khác `regenerate_shot_visual_fx`
+    (sinh lại 1 shot riêng lẻ) nên dùng task key riêng `visual_shots_init`, tránh tái sử
+    dụng `visual_image`/`visual_video` với 2 bộ tham số khác nhau cho cùng 1 task key
+    (từng gây lỗi `{{placeholder}}` không được thay thế — xem specs/07 mục 7)."""
     ctx = {**_brand_ctx(brand), "script": json.dumps(body, ensure_ascii=False)}
-    tpl_img = get_template_body(db, "visual_image") or "Sinh prompt hình ảnh cho từng shot theo style kênh {{channel}}."
-    prompt = render(tpl_img, ctx) + JSON_SUFFIX + '\nCấu trúc: {"shots": [{"shot_id","asset_type","visual_type","visual_fx","audio_sfx","linked_timestamp_sec"}]}'
+    tpl = get_template_body(db, "visual_shots_init") or "Sinh prompt hình ảnh/video cho từng shot theo style kênh {{channel}}."
+    prompt = render(tpl, ctx) + JSON_SUFFIX + '\nCấu trúc: {"shots": [{"shot_id","asset_type","visual_type","visual_fx","audio_sfx","linked_timestamp_sec"}]}'
     try:
         result = llm.complete("Bạn là AI Operator sinh prompt shot chuẩn hoá.", [LLMMessage("user", prompt)], max_tokens=1500)
         parsed = _extract_json(result.text)
@@ -189,11 +193,17 @@ def generate_shots(llm: LLMProvider, db: Session, brand: dict, body: list[dict],
     return fb.fallback_shots(body)
 
 
-def regenerate_shot_visual_fx(llm: LLMProvider, db: Session, brand: dict, beat: dict, usage: list | None = None) -> str:
+def regenerate_shot_visual_fx(llm: LLMProvider, db: Session, brand: dict, beat: dict, visual_type: str = "image", usage: list | None = None) -> str:
     """Sinh lại RIÊNG trường Visual/FX cho 1 shot (đã build vòng 4 — tách khỏi TTS/Audio-SFX,
-    khớp 2 nút "Tạo lại Visual" / "Tạo lại giọng đọc" riêng biệt trong design)."""
+    khớp 2 nút "Tạo lại Visual" / "Tạo lại giọng đọc" riêng biệt trong design).
+
+    `visual_type` ("image"/"video") chọn đúng template kênh `visual_image`/`visual_video`
+    (2 task key riêng, khớp toggle Image/Video ở Visual Studio) — trước đây luôn dùng
+    `visual_image` bất kể loại shot, khiến template `visual_video` không bao giờ được
+    gọi tới (xem specs/07 mục 7)."""
     ctx = {**_brand_ctx(brand), "script_snippet": beat.get("audio", ""), "visual_description": beat.get("visual", "")}
-    tpl = get_template_body(db, "visual_image") or "Sinh prompt hình ảnh cho shot theo style kênh {{channel}}, mô tả: {{visual_description}}."
+    task_key = "visual_video" if visual_type == "video" else "visual_image"
+    tpl = get_template_body(db, task_key) or "Sinh prompt hình ảnh cho shot theo style kênh {{channel}}, mô tả: {{visual_description}}."
     prompt = render(tpl, ctx) + "\n\nTrả về DUY NHẤT 1 đoạn prompt hình ảnh/video, KHÔNG dùng JSON, không thêm chữ giải thích."
     try:
         result = llm.complete("Bạn là AI Operator sinh prompt shot chuẩn hoá.", [LLMMessage("user", prompt)], max_tokens=300)

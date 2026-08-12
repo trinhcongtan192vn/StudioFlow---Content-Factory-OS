@@ -19,6 +19,13 @@ _LLM_ADAPTERS = {
 }
 
 
+class NoProviderConfiguredError(Exception):
+    """Chưa có provider AI khả dụng cho task này, hoặc provider đã cấu hình nhưng
+    không khởi tạo được — người dùng cần vào Cài đặt → Provider AI để xử lý (đã build
+    theo yêu cầu: không còn âm thầm dùng Mock provider thay thế, phải cảnh báo rõ để
+    người dùng chủ động cập nhật cấu hình, xem IMPLEMENTATION_REPORT.md)."""
+
+
 def build_llm_provider(cfg: ProviderConfig) -> LLMProvider:
     if cfg.provider_name == "mock":
         return MockLLMProvider(model_name=cfg.model_name or "mock-deterministic")
@@ -32,8 +39,13 @@ def build_llm_provider(cfg: ProviderConfig) -> LLMProvider:
 
 
 def get_llm(db: Session, *, task_role: str = "default") -> LLMProvider:
-    """task_role: 'research' | 'script' | 'hook' | ... — MVP dùng chung 1 default/fallback
-    cho toàn bộ task LLM (§05 mục 4); override theo project để sau (chưa cần ở M1)."""
+    """task_role: 'research' | 'script' | 'hook' | ... — MVP dùng chung 1 default cho
+    toàn bộ task LLM (§05 mục 4); override theo project để sau (chưa cần ở M1).
+
+    Raise `NoProviderConfiguredError` khi chưa có provider nào — KHÔNG tự động dùng
+    Mock provider thay thế (đổi hành vi theo yêu cầu người dùng): mọi bước pipeline
+    cần AI phải cảnh báo rõ ràng để người dùng chủ động vào Cài đặt cấu hình, thay vì
+    âm thầm sinh nội dung giả lập."""
     cfg = (
         db.query(ProviderConfig)
         .filter(ProviderConfig.task == "llm", ProviderConfig.enabled == True, ProviderConfig.is_default == True)  # noqa: E712
@@ -42,28 +54,13 @@ def get_llm(db: Session, *, task_role: str = "default") -> LLMProvider:
     if cfg is None:
         cfg = db.query(ProviderConfig).filter(ProviderConfig.task == "llm", ProviderConfig.enabled == True).first()
     if cfg is None:
-        return MockLLMProvider()
+        raise NoProviderConfiguredError(
+            "Chưa cấu hình Provider AI cho LLM. Vào Cài đặt → Provider AI để kết nối Claude/GPT/Gemini hoặc model local (Ollama/vLLM)."
+        )
     try:
         return build_llm_provider(cfg)
-    except Exception:  # noqa: BLE001
-        return MockLLMProvider()
-
-
-def get_llm_with_fallback(db: Session, *, task_role: str = "default") -> LLMProvider:
-    """Gọi provider chính; nếu lỗi/timeout, factory ở tầng gọi (pipeline) tự bắt exception
-    và có thể gọi lại với provider is_fallback (§05 mục 6)."""
-    return get_llm(db, task_role=task_role)
-
-
-def get_fallback_llm(db: Session) -> LLMProvider | None:
-    cfg = (
-        db.query(ProviderConfig)
-        .filter(ProviderConfig.task == "llm", ProviderConfig.enabled == True, ProviderConfig.is_fallback == True)  # noqa: E712
-        .first()
-    )
-    if cfg is None:
-        return None
-    try:
-        return build_llm_provider(cfg)
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception as e:  # noqa: BLE001
+        raise NoProviderConfiguredError(
+            f'Provider "{cfg.display_name}" đã cấu hình nhưng không khởi tạo được ({e}). '
+            "Kiểm tra lại API key/endpoint trong Cài đặt → Provider AI."
+        ) from e

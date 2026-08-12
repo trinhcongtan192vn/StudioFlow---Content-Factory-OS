@@ -7,7 +7,6 @@ from app.db import get_db
 from app.filestore import read_json, write_json
 from app.guardrail.check import annotate_body_with_warnings, run_guardrail_check
 from app.models import Project, RetentionEntry
-from app.providers.factory import get_llm
 from app.routers.pipeline import record_usage
 
 router = APIRouter(tags=["guardrail", "retention"])
@@ -32,11 +31,10 @@ def guardrail_check(project_id: str, db: Session = Depends(get_db)):
     if not body:
         raise HTTPException(400, "Chưa có body script để check")
 
-    llm = get_llm(db, task_role="guardrail")
     benchmark = brand.get("retention_benchmark", {})
     usage: list[dict] = []
     result = run_guardrail_check(
-        llm,
+        db=db,
         hook_spoken=(pack.get("script") or {}).get("hook", {}).get("spoken", ""),
         body=body,
         benchmark=benchmark,

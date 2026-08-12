@@ -4,11 +4,28 @@ from app.providers.base import LLMMessage, LLMProvider, LLMResult, ProviderStatu
 
 API_URL = "https://api.openai.com/v1/chat/completions"
 
+# USD / 1M token (input, output) — theo developers.openai.com/api/docs/pricing, đối
+# chiếu lại 2026-08-12. Model không có trong bảng rơi vào DEFAULT_PRICING.
+PRICING: dict[str, tuple[float, float]] = {
+    "gpt-5.6-sol": (5.0, 30.0),
+    "gpt-5.6-terra": (2.0, 12.0),
+    "gpt-5.6-luna": (0.20, 1.20),
+    "gpt-5.5": (5.0, 30.0),
+    "gpt-5.1": (1.25, 10.0),
+    "gpt-5": (1.25, 10.0),
+    "gpt-5-mini": (0.25, 2.0),
+    "gpt-4.1": (2.0, 8.0),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.60),
+}
+DEFAULT_PRICING = (2.5, 10.0)
+
 
 class OpenAIProvider(LLMProvider):
     provider_name = "openai"
 
-    def __init__(self, api_key: str, model_name: str = "gpt-4.1"):
+    def __init__(self, api_key: str, model_name: str = "gpt-5.6-terra"):
         self.api_key = api_key
         self.model_name = model_name
 
@@ -27,7 +44,8 @@ class OpenAIProvider(LLMProvider):
         text = data["choices"][0]["message"]["content"]
         usage = data.get("usage", {})
         in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
-        cost = in_tok / 1_000_000 * 2.5 + out_tok / 1_000_000 * 10.0
+        price_in, price_out = PRICING.get(self.model_name, DEFAULT_PRICING)
+        cost = in_tok / 1_000_000 * price_in + out_tok / 1_000_000 * price_out
         return LLMResult(text=text, input_tokens=in_tok, output_tokens=out_tok, estimated_cost_usd=cost, model=self.model_name)
 
     def test_connection(self) -> ProviderStatus:

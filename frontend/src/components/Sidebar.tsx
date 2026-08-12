@@ -11,13 +11,15 @@ export default function Sidebar() {
   const [newChannelOpen, setNewChannelOpen] = useState(false);
 
   useEffect(() => {
+    // Refetch mỗi khi 1 kênh được mở HOẶC `projectsVersion` của kênh đó tăng (đổi tên/
+    // xoá project ở màn khác gọi app.bumpProjectsVersion để cache ở đây không bị cũ).
     Object.keys(app.expandedChannels).forEach((chId) => {
-      if (app.expandedChannels[chId] && !projectsByChannel[chId]) {
+      if (app.expandedChannels[chId]) {
         api.listProjects(chId).then((ps) => setProjectsByChannel((s) => ({ ...s, [chId]: ps })));
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [app.expandedChannels]);
+  }, [app.expandedChannels, app.projectsVersion]);
 
   async function handleNewProject(channelId: string) {
     const p = await api.createProject(channelId, "Dự án mới chưa có tên");

@@ -19,10 +19,16 @@ from app.providers.stubs import (
 
 router = APIRouter(tags=["providers"])
 
+# Danh sách model hiện có mỗi provider — đối chiếu lại với tài liệu chính thức từng
+# hãng 2026-08-12 (docs.claude.com, developers.openai.com/api/docs, ai.google.dev/
+# gemini-api/docs). Giá tương ứng xem `PRICING` trong từng adapter
+# (app/providers/claude.py|openai_provider.py|gemini.py) — 2 nơi này phải khớp nhau
+# khi cập nhật model mới. Khớp CLOUD_CATALOG ở
+# frontend/src/screens/settings/ProviderSettings.tsx.
 CLOUD_MODELS = {
-    "claude": ["claude-sonnet-4-5", "claude-haiku-4-5"],
-    "openai": ["gpt-4.1", "gpt-4.1-mini"],
-    "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"],
+    "claude": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "claude-fable-5"],
+    "openai": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+    "gemini": ["gemini-3.6-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
     "elevenlabs": ["eleven_v3", "eleven_turbo"],
     "vbee": ["vbee-female-01", "vbee-male-01"],
     "flux": ["flux-1.1-pro", "flux-schnell"],
