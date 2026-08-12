@@ -20,15 +20,32 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [playQueue, setPlayQueue] = useState<string[]>([]);
   const [isPlayingAll, setIsPlayingAll] = useState(false);
+  const pollRef = useRef<number | undefined>(undefined);
 
-  useEffect(() => {
+  function loadRenderStatus() {
     api
       .getRenderStatus(project.id)
       .then(setRenderState)
       .catch(() => {
         /* chưa từng sinh asset — bỏ qua, coi như chưa có giọng đọc nào */
       });
+  }
+
+  useEffect(() => {
+    loadRenderStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
+
+  const hasInFlight = !!renderState && renderState.shots.some((s) => s.visual_status === "generating" || s.narration_status === "generating");
+
+  useEffect(() => {
+    window.clearInterval(pollRef.current);
+    if (hasInFlight) {
+      pollRef.current = window.setInterval(loadRenderStatus, 3000);
+    }
+    return () => window.clearInterval(pollRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasInFlight]);
 
   const hasBody = (script?.body?.length || 0) > 0;
   const showEditor = !hasBody || editingAgain;

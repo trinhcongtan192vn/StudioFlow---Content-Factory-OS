@@ -217,40 +217,39 @@ function ShotCard({
 }
 
 function ShotPreview({ projectId, shot, status }: { projectId: string; shot: Shot; status: ShotRenderStatus | undefined }) {
-  if (status?.visual_status === "ready") {
-    return (
-      <div>
-        {shot.visual_type === "video" ? (
+  return (
+    <div>
+      {status?.visual_status === "ready" ? (
+        shot.visual_type === "video" ? (
           // eslint-disable-next-line jsx-a11y/media-has-caption
           <video controls style={{ width: "100%", borderRadius: "var(--radius-sm)" }} src={api.renderShotAssetUrl(projectId, shot.shot_id, "visual")} />
         ) : (
           <img alt={shot.shot_id} style={{ width: "100%", borderRadius: "var(--radius-sm)", display: "block" }} src={api.renderShotAssetUrl(projectId, shot.shot_id, "visual")} />
-        )}
-        {status.narration_status === "ready" && (
-          // eslint-disable-next-line jsx-a11y/media-has-caption
-          <audio controls style={{ width: "100%", marginTop: 6 }} src={api.renderShotAssetUrl(projectId, shot.shot_id, "narration")} />
-        )}
-        {status.narration_status === "error" && <div style={{ fontSize: 11, color: "var(--color-danger)", marginTop: 4 }}>{status.narration_error}</div>}
-      </div>
-    );
-  }
-  return (
-    <div
-      style={{
-        height: 124,
-        borderRadius: "var(--radius-sm)",
-        background: "var(--color-bg)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        textAlign: "center",
-        padding: 6,
-        fontSize: 11,
-        opacity: 0.6,
-        color: status?.visual_status === "error" ? "var(--color-danger)" : undefined,
-      }}
-    >
-      {status?.visual_status === "error" ? status.visual_error : status?.visual_status === "generating" ? "Đang sinh…" : `${shot.visual_type === "video" ? "Video" : "Image"} — chưa sinh`}
+        )
+      ) : (
+        <div
+          style={{
+            height: 124,
+            borderRadius: "var(--radius-sm)",
+            background: "var(--color-bg)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            textAlign: "center",
+            padding: 6,
+            fontSize: 11,
+            opacity: 0.6,
+            color: status?.visual_status === "error" ? "var(--color-danger)" : undefined,
+          }}
+        >
+          {status?.visual_status === "error" ? status.visual_error : status?.visual_status === "generating" ? "Đang sinh…" : `${shot.visual_type === "video" ? "Video" : "Image"} — chưa sinh`}
+        </div>
+      )}
+      {status?.narration_status === "ready" && (
+        // eslint-disable-next-line jsx-a11y/media-has-caption
+        <audio controls style={{ width: "100%", marginTop: 6 }} src={api.renderShotAssetUrl(projectId, shot.shot_id, "narration")} />
+      )}
+      {status?.narration_status === "error" && <div style={{ fontSize: 11, color: "var(--color-danger)", marginTop: 4 }}>{status.narration_error}</div>}
     </div>
   );
 }
