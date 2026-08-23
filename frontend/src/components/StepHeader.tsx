@@ -29,11 +29,18 @@ export default function StepHeader({ title, description, actions, extra }: { tit
           zIndex: 1,
         }}
       >
-        <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ minWidth: 240, flex: "1 1 320px" }}>
           <h3 style={{ margin: "0 0 2px" }}>{title}</h3>
           {description && <p style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)", fontSize: 13, margin: 0 }}>{description}</p>}
         </div>
-        {actions && <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "1 1 auto", minWidth: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>{actions}</div>}
+        {/* `flex: "0 1 auto"` (không phải "1 1 auto") — actions KHÔNG tranh chỗ giãn với
+            cột title/description. Trước đây cả 2 bên cùng `flex:1` + `minWidth:0` khiến
+            browser co cả 2 xuống rất hẹp thay vì tự xuống hàng — actions ngày càng dài
+            (nhiều nút được thêm theo các đợt cập nhật) làm description bị bóp còn vài
+            chữ/dòng, chữ ngắt dòng lởm chởm. Cho title/description 1 độ rộng tối thiểu
+            thật (`minWidth`/`flexBasis`) để actions tự xuống hàng riêng khi không đủ
+            chỗ, thay vì cả 2 cùng bị ép hẹp. */}
+        {actions && <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "0 1 auto", minWidth: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>{actions}</div>}
       </div>
       {extra}
     </>

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import AppSetting, AuditLog, Budget, Channel, PromptTemplate, PromptTemplateVersion
+from app.timeutil import vn_strftime
 
 router = APIRouter(tags=["settings"])
 
@@ -73,9 +74,9 @@ def _tpl_out(db: Session, t: PromptTemplate) -> dict:
         "active_version": t.active_version,
         "body": active.content if active else "",
         "updated_by": active.updated_by if active else "",
-        "updated_at": active.created_at.isoformat() if active else "",
+        "updated_at": vn_strftime(active.created_at, "%d/%m/%Y %H:%M") if active else "",
         "versions": [
-            {"version": v.version, "note": v.note, "updated_by": v.updated_by, "updated_at": v.created_at.isoformat(), "is_active": v.version == t.active_version}
+            {"version": v.version, "note": v.note, "updated_by": v.updated_by, "updated_at": vn_strftime(v.created_at, "%d/%m/%Y %H:%M"), "is_active": v.version == t.active_version}
             for v in versions
         ],
     }
@@ -158,7 +159,7 @@ def get_audit_log(type: str | None = None, db: Session = Depends(get_db)):
     rows = q.limit(200).all()
     return [
         {
-            "time": r.created_at.strftime("%d/%m/%Y %H:%M"),
+            "time": vn_strftime(r.created_at, "%d/%m/%Y %H:%M"),
             "user": "Bạn",
             "action": r.action,
             "detail": r.detail,
@@ -239,7 +240,7 @@ def get_budget_detail(channel_id: str, db: Session = Depends(get_db)):
             continue
         key = (d.get("project", "—"), d.get("provider", "LLM"))
         g = groups.setdefault(key, {"project": key[0], "provider": key[1], "requests": []})
-        g["requests"].append({"time": r.created_at.strftime("%d/%m %H:%M"), "model": d.get("model", ""), "tokens_label": d.get("tokens", ""), "cost": r.cost or 0})
+        g["requests"].append({"time": vn_strftime(r.created_at, "%d/%m %H:%M"), "model": d.get("model", ""), "tokens_label": d.get("tokens", ""), "cost": r.cost or 0})
 
     out = []
     for g in groups.values():

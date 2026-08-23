@@ -23,31 +23,11 @@ from app.models import (
 from app.schemas import Brief, ProductionPack
 
 PROMPT_SEED = [
-    ("pt_outline", "Sinh Outline (Research)", "outline", [
-        ("v1", "Khởi tạo", "Hệ thống", "Từ Brief {{brief}} về chủ đề {{topic}}, sinh {{outline_count}} outline khác góc tiếp cận."),
-        ("v2", "Ràng buộc bám sát BrandProfile", "Hệ thống", "Từ Brief {{brief}} về chủ đề {{topic}}, sinh {{outline_count}} outline khác góc tiếp cận, bám sát trụ cột nội dung {{content_pillars}} và giọng kênh {{channel}}, tránh {{forbidden}}."),
-    ]),
-    ("pt_hook", "Sinh Hook Variants", "hook", [
-        ("v1", "Khởi tạo", "Hệ thống", "Từ dàn ý {{chosen_outline}}, viết {{hook_count}} biến thể hook theo các kiểu tâm lý khác nhau."),
-        ("v2", "Ràng buộc hook dưới 12 từ", "Hệ thống", "Từ dàn ý {{chosen_outline}}, viết {{hook_count}} biến thể hook theo kiểu ưa dùng của kênh {{hook_formats}}. Mỗi hook dưới 12 từ, không clickbait sai sự thật, tránh {{forbidden}}."),
-    ]),
-    ("pt_script", "Viết Master Script", "script", [
-        ("v1", "Khởi tạo", "Hệ thống", "Viết Master Script từ Outline {{outline}} và Hook {{hook}}, độ dài {{length}}."),
-        ("v2", "Thêm chỉ dẫn nhịp câu ngắn", "Hệ thống", "Viết Master Script hoàn chỉnh từ Outline {{outline}} và Hook {{hook}}, giọng văn theo BrandProfile kênh {{channel}}, câu ngắn, tránh thuật ngữ khó, độ dài {{length}}, theo framework {{framework}}."),
-    ]),
-    ("pt_script_revise", "Tạo lại Full Script theo góp ý", "script_revise", [
-        ("v1", "Khởi tạo", "Hệ thống", "Viết lại Full Script {{current_script}} theo góp ý của người dùng: {{user_feedback}}. Giữ nguyên giọng văn BrandProfile kênh {{channel}} và độ dài {{length}}, chỉ điều chỉnh đúng phần được góp ý, không thay đổi các đoạn khác."),
-    ]),
-    ("pt_script_breakdown", "Phân rã Full Script theo đoạn (Audio/Visual/Direction)", "script_breakdown", [
-        ("v1", "Khởi tạo", "Hệ thống", "Phân rã Full Script {{script_text}} thành các đoạn theo timestamp, audio, visual và direction."),
-        ("v2", "Giới hạn 8s/shot", "Hệ thống", "Phân rã Full Script {{script_text}} đã duyệt thành các đoạn theo timeline: mỗi đoạn gồm {timestamp, audio (nguyên văn lời đọc), visual (mô tả hình ảnh/video), direction (chỉ dẫn nhịp, cảm xúc)}, tối đa 8s/đoạn."),
-    ]),
-    ("pt_thumb", "Title, Description & Thumbnail concept", "thumbnail", [
-        ("v1", "Khởi tạo", "Hệ thống", "Từ Brief {{brief}} và kịch bản {{script}}, sinh 5-10 tiêu đề tối ưu SEO+CTR, mô tả SEO, hashtags và concept thumbnail theo style kênh {{visual_style_prompt}}."),
-    ]),
-    ("pt_visual_shots_init", "Visual Studio — Khởi tạo danh sách Shot", "visual_shots_init", [
-        ("v1", "Khởi tạo", "Hệ thống", "Từ toàn bộ script {{script}} và style kênh {{visual_style_prompt}}, sinh prompt hình ảnh/video cho từng shot: muted palette, single accent color, no text, aspect 16:9."),
-    ]),
+    # `pt_outline`/`pt_hook`/`pt_script`/`pt_script_revise`/`pt_script_breakdown`/
+    # `pt_thumb`/`pt_visual_shots_init` đã XOÁ (2026-08-17, mục 44 IMPLEMENTATION_REPORT.md)
+    # cùng lúc bỏ hẳn luồng AI Research/Outline/Hook/Full-Script + Pack Review — các
+    # template này không còn được `generation.py` gọi tới nữa (theo yêu cầu người dùng:
+    # "upload script" là con đường duy nhất còn lại, xem `pipeline.py::import_script_confirm`).
     ("pt_visual_image", "Visual Studio — Tạo lại Visual (ảnh)", "visual_image", [
         ("v1", "Khởi tạo", "Hệ thống", "Từ đoạn script {{script_snippet}} và mô tả visual hiện tại {{visual_description}}, sinh lại 1 prompt ảnh cho shot này theo style kênh {{visual_style_prompt}}: muted palette, single accent color, no text, aspect 16:9."),
     ]),

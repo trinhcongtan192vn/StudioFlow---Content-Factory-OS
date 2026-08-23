@@ -9,10 +9,28 @@ __pycache__/
 .venv/
 venv/
 workspace/*.db
+workspace/*.db.bak-*
 workspace/.secret_key
 workspace/channels/*/
 !workspace/channels/.gitkeep
+# Thư viện Creative Asset — data thật của người dùng (nhạc nền/video/ảnh/giọng đọc đã
+# upload), không phải source code.
+workspace/library/*/
+!workspace/library/*/.gitkeep
 *.log
 .env
 .DS_Store
 Thumbs.db
+
+# Model weights local (Ollama/Piper/ComfyUI) — tải riêng theo IMPLEMENTATION_REPORT.md,
+# không commit binary lớn vào git.
+backend/models/
+
+# Runtime state của công cụ Claude Code, không thuộc app.
+.claude/
+
+# Scratch/debug artifact để lại trong lúc điều tra bug — không phải tài liệu/source thật.
+backend/mismatch_test.txt
+backend/narration_test_pid.txt
+omnivoice_context.txt
+omnivoice_generate_doc.txt

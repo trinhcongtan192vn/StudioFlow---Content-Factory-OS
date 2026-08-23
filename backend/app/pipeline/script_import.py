@@ -138,6 +138,43 @@ def parse_script_rows(rows: list[list[str]]) -> dict:
     }
 
 
+_TEMPLATE_HEADER = [
+    "Mã block",
+    "Thời lượng",
+    "Loại Visual",
+    "Hình ảnh & Hiệu ứng (Visual/FX)",
+    "Âm thanh & Nhạc nền (Audio/SFX)",
+    "Kịch bản Giọng đọc (VO Content)",
+]
+_TEMPLATE_EXAMPLE_ROWS = [
+    ["B01", "0:00–0:08", "Video", "Cận cảnh nhân vật bước vào khung hình, ánh sáng ngược", "[SFX]: Tiếng bước chân. [BGM]: Trống trầm, nhịp chậm.", "Đêm ấy, không ai ngờ mọi chuyện lại rẽ sang một hướng khác."],
+    ["B02", "0:08–0:20", "Image", "Bản đồ cổ, cận cảnh vị trí đánh dấu", "[BGM]: Tiếp tục nền, hạ nhẹ.", "Nội dung lời đọc cho block này — có thể dài nhiều câu."],
+]
+
+
+def build_template_workbook() -> bytes:
+    """Tạo file Excel mẫu đúng 6 cột `parse_script_rows()` yêu cầu (`COLUMN_KEYWORDS`
+    ở trên — SỬA CẢ 2 CHỖ nếu đổi tên cột, để mẫu không lệch parser) — kèm 2 dòng ví dụ
+    minh hoạ định dạng "Thời lượng" (H:MM–H:MM) và nội dung từng cột, tránh người dùng
+    đoán sai format rồi bị từ chối lúc import thật."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Kịch bản"
+    ws.append(_TEMPLATE_HEADER)
+    for row in _TEMPLATE_EXAMPLE_ROWS:
+        ws.append(row)
+    for col_letter, width in zip("ABCDEF", [10, 14, 12, 42, 42, 55]):
+        ws.column_dimensions[col_letter].width = width
+    for cell in ws[1]:
+        cell.font = cell.font.copy(bold=True)
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def parse_script_file(content: bytes, filename: str) -> dict:
     is_csv = filename.lower().endswith(".csv")
     try:

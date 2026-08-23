@@ -104,9 +104,9 @@ def test_import_parse_endpoint_invalid_file_returns_400(client, project):
     assert "6 cột" in resp.json()["detail"]
 
 
-def test_import_confirm_skips_gate1_and_ai_generation(client, project):
-    """Import ở Gate 1 phải nhảy thẳng qua Script Studio (step 2, đã duyệt) mà KHÔNG
-    cần chọn outline/hook hay gọi AI Generation — khớp design vòng 4."""
+def test_import_confirm_jumps_straight_to_script_studio(client, project):
+    """Import phải nhảy thẳng qua Script Studio (step 1, đã duyệt) mà KHÔNG cần gọi AI
+    Generation nào — con đường DUY NHẤT để có script (2026-08-17, mục 44)."""
     pid = project["id"]
     csv_bytes = _csv_bytes(
         [
@@ -126,8 +126,8 @@ def test_import_confirm_skips_gate1_and_ai_generation(client, project):
     assert pack["retention_check"] is not None  # guardrail vẫn chạy dù không có hook
 
     proj = client.get(f"/projects/{pid}").json()
-    assert proj["step"] == 2
-    assert proj["max_step_reached"] >= 2
+    assert proj["step"] == 1
+    assert proj["max_step_reached"] >= 1
     assert proj["status"] == "generating"
 
 

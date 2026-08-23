@@ -1,3 +1,6 @@
+import io
+
+
 def test_create_and_list_channel(client, unique_name):
     resp = client.post("/channels", json={"name": f"Kênh {unique_name}", "niche": "Lịch sử"})
     assert resp.status_code == 200
@@ -6,7 +9,6 @@ def test_create_and_list_channel(client, unique_name):
     assert ch["niche"] == "Lịch sử"
     assert ch["brandprofile_version"] == 1
     assert ch["running_count"] == 0
-    assert ch["review_count"] == 0
 
     resp = client.get("/channels")
     assert resp.status_code == 200
@@ -79,3 +81,64 @@ def test_clone_brandprofile(client, channel, unique_name):
     cloned = resp.json()
     assert cloned["visual_style_prompt"] == "phong cách đặc trưng để clone"
     assert cloned["channel_id"] == dest["id"]
+
+
+# ---------------------------------------------------------------------------
+# Logo kênh — mới (2026-08-22), theo yêu cầu người dùng
+# ---------------------------------------------------------------------------
+FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20
+
+
+def test_upload_brand_logo_sets_logo_path(client, channel):
+    resp = client.post(f"/channels/{channel['id']}/brandprofile/logo/upload", files={"file": ("logo.png", io.BytesIO(FAKE_PNG), "image/png")})
+    assert resp.status_code == 200
+    profile = resp.json()
+    assert profile["logo_path"]
+
+    fetched = client.get(f"/channels/{channel['id']}/brandprofile").json()
+    assert fetched["logo_path"] == profile["logo_path"]
+
+
+def test_upload_brand_logo_rejects_unknown_file_type(client, channel):
+    resp = client.post(f"/channels/{channel['id']}/brandprofile/logo/upload", files={"file": ("logo.txt", io.BytesIO(b"khong phai anh"), "text/plain")})
+    assert resp.status_code == 400
+
+
+def test_get_brand_logo_404_when_none(client, channel):
+    resp = client.get(f"/channels/{channel['id']}/brandprofile/logo")
+    assert resp.status_code == 404
+
+
+def test_get_brand_logo_serves_uploaded_file(client, channel):
+    client.post(f"/channels/{channel['id']}/brandprofile/logo/upload", files={"file": ("logo.png", io.BytesIO(FAKE_PNG), "image/png")})
+    resp = client.get(f"/channels/{channel['id']}/brandprofile/logo")
+    assert resp.status_code == 200
+    assert resp.content == FAKE_PNG
+
+
+def test_upload_brand_logo_replaces_old_file(client, channel):
+    first = client.post(f"/channels/{channel['id']}/brandprofile/logo/upload", files={"file": ("logo.png", io.BytesIO(FAKE_PNG), "image/png")}).json()
+    from pathlib import Path
+
+    first_path = Path(first["logo_path"])
+    assert first_path.exists()
+
+    other_png = b"\x89PNG\r\n\x1a\n" + b"1" * 30
+    second = client.post(f"/channels/{channel['id']}/brandprofile/logo/upload", files={"file": ("logo2.jpg", io.BytesIO(other_png), "image/jpeg")}).json()
+    assert second["logo_path"] != first["logo_path"]
+    assert not first_path.exists()  # file cũ (khác đuôi) phải bị xoá, không để rác
+
+    resp = client.get(f"/channels/{channel['id']}/brandprofile/logo")
+    assert resp.content == other_png
+
+
+def test_clear_brand_logo_via_put(client, channel):
+    """Bỏ logo — PUT lại BrandProfile với field rỗng (cùng pattern voice-sample/intro),
+    không cần route xoá riêng."""
+    client.post(f"/channels/{channel['id']}/brandprofile/logo/upload", files={"file": ("logo.png", io.BytesIO(FAKE_PNG), "image/png")})
+    profile = client.get(f"/channels/{channel['id']}/brandprofile").json()
+    profile["logo_path"] = ""
+    resp = client.put(f"/channels/{channel['id']}/brandprofile", json=profile)
+    assert resp.status_code == 200
+    assert resp.json()["logo_path"] == ""
+    assert client.get(f"/channels/{channel['id']}/brandprofile/logo").status_code == 404

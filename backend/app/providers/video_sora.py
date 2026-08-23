@@ -34,13 +34,16 @@ class SoraVideoProvider(VideoProvider):
     def _headers(self):
         return {"Authorization": f"Bearer {self.api_key}", "content-type": "application/json"}
 
-    def generate(self, prompt: str) -> bytes:
+    def generate(self, prompt: str, *, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> bytes:
         raise NotImplementedError(
             "Sora là provider bất đồng bộ — dùng start_generation()/poll_generation() qua app/render/engine.py, không gọi generate() đồng bộ."
         )
 
-    def start_generation(self, prompt: str, *, seconds: int = 8) -> str:
-        body = {"model": self.model_name, "prompt": prompt, "seconds": str(seconds), "size": "1280x720"}
+    def start_generation(self, prompt: str, *, seconds: int = 8, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> str:
+        # "720x1280" — kích thước DỌC CHUẨN Sora (không phải suy đoán, cùng họ size
+        # chính thức với "1280x720" ngang) — mới (2026-08-21), cho project short-form.
+        size = "720x1280" if aspect_ratio == "9:16" else "1280x720"
+        body = {"model": self.model_name, "prompt": prompt, "seconds": str(seconds), "size": size}
         with httpx.Client(timeout=30) as client:
             resp = client.post(API_BASE, headers=self._headers(), json=body)
             raise_for_status_with_body(resp)

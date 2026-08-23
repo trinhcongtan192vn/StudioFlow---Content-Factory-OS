@@ -35,12 +35,19 @@ def test_create_cloud_provider(client):
     assert "•" in pv["key_display"]
 
 
-def test_local_endpoint_only_allowed_for_llm_task(client):
+def test_local_endpoint_allowed_for_asset_tasks(client):
+    """Trước đây `local_endpoint` chỉ cho task=="llm" — đã nới cho cả tts/image/video
+    (xem factory.py::_build_asset_provider + specs/05_ai_providers.md §2, mục local AI
+    provider trong IMPLEMENTATION_REPORT.md) vì giờ có adapter local thật cho cả 3
+    (piper/local_sdxl/local_wan), không chỉ LLM (Ollama)."""
     resp = client.post(
         "/providers",
-        json={"task": "image", "provider_name": "local", "display_name": "Local X", "connection_type": "local_endpoint", "endpoint_url": "http://localhost:11434/v1"},
+        json={"task": "image", "provider_name": "local_sdxl", "display_name": "ComfyUI SDXL", "connection_type": "local_endpoint", "endpoint_url": "http://127.0.0.1:8188"},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    pv = resp.json()
+    assert pv["connection_type"] == "local_endpoint"
+    assert pv["task"] == "image"
 
 
 def test_create_local_llm_provider(client):
@@ -79,6 +86,42 @@ def test_patch_provider_set_default_unsets_others(client):
     client.delete(f"/providers/{b['id']}")
     mock = next(p for p in client.get("/providers").json() if p["provider_name"] == "mock")
     client.patch(f"/providers/{mock['id']}", json={"is_default": True})
+
+
+# ---------------------------------------------------------------------------
+# GET /providers/local-sdxl/models — liệt kê checkpoint/LoRA ComfyUI cho dropdown
+# (mới 2026-08-22, theo yêu cầu người dùng "cho chọn thay vì phải gõ")
+# ---------------------------------------------------------------------------
+import respx
+from httpx import Response
+
+
+@respx.mock
+def test_list_local_sdxl_checkpoints(client):
+    respx.get("http://127.0.0.1:8188/models/checkpoints").mock(return_value=Response(200, json=["paintersCheckpointOilPaint_v11.safetensors", "sd_xl_base_1.0.safetensors"]))
+    resp = client.get("/providers/local-sdxl/models", params={"kind": "checkpoints"})
+    assert resp.status_code == 200
+    assert resp.json()["models"] == ["paintersCheckpointOilPaint_v11.safetensors", "sd_xl_base_1.0.safetensors"]
+
+
+@respx.mock
+def test_list_local_sdxl_loras_with_custom_base_url(client):
+    respx.get("http://127.0.0.1:9999/models/loras").mock(return_value=Response(200, json=["InkArtXL_1.2.safetensors", "ClassipeintXL2.1.safetensors"]))
+    resp = client.get("/providers/local-sdxl/models", params={"kind": "loras", "base_url": "http://127.0.0.1:9999"})
+    assert resp.status_code == 200
+    assert resp.json()["models"] == ["InkArtXL_1.2.safetensors", "ClassipeintXL2.1.safetensors"]
+
+
+def test_list_local_sdxl_models_rejects_invalid_kind(client):
+    resp = client.get("/providers/local-sdxl/models", params={"kind": "bogus"})
+    assert resp.status_code == 400
+
+
+@respx.mock
+def test_list_local_sdxl_models_502_when_comfyui_unreachable(client):
+    respx.get("http://127.0.0.1:8188/models/checkpoints").mock(side_effect=Exception("connection refused"))
+    resp = client.get("/providers/local-sdxl/models", params={"kind": "checkpoints"})
+    assert resp.status_code == 502
 
 
 def test_patch_provider_404(client):

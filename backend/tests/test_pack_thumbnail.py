@@ -1,6 +1,7 @@
-"""Test sinh ảnh thumbnail thật ở Pack Review (tái dùng OpenAI Image adapter, M2) —
-mock HTTP qua respx, không gọi API thật."""
+"""Test sinh ảnh thumbnail thật ở Visual Studio (ThumbnailCard, tái dùng OpenAI Image
+adapter, M2) — mock HTTP qua respx, không gọi API thật."""
 import base64
+import io
 
 import respx
 from httpx import Response
@@ -9,14 +10,20 @@ FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20
 
 
 def _drive_to_pack_built(client, project_with_brief) -> str:
+    """2026-08-17 (mục 44 IMPLEMENTATION_REPORT.md): bỏ hẳn AI Research/Outline/Hook +
+    Pack Review/Gate #2 — import script thay AI, và không còn `pack/titles-meta` tự
+    sinh `thumbnail_description` nữa. `ThumbnailCard.tsx` thật để người dùng tự gõ tay
+    mô tả thumbnail (không bắt buộc AI) — mô phỏng đúng bằng `PATCH /pack` trực tiếp."""
     pid = project_with_brief["id"]
-    research = client.post(f"/projects/{pid}/research").json()
-    outline_id = research["research"]["outlines"][0]["id"]
-    hook_id = research["hooks"][0]["id"]
-    client.post(f"/projects/{pid}/gate1", json={"chosen_outline_id": outline_id, "chosen_hook_id": hook_id})
-    client.post(f"/projects/{pid}/script/approve")
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    row = ["B01", "0:00–0:05", "Image", "Cảnh mở", "Nhạc nền", "Xin chào các bạn."]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, row])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    confirm = client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    assert confirm.status_code == 200, confirm.text
     client.post(f"/projects/{pid}/visual/generate")
-    resp = client.post(f"/projects/{pid}/pack/build")
+
+    resp = client.patch(f"/projects/{pid}/pack", json={"youtube_meta": {"thumbnail_description": "bold thumbnail concept, high-contrast"}})
     assert resp.status_code == 200, resp.text
     return pid
 
@@ -28,7 +35,7 @@ def _setup_openai_image_provider(client) -> None:
 
 def test_generate_thumbnail_requires_description(client, project_with_brief):
     pid = _drive_to_pack_built(client, project_with_brief)
-    client.patch(f"/projects/{pid}/pack", json={"youtube_meta": {"description": "x", "hashtags": [], "chapters": [], "thumbnail_description": ""}})
+    client.patch(f"/projects/{pid}/pack", json={"youtube_meta": {"thumbnail_description": ""}})
     resp = client.post(f"/projects/{pid}/pack/thumbnail/generate")
     assert resp.status_code == 400
 

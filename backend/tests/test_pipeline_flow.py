@@ -1,66 +1,46 @@
 """Test tích hợp toàn bộ pipeline — dùng provider Mock mặc định (seed), không cần
-mạng/API key. Mỗi bước phụ thuộc trạng thái bước trước, viết liền mạch như 1 luồng
-sử dụng thật: Brief → Research → Gate1 → Script Studio → Visual Studio → Pack
-Review → Gate2 (return rồi approve lại) → Output.
-"""
+mạng/API key. Viết liền mạch như 1 luồng sử dụng thật: Brief → Upload script → Script
+Studio → Visual Studio → Output.
+
+2026-08-17 (mục 44 IMPLEMENTATION_REPORT.md): bỏ hẳn luồng AI Research/Outline/Hook/
+Full-Script + Pack Review/Gate #2 theo yêu cầu người dùng — "upload script" (CSV/Excel
+import) giờ là con đường DUY NHẤT để có script, không còn gate duyệt bắt buộc nào
+trước khi vào Output."""
+import io
 
 
 def test_full_pipeline_happy_path(client, project_with_brief):
     pid = project_with_brief["id"]
 
-    # ---- AI Research (gộp outline + hook, §03 đã build) ----
-    resp = client.post(f"/projects/{pid}/research")
+    # ---- Upload script (con đường duy nhất để có script) ----
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [
+        ["B01", "0:00–0:08", "Image", "Cảnh mở, tông ấm", "Nhạc nền nhẹ", "Xin chào các bạn, hôm nay chúng ta sẽ nói về một chủ đề thú vị."],
+        ["B02", "0:08–0:16", "Video", "Cận cảnh, nhịp nhanh", "Nhạc nền dồn dập", "Điều đầu tiên cần biết là mọi thứ đều bắt đầu từ một quyết định nhỏ."],
+    ]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    parsed = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")})
+    assert parsed.status_code == 200
+    preview = parsed.json()
+
+    resp = client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
     assert resp.status_code == 200
     pack = resp.json()
-    assert len(pack["research"]["outlines"]) >= 1
-    assert len(pack["hooks"]) == 3
-    assert pack["status"] == "await_gate1"
+    body = pack["script"]["body"]
+    assert len(body) == 2
+    assert pack["script"]["source"] == "import"
+    assert pack["retention_check"] is not None
+    assert pack["retention_check"]["max_anchor_gap_sec"] is not None
 
     proj = client.get(f"/projects/{pid}").json()
     assert proj["step"] == 1
     assert proj["max_step_reached"] == 1
-    assert proj["status"] == "await_gate1"
-
-    outline_id = pack["research"]["outlines"][0]["id"]
-    hook_id = pack["hooks"][0]["id"]
-
-    # ---- Human Gate #1 ----
-    resp = client.post(f"/projects/{pid}/gate1", json={"chosen_outline_id": "sai", "chosen_hook_id": hook_id})
-    assert resp.status_code == 400  # outline không hợp lệ phải bị chặn
-
-    resp = client.post(f"/projects/{pid}/gate1", json={"chosen_outline_id": outline_id, "chosen_hook_id": hook_id, "edited_hook_text": "Hook đã chỉnh tay"})
-    assert resp.status_code == 200
-    pack = resp.json()
-    assert pack["script"]["hook"]["spoken"] == "Hook đã chỉnh tay"
-    assert len(pack["script"]["full_text"]) > 40
-    assert pack["script"]["body"] == []
-
-    proj = client.get(f"/projects/{pid}").json()
-    assert proj["step"] == 2
     assert proj["status"] == "generating"
 
-    # ---- Script Studio: sửa tay (auto-save), rồi tạo lại theo góp ý ----
-    resp = client.patch(f"/projects/{pid}/script/text", json={"full_text": "Bản nháp người dùng tự sửa tay."})
+    # ---- Sửa tay 1 block (index-based, sau khi đã bóc tách) ----
+    resp = client.patch(f"/projects/{pid}/script/body/0/audio", json={"audio": "Câu mở đầu đã sửa tay."})
     assert resp.status_code == 200
-    assert resp.json()["script"]["full_text"] == "Bản nháp người dùng tự sửa tay."
-
-    resp = client.post(f"/projects/{pid}/script/regenerate", json={"feedback": "Rút ngắn đoạn mở đầu"})
-    assert resp.status_code == 200
-    assert len(resp.json()["script"]["full_text"]) > 0
-
-    # regenerate không cho gọi khi chưa có script (project khác, step 0)
-    resp = client.post(f"/projects/{pid}/script/regenerate", json={"feedback": "x"})
-    assert resp.status_code == 200  # vẫn có script từ trước, chỉ kiểm tra guard ở nơi khác
-
-    # ---- Duyệt & bóc tách theo đoạn + guardrail inline ----
-    resp = client.post(f"/projects/{pid}/script/approve")
-    assert resp.status_code == 200
-    pack = resp.json()
-    body = pack["script"]["body"]
-    assert len(body) >= 1
-    assert all("timestamp_sec" in b for b in body)
-    assert pack["retention_check"] is not None
-    assert pack["retention_check"]["max_anchor_gap_sec"] is not None
+    assert resp.json()["script"]["body"][0]["audio"] == "Câu mở đầu đã sửa tay."
 
     # ---- Visual Studio ----
     resp = client.post(f"/projects/{pid}/visual/generate")
@@ -69,7 +49,7 @@ def test_full_pipeline_happy_path(client, project_with_brief):
     shots = pack["shots"]
     assert len(shots) == len(body)
     proj = client.get(f"/projects/{pid}").json()
-    assert proj["step"] == 3
+    assert proj["step"] == 2
 
     shot_id = shots[0]["shot_id"]
     resp = client.patch(f"/projects/{pid}/visual/shots/{shot_id}", json={"visual_fx": "prompt sửa tay", "audio_sfx": "ấm áp"})
@@ -97,53 +77,18 @@ def test_full_pipeline_happy_path(client, project_with_brief):
     resp = client.post(f"/projects/{pid}/visual/shots/khong-ton-tai/regenerate-visual")
     assert resp.status_code == 404
 
-    # ---- Pack Review (build title/thumbnail/youtube_meta + guardrail tổng hợp) ----
-    resp = client.post(f"/projects/{pid}/pack/build")
-    assert resp.status_code == 200
-    pack = resp.json()
-    assert len(pack["titles"]) >= 1
-    assert pack["youtube_meta"]["description"]
-    assert pack["status"] == "await_gate2"
-    proj = client.get(f"/projects/{pid}").json()
-    assert proj["step"] == 4
-
     # ---- Guardrail check thủ công (chạy lại sau khi sửa, §08 mục 5) ----
     resp = client.post(f"/projects/{pid}/guardrail/check")
     assert resp.status_code == 200
     check = resp.json()
     assert "hook_strength" in check and "warnings" in check
 
-    # ---- Human Gate #2: Trả về trước (bắt buộc có note) ----
-    resp = client.post(f"/projects/{pid}/gate2", json={"action": "return", "note": ""})
-    assert resp.status_code == 400
-
-    resp = client.post(f"/projects/{pid}/gate2", json={"action": "return", "note": "Hook chưa đủ mạnh"})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["project"]["step"] == 2
-    assert data["project"]["status"] == "generating"
-    assert data["project"]["return_note"] == "Hook chưa đủ mạnh"
-
-    proj = client.get(f"/projects/{pid}").json()
-    assert proj["pack_version"] >= 2  # trả về phải tăng version, giữ lịch sử
-
-    # ---- Đi lại từ Script Studio tới Gate 2, lần này Approve ----
-    client.post(f"/projects/{pid}/script/approve")
-    client.post(f"/projects/{pid}/visual/generate")
-    client.post(f"/projects/{pid}/pack/build")
-
-    resp = client.post(f"/projects/{pid}/gate2", json={"action": "invalid"})
-    assert resp.status_code == 400
-
-    resp = client.post(f"/projects/{pid}/gate2", json={"action": "approve"})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["project"]["step"] == 5
-    assert data["project"]["status"] == "ready_output"
-
-    # ---- Output: enter + export ----
+    # ---- Output: KHÔNG còn gate duyệt nào chặn trước — vào thẳng được ----
     resp = client.post(f"/projects/{pid}/output/enter")
     assert resp.status_code == 200
+    proj = client.get(f"/projects/{pid}").json()
+    assert proj["step"] == 3
+    assert proj["status"] == "ready_output"
 
     resp = client.post(f"/projects/{pid}/export", json={"format": "markdown"})
     assert resp.status_code == 200
@@ -161,9 +106,13 @@ def test_full_pipeline_happy_path(client, project_with_brief):
     assert resp.status_code == 400
 
 
-def test_export_blocked_before_gate2_approved(client, project):
+def test_export_blocked_without_script(client, project):
+    """Export không còn gate theo `project.status` (Gate #2 đã bỏ) — chỉ cần có script.
+    Project mới tạo (chưa import/viết gì) chưa có script -> vẫn bị chặn, nhưng vì lý do
+    khác (chưa có nội dung để xuất, không phải "chưa qua Gate #2")."""
     resp = client.post(f"/projects/{project['id']}/export", json={"format": "json"})
     assert resp.status_code == 400
+    assert "script" in resp.json()["detail"].lower()
 
 
 def test_guardrail_check_requires_body(client, project):
@@ -173,9 +122,4 @@ def test_guardrail_check_requires_body(client, project):
 
 def test_visual_generate_requires_body(client, project):
     resp = client.post(f"/projects/{project['id']}/visual/generate")
-    assert resp.status_code == 400
-
-
-def test_pack_build_requires_body(client, project):
-    resp = client.post(f"/projects/{project['id']}/pack/build")
     assert resp.status_code == 400

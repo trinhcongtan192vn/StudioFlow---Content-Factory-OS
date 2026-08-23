@@ -78,17 +78,24 @@ studioflow/
 ```
 workspace/
 ├── studioflow.db
+├── library/                       # > **Đã build 2026-08-20 (mục 53)**: Thư viện Creative
+│   ├── music/<asset_id>.mp3       #   Asset — nhạc nền/video/ảnh/giọng đọc dùng lại nhiều
+│   ├── video/<asset_id>.mp4       #   nơi, ĐỘC LẬP không gắn channel/project nào (khác
+│   ├── image/<asset_id>.png       #   channels/ bên dưới) — xem app/config.py::LIBRARY_DIR,
+│   └── voice/<asset_id>.wav       #   app/models/__init__.py::CreativeAsset.
 └── channels/
     └── ch_finance_01/
         ├── brandprofile.json          # bản hiện hành
         ├── brandprofile.v{n}.json     # các version cũ
+        ├── bg_music.mp3                # > mục 53: nhạc nền mặc định cấp kênh (tuỳ chọn)
         └── projects/
             └── prj_2026_0142/
                 ├── brief.json
                 ├── pack.json          # ProductionPack (§04)
                 ├── pack.v{n}.json
                 ├── exports/           # Markdown/PDF sinh từ pack
-                └── retention.json     # số liệu nạp tay (§08)
+                ├── retention.json     # số liệu nạp tay (§08)
+                └── assets/bg_music.mp3 # > mục 53: nhạc nền override riêng project (tuỳ chọn)
 ```
 
 ## 6. Nguyên tắc tách module (chống coupling)

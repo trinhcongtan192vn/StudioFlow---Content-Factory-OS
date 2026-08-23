@@ -4,11 +4,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.config import project_dir
+from app.config import delete_project_dir, project_dir
 from app.db import get_db
 from app.filestore import read_json, write_json
 from app.models import AuditLog, Channel, Project
 from app.schemas import Brief, BriefSource, ProductionPack
+from app.timeutil import vn_isoformat
 from app.youtube import extract_video_id, fetch_transcript_text
 
 router = APIRouter(tags=["projects"])
@@ -16,16 +17,6 @@ router = APIRouter(tags=["projects"])
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{int(time.time() * 1000)}"
-
-
-STEP_TO_STATUS = {
-    0: "draft",
-    1: "await_gate1",
-    2: "generating",
-    3: "generating",
-    4: "await_gate2",
-    5: "ready_output",
-}
 
 
 def _project_out(p: Project) -> dict:
@@ -39,13 +30,19 @@ def _project_out(p: Project) -> dict:
         "pack_version": p.pack_version,
         "return_note": p.return_note,
         "archived": p.archived,
-        "created_at": p.created_at.isoformat() if p.created_at else None,
-        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "parent_project_id": p.parent_project_id,
+        "format": p.format or "long",
+        "created_at": vn_isoformat(p.created_at) if p.created_at else None,
+        "updated_at": vn_isoformat(p.updated_at) if p.updated_at else None,
     }
 
 
 class ProjectCreate(BaseModel):
     title: str = "Dự án mới chưa có tên"
+    # Short-form (9:16) — mới (2026-08-21): truyền id của 1 project long-form CÙNG kênh
+    # để tạo sub-project lồng dưới nó. `format` KHÔNG nhận trực tiếp từ client — server
+    # tự suy theo có/không có field này (xem create_project bên dưới).
+    parent_project_id: str | None = None
 
 
 class ProjectPatch(BaseModel):
@@ -66,6 +63,18 @@ def create_project(channel_id: str, body: ProjectCreate, db: Session = Depends(g
     ch = db.query(Channel).filter(Channel.id == channel_id).first()
     if not ch:
         raise HTTPException(404, "Không tìm thấy kênh")
+
+    fmt = "long"
+    if body.parent_project_id:
+        parent = db.query(Project).filter(Project.id == body.parent_project_id).first()
+        if not parent:
+            raise HTTPException(404, "Không tìm thấy project cha")
+        if parent.channel_id != channel_id:
+            raise HTTPException(400, "Project cha phải cùng kênh")
+        if (parent.format or "long") != "long":
+            raise HTTPException(400, "Project cha phải là project long-form (không lồng short-form dưới short-form)")
+        fmt = "short"
+
     pid = _new_id("prj")
     pdir = project_dir(channel_id, pid)
 
@@ -77,7 +86,8 @@ def create_project(channel_id: str, body: ProjectCreate, db: Session = Depends(g
     write_json(pdir / "pack.v1.json", pack.model_dump())
 
     p = Project(id=pid, channel_id=channel_id, title=body.title, status="draft", step=0, max_step_reached=0,
-                brief_path=str(pdir / "brief.json"), pack_path=str(pdir / "pack.json"), pack_version=1)
+                brief_path=str(pdir / "brief.json"), pack_path=str(pdir / "pack.json"), pack_version=1,
+                parent_project_id=body.parent_project_id, format=fmt)
     db.add(p)
     db.commit()
     return _project_out(p)
@@ -117,7 +127,70 @@ def archive_project(project_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Không tìm thấy project")
     p.archived = True
     db.add(AuditLog(action="Archive project", detail=p.title, entity=p.title))
+    # Short-form (2026-08-21) — xoá 1 project long-form kéo theo archive LUÔN mọi
+    # short-form con (tránh short-form mồ côi không rõ thuộc project nào trong danh sách
+    # phẳng của Thùng rác) — chỉ áp dụng khi CHÍNH p là long-form (short-form không có
+    # con để cascade tiếp).
+    if (p.format or "long") == "long":
+        children = db.query(Project).filter(Project.parent_project_id == project_id, Project.archived == False).all()  # noqa: E712
+        for child in children:
+            child.archived = True
     db.commit()
+    return {"ok": True}
+
+
+@router.post("/projects/{project_id}/restore")
+def restore_project(project_id: str, db: Session = Depends(get_db)):
+    """Khôi phục project khỏi Thùng rác — đối xứng với `DELETE /projects/{id}` (archive).
+
+    Short-form (2026-08-21): khôi phục 1 project long-form kéo theo khôi phục LUÔN mọi
+    short-form con đang archived — đối xứng với cascade archive ở trên. Không phân biệt
+    short-form con bị archive CÙNG LÚC với cha hay archive riêng lẻ trước đó (đơn giản
+    hoá — chấp nhận trade-off nhỏ: nếu người dùng archive riêng 1 short-form rồi SAU ĐÓ
+    mới archive cha, restore cha sẽ khôi phục lại cả short-form đó luôn)."""
+    p = db.query(Project).filter(Project.id == project_id).first()
+    if not p:
+        raise HTTPException(404, "Không tìm thấy project")
+    p.archived = False
+    db.add(AuditLog(action="Khôi phục project", detail=p.title, entity=p.title))
+    if (p.format or "long") == "long":
+        children = db.query(Project).filter(Project.parent_project_id == project_id, Project.archived == True).all()  # noqa: E712
+        for child in children:
+            child.archived = False
+    db.commit()
+    return _project_out(p)
+
+
+@router.delete("/projects/{project_id}/permanent")
+def delete_project_permanent(project_id: str, db: Session = Depends(get_db)):
+    """Xoá vĩnh viễn — CHỈ cho phép với project đã ở Thùng rác (archived=True). Xoá DB
+    row (cascade PackVersion/RetentionEntry — xem Project.pack_versions/
+    retention_entries, app/models/__init__.py) VÀ xoá thư mục project trên đĩa
+    (`delete_project_dir`) — KHÔNG khôi phục được nữa.
+
+    Short-form (2026-08-21): xoá vĩnh viễn 1 project long-form xoá LUÔN mọi short-form
+    con TRƯỚC (đệ quy 1 cấp — short-form không có con), tránh short-form mồ côi trỏ
+    `parent_project_id` tới 1 project đã không còn tồn tại."""
+    p = db.query(Project).filter(Project.id == project_id).first()
+    if not p:
+        raise HTTPException(404, "Không tìm thấy project")
+    if not p.archived:
+        raise HTTPException(400, "Chỉ xoá vĩnh viễn được project đã ở Thùng rác — xoá project trước.")
+
+    if (p.format or "long") == "long":
+        children = db.query(Project).filter(Project.parent_project_id == project_id).all()
+        for child in children:
+            child_title, child_channel_id, child_id = child.title, child.channel_id, child.id
+            db.add(AuditLog(action="Xoá vĩnh viễn project", detail=child_title, entity=child_title))
+            db.delete(child)
+            db.commit()
+            delete_project_dir(child_channel_id, child_id)
+
+    title, channel_id = p.title, p.channel_id
+    db.add(AuditLog(action="Xoá vĩnh viễn project", detail=title, entity=title))
+    db.delete(p)
+    db.commit()
+    delete_project_dir(channel_id, project_id)
     return {"ok": True}
 
 

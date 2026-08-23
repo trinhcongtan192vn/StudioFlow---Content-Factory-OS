@@ -5,10 +5,8 @@ import RightPanel from "../components/RightPanel";
 import Stepper from "../components/Stepper";
 import { useApp } from "../store/AppContext";
 import BriefEditor from "./steps/BriefEditor";
-import Gate1Outline from "./steps/Gate1Outline";
 import ScriptStudio from "./steps/ScriptStudio";
 import VisualStudio from "./steps/VisualStudio";
-import PackReview from "./steps/PackReview";
 import OutputCenter from "./steps/OutputCenter";
 
 export interface StepProps {
@@ -24,6 +22,9 @@ export default function ProjectView() {
   const projectId = app.activeProjectId!;
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [pack, setPack] = useState<ProductionPack | null>(null);
+  // Short-form (2026-08-21) — tên project long-form cha, hiện thêm 1 đoạn breadcrumb khi
+  // project đang mở là short-form con (project.parent_project_id có giá trị).
+  const [parentProject, setParentProject] = useState<ProjectSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -38,13 +39,30 @@ export default function ProjectView() {
   useEffect(() => {
     setProject(null);
     setPack(null);
+    setParentProject(null);
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (project?.parent_project_id) {
+      api.getProject(project.parent_project_id).then(setParentProject);
+    } else {
+      setParentProject(null);
+    }
+  }, [project?.parent_project_id]);
 
   async function jumpStep(i: number) {
     if (!project) return;
     const updated = await api.patchProject(project.id, { step: i });
     setProject(updated);
+  }
+
+  async function deleteProject() {
+    if (!project) return;
+    if (!confirm(`Xoá dự án "${project.title}"? Sẽ chuyển vào Thùng rác — có thể khôi phục lại sau.`)) return;
+    await api.archiveProject(project.id);
+    app.bumpProjectsVersion(project.channel_id);
+    app.goDashboard();
   }
 
   function startEditTitle() {
@@ -83,7 +101,24 @@ export default function ProjectView() {
         </div>
         <span style={{ color: "color-mix(in srgb, var(--color-text) 30%, transparent)" }}>/</span>
         <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>{channelName}</div>
+        {parentProject && (
+          <>
+            <span style={{ color: "color-mix(in srgb, var(--color-text) 30%, transparent)" }}>/</span>
+            <div
+              onClick={() => app.openProject(project.channel_id, parentProject.id)}
+              style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", cursor: "pointer" }}
+              title="Về project long-form gốc"
+            >
+              {parentProject.title}
+            </div>
+          </>
+        )}
         <span style={{ color: "color-mix(in srgb, var(--color-text) 30%, transparent)" }}>/</span>
+        {project.format === "short" && (
+          <span className="tag tag-accent-2" style={{ flex: "none" }}>
+            Short 9:16
+          </span>
+        )}
         {editingTitle ? (
           <input
             className="input"
@@ -110,6 +145,20 @@ export default function ProjectView() {
             </svg>
           </div>
         )}
+        <div style={{ flex: 1 }} />
+        <div
+          onClick={deleteProject}
+          title="Xoá dự án (chuyển vào Thùng rác)"
+          style={{ width: 26, height: 26, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", opacity: 0.5, flex: "none" }}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+            <path d="M10 11v6" />
+            <path d="M14 11v6" />
+            <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+          </svg>
+        </div>
       </div>
 
       <Stepper step={project.step} maxStepReached={project.max_step_reached} onJump={jumpStep} />
@@ -117,13 +166,11 @@ export default function ProjectView() {
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         <div style={{ flex: 1, overflowY: "auto", padding: "var(--space-6)", minWidth: 0 }}>
           {project.step === 0 && <BriefEditor {...stepProps} />}
-          {project.step === 1 && <Gate1Outline {...stepProps} />}
-          {project.step === 2 && <ScriptStudio {...stepProps} />}
-          {project.step === 3 && <VisualStudio {...stepProps} />}
-          {project.step === 4 && <PackReview {...stepProps} />}
-          {project.step === 5 && <OutputCenter {...stepProps} />}
+          {project.step === 1 && <ScriptStudio {...stepProps} />}
+          {project.step === 2 && <VisualStudio {...stepProps} />}
+          {project.step === 3 && <OutputCenter {...stepProps} />}
         </div>
-        <RightPanel channelId={project.channel_id} project={project} />
+        <RightPanel project={project} />
       </div>
     </div>
   );

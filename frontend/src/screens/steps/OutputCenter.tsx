@@ -41,7 +41,15 @@ export default function OutputCenter({ project, pack }: StepProps) {
           ) : (
             <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
               {files.map((f) => (
-                <a key={f.format} href={api.downloadUrl(project.id, f.filename)} style={{ fontSize: 12 }} target="_blank" rel="noreferrer">
+                <a
+                  key={f.format}
+                  href="#"
+                  style={{ fontSize: 12 }}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    api.downloadExportFile(project.id, f.filename);
+                  }}
+                >
                   {f.filename}
                 </a>
               ))}

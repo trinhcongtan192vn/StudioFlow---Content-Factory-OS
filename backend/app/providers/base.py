@@ -6,7 +6,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
+
+# Tỷ lệ khung sinh ảnh/video — mới (2026-08-21), theo yêu cầu người dùng: short-form
+# (YouTube Shorts/TikTok) cần khung DỌC 9:16 thay vì 16:9 mặc định của long-form. Cùng
+# vị trí dùng chung cho ImageProvider/VideoProvider (tránh định nghĩa Literal lặp lại).
+AspectRatio = Literal["16:9", "9:16"]
 
 
 @dataclass
@@ -58,7 +63,13 @@ class TTSProvider(ABC):
     provider_name: str = "base"
 
     @abstractmethod
-    def synthesize(self, text: str, *, emotion: str = "") -> bytes:
+    def synthesize(self, text: str, *, emotion: str = "", reference_audio: Optional[bytes] = None) -> bytes:
+        """`reference_audio` — mẫu giọng đọc (WAV bytes) dùng làm "giọng thương hiệu"
+        cho voice cloning (OmniVoice, xem tts_omnivoice.py + BrandProfile.voice_clone_ref_path)
+        — cùng cách đã thêm `seed`/`reference_image` cho ImageProvider/VideoProvider
+        (Tier 2 nhất quán visual, xem app/render/engine.py). TUỲ CHỌN — provider không
+        hỗ trợ (Vbee/ElevenLabs/OpenAI/Gemini/Piper) chỉ nhận rồi bỏ qua, KHÔNG bắt buộc
+        raise lỗi (tương thích ngược)."""
         ...
 
     @abstractmethod
@@ -72,7 +83,14 @@ class ImageProvider(ABC):
     provider_name: str = "base"
 
     @abstractmethod
-    def generate(self, prompt: str) -> bytes:
+    def generate(self, prompt: str, *, seed: Optional[int] = None, reference_image: Optional[bytes] = None, aspect_ratio: AspectRatio = "16:9") -> bytes:
+        """`seed`/`reference_image` — thêm để cải thiện tính nhất quán thị giác giữa
+        các shot (đồng bộ với brand.visual_style_prompt + ảnh "anchor", xem
+        app/render/engine.py). `aspect_ratio` — **mới (2026-08-21)**, "9:16" cho project
+        short-form (xem `Project.format`, app/models/__init__.py). CẢ 3 đều tuỳ chọn —
+        provider không hỗ trợ (cloud API không nhận seed/ảnh tham chiếu/tỷ lệ dọc qua
+        cùng 1 cách) chỉ cần bỏ qua tham số, KHÔNG bắt buộc raise lỗi (giữ tương thích
+        ngược cho mọi adapter cũ)."""
         ...
 
     @abstractmethod
@@ -93,11 +111,12 @@ class VideoProvider(ABC):
     provider_name: str = "base"
 
     @abstractmethod
-    def generate(self, prompt: str) -> bytes:
+    def generate(self, prompt: str, *, seed: Optional[int] = None, reference_image: Optional[bytes] = None, aspect_ratio: AspectRatio = "16:9") -> bytes:
         ...
 
-    def start_generation(self, prompt: str, *, seconds: int = 8) -> str:
-        """Gửi job sinh video, trả về job_id. Provider đồng bộ không cần override."""
+    def start_generation(self, prompt: str, *, seconds: int = 8, seed: Optional[int] = None, reference_image: Optional[bytes] = None, aspect_ratio: AspectRatio = "16:9") -> str:
+        """Gửi job sinh video, trả về job_id. Provider đồng bộ không cần override.
+        `seed`/`reference_image`/`aspect_ratio` — cùng lý do đã ghi ở ImageProvider.generate()."""
         raise NotImplementedError("Provider video này không hỗ trợ start_generation (dùng generate() nếu đồng bộ).")
 
     def poll_generation(self, job_id: str) -> tuple[str, Optional[bytes]]:

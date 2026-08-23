@@ -32,11 +32,11 @@ from app.db import Base
 
 
 class ProjectStatus(str, enum.Enum):
+    # "researching"/"await_gate1"/"await_gate2" đã bỏ (2026-08-17, mục 44
+    # IMPLEMENTATION_REPORT.md) cùng lúc bỏ AI Research/Outline/Hook + Pack Review/
+    # Gate #2 — không còn gate duyệt bắt buộc nào giữa các bước.
     draft = "draft"
-    researching = "researching"
-    await_gate1 = "await_gate1"
     generating = "generating"
-    await_gate2 = "await_gate2"
     ready_output = "ready_output"
     exported = "exported"
     published = "published"
@@ -79,6 +79,18 @@ class Project(Base):
     channel_id = Column(String, ForeignKey("channel.id"), nullable=False)
     title = Column(String, nullable=False)
     status = Column(String, default=ProjectStatus.draft.value)
+    # Short-form (9:16, YouTube Shorts/TikTok) là sub-project ĐỘC LẬP nội dung, chỉ lồng
+    # dưới 1 long-form project để nhóm hiển thị — **mới (2026-08-21)**, theo yêu cầu
+    # người dùng. KHÔNG PHẢI auto-repurpose (đó là M3, xem specs/09_sprint_tasks.md) —
+    # short-form tự đi qua lại đúng luồng Brief→Script Studio→Visual Studio→Output như
+    # long-form, chỉ khác tỷ lệ khung sinh ảnh/video (`app/render/engine.py`,
+    # `app/render/assembly.py`). `parent_project_id` NULL = long-form (project gốc);
+    # có giá trị = short-form, LUÔN trỏ tới 1 project `format=="long"` CÙNG kênh (validate
+    # ở `POST /channels/{id}/projects`, không ràng buộc DB — cùng quy ước nullable FK
+    # như `Budget.channel_id`/`project_id`, không cần `relationship()` riêng vì chỉ dùng
+    # qua query trực tiếp). Không lồng quá 1 cấp — short-form không có short-form con.
+    parent_project_id = Column(String, ForeignKey("project.id"), nullable=True)
+    format = Column(String, default="long")  # "long" | "short"
     step = Column(Integer, default=0)  # 0..5, khớp UI stepper (design)
     max_step_reached = Column(Integer, default=0)
     brief_path = Column(String, nullable=True)
@@ -187,6 +199,20 @@ class AuditLog(Base):
     entity = Column(String, nullable=True)  # tên kênh/project liên quan, hiển thị cột "Người dùng/Kênh"
     type = Column(String, default="system")  # system | expense
     cost = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CreativeAsset(Base):
+    """Thư viện Creative Asset — **mới (2026-08-20)**, theo yêu cầu người dùng: upload
+    1 lần (nhạc nền/video/ảnh/giọng đọc), dùng lại được ở NHIỀU nơi thay vì phải upload
+    lại từ máy mỗi lần. Đứng ĐỘC LẬP (không FK tới channel/project nào) — dùng chung
+    toàn app, khớp entry point "Thư viện" ở sidebar ngang hàng Dashboard."""
+    __tablename__ = "creative_asset"
+
+    id = Column(String, primary_key=True)
+    kind = Column(String, nullable=False)  # "music" | "video" | "image" | "voice"
+    name = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

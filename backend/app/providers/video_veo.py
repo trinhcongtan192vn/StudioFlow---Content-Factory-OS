@@ -34,14 +34,16 @@ class VeoVideoProvider(VideoProvider):
         self.api_key = api_key
         self.model_name = model_name or "veo-3.1-generate-preview"
 
-    def generate(self, prompt: str) -> bytes:
+    def generate(self, prompt: str, *, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> bytes:
         raise NotImplementedError(
             "Veo là provider bất đồng bộ — dùng start_generation()/poll_generation() qua app/render/engine.py, không gọi generate() đồng bộ."
         )
 
-    def start_generation(self, prompt: str, *, seconds: int = 8) -> str:
+    def start_generation(self, prompt: str, *, seconds: int = 8, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> str:
+        # Veo hỗ trợ sẵn "9:16" trong parameters.aspectRatio — mới (2026-08-21), cho
+        # project short-form.
         url = f"{API_BASE}/models/{self.model_name}:predictLongRunning?key={self.api_key}"
-        body = {"instances": [{"prompt": prompt}], "parameters": {"aspectRatio": "16:9", "durationSeconds": seconds}}
+        body = {"instances": [{"prompt": prompt}], "parameters": {"aspectRatio": aspect_ratio, "durationSeconds": seconds}}
         with httpx.Client(timeout=30) as client:
             resp = client.post(url, json=body)
             raise_for_status_with_body(resp)

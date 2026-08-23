@@ -1,7 +1,9 @@
 import Sidebar from "./components/Sidebar";
 import Dashboard from "./screens/Dashboard";
+import Library from "./screens/Library";
 import ProjectView from "./screens/ProjectView";
 import SettingsShell from "./screens/settings/SettingsShell";
+import Trash from "./screens/Trash";
 import { AppProvider, useApp } from "./store/AppContext";
 
 function Shell() {
@@ -10,8 +12,10 @@ function Shell() {
     <div style={{ display: "flex", height: "100vh", background: "var(--color-bg)", color: "var(--color-text)", fontFamily: "var(--font-body)", overflow: "hidden", fontSize: 14 }}>
       <Sidebar />
       {app.view === "dashboard" && <Dashboard />}
+      {app.view === "library" && <Library />}
       {app.view === "project" && app.activeProjectId && <ProjectView />}
       {app.view === "settings" && <SettingsShell />}
+      {app.view === "trash" && <Trash />}
       {!app.hasLlmProvider && app.view !== "settings" && (
         <div style={{ position: "fixed", bottom: 16, right: 16, maxWidth: 320, zIndex: 50 }}>
           <div className="card elev-md" style={{ gap: 8 }}>

@@ -47,6 +47,8 @@ Lưu lịch sử version của BrandProfile (nội dung đầy đủ ở file JS
 | brief_path | TEXT | `brief.json` |
 | pack_path | TEXT | `pack.json` hiện hành |
 | pack_version | INTEGER | |
+| parent_project_id | TEXT FK→project, null | **mới (2026-08-21, mục 58)**: short-form (9:16) là sub-project ĐỘC LẬP nội dung, lồng dưới 1 project long-form CÙNG kênh chỉ để nhóm hiển thị — null = long-form, có giá trị = short-form. Không lồng quá 1 cấp (parent LUÔN là long-form). |
+| format | TEXT | **mới (2026-08-21, mục 58)**: `"long"` (mặc định) \| `"short"` — quyết định tỷ lệ khung sinh ảnh/video/ghép MP4 (`app/render/assembly.py::RESOLUTION_MAP_VERTICAL`). |
 | created_at / updated_at | DATETIME | |
 
 ### pack_version
@@ -140,4 +142,10 @@ Trả về từ gate: `await_gate2` → `await_gate1` (giữ lịch sử, tăng 
 
 - **Không** lưu nội dung Pack/BrandProfile đầy đủ trong DB — chỉ path + version. File JSON là nguồn sự thật.
 - Version = ghi file mới `*.v{n}.json` + thêm dòng vào bảng version, cập nhật con trỏ hiện hành.
-- Xoá Project = archive (soft delete) ở MVP, không xoá cứng file.
+- Xoá Project/Channel = archive (soft delete, `archived=True`) — item chuyển vào **Thùng
+  rác** (`GET /trash`, `frontend/src/screens/Trash.tsx`, đã build 2026-08-16), không xoá
+  file, khôi phục được (`POST .../restore`). Chỉ khi người dùng chủ động bấm "Xoá vĩnh
+  viễn" TỪ Thùng rác (`DELETE .../permanent`) mới thật sự xoá DB row (cascade — xem
+  `Channel.projects`/`Project.pack_versions`/`retention_entries` ở app/models) VÀ xoá cây
+  thư mục trên đĩa (`app/config.py::delete_channel_dir`/`delete_project_dir`) — không thể
+  hoàn tác.

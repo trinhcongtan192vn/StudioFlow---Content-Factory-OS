@@ -27,7 +27,7 @@ class ElevenLabsTTSProvider(TTSProvider):
         self.model_name = model_name or "eleven_v3"
         self.voice_id = voice_id or DEFAULT_VOICE_ID
 
-    def synthesize(self, text: str, *, emotion: str = "") -> bytes:
+    def synthesize(self, text: str, *, emotion: str = "", reference_audio: bytes | None = None) -> bytes:
         url = f"{API_BASE}/text-to-speech/{self.voice_id}"
         headers = {"xi-api-key": self.api_key, "content-type": "application/json"}
         body = {"text": text, "model_id": self.model_name}

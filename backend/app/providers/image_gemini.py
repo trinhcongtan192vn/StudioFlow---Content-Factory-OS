@@ -27,10 +27,16 @@ class GeminiImageProvider(ImageProvider):
         self.api_key = api_key
         self.model_name = model_name or "gemini-3.1-flash-image"
 
-    def generate(self, prompt: str) -> bytes:
+    def generate(self, prompt: str, *, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> bytes:
+        # Gemini Image KHÔNG có tham số width/height/aspect_ratio trong request (model tự
+        # quyết kích thước) — mới (2026-08-21): best-effort qua gợi ý bố cục trong PROMPT
+        # cho project short-form (9:16), không đảm bảo model tuân theo tuyệt đối. Khung
+        # đúng tỷ lệ CUỐI CÙNG luôn được đảm bảo ở bước ghép MP4 (crop-to-fill,
+        # `app/render/assembly.py::_build_segment`), coi đây chỉ là gợi ý bổ trợ.
+        text = prompt if aspect_ratio != "9:16" else f"{prompt}\n\nBố cục ảnh: khung DỌC (portrait), tỷ lệ 9:16."
         url = f"{API_BASE}/{self.model_name}:generateContent?key={self.api_key}"
         body = {
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": [{"parts": [{"text": text}]}],
             "generationConfig": {"responseModalities": ["IMAGE"]},
         }
         with httpx.Client(timeout=120) as client:

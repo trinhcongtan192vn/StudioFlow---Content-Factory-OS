@@ -8,13 +8,15 @@ from app.models import ProviderConfig
 from app.providers.base import ImageProvider, LLMProvider, TTSProvider, VideoProvider
 from app.providers.claude import ClaudeProvider
 from app.providers.gemini import GeminiProvider
+from app.providers.image_comfy_sdxl import ComfySDXLImageProvider
+from app.providers.image_flux import FluxImageProvider
+from app.providers.image_flux_kontext import FluxKontextImageProvider
 from app.providers.image_gemini import GeminiImageProvider
 from app.providers.image_openai import OpenAIImageProvider
 from app.providers.local_openai_compat import LocalOpenAICompatProvider
 from app.providers.mock import MockLLMProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.stubs import (
-    FluxImageProvider,
     MidjourneyImageProvider,
     OpenAITTSProvider,
     RunwayVideoProvider,
@@ -22,6 +24,10 @@ from app.providers.stubs import (
 )
 from app.providers.tts_elevenlabs import ElevenLabsTTSProvider
 from app.providers.tts_gemini import GeminiTTSProvider
+from app.providers.tts_omnivoice import OmniVoiceProvider
+from app.providers.tts_piper import PiperTTSProvider
+from app.providers.video_comfy_wan import ComfyWanVideoProvider
+from app.providers.video_flux import FluxVideoProvider
 from app.providers.video_sora import SoraVideoProvider
 from app.providers.video_veo import VeoVideoProvider
 
@@ -31,9 +37,14 @@ _LLM_ADAPTERS = {
     "gemini": GeminiProvider,
 }
 
-_TTS_ADAPTERS = {"vbee": VbeeTTSProvider, "elevenlabs": ElevenLabsTTSProvider, "openai": OpenAITTSProvider, "gemini": GeminiTTSProvider}
-_IMAGE_ADAPTERS = {"flux": FluxImageProvider, "midjourney": MidjourneyImageProvider, "openai": OpenAIImageProvider, "gemini": GeminiImageProvider}
-_VIDEO_ADAPTERS = {"runway": RunwayVideoProvider, "sora": SoraVideoProvider, "veo": VeoVideoProvider}
+_TTS_ADAPTERS = {"vbee": VbeeTTSProvider, "elevenlabs": ElevenLabsTTSProvider, "openai": OpenAITTSProvider, "gemini": GeminiTTSProvider, "piper": PiperTTSProvider, "omnivoice": OmniVoiceProvider}
+_IMAGE_ADAPTERS = {"flux": FluxImageProvider, "flux_kontext": FluxKontextImageProvider, "midjourney": MidjourneyImageProvider, "openai": OpenAIImageProvider, "gemini": GeminiImageProvider, "local_sdxl": ComfySDXLImageProvider}
+_VIDEO_ADAPTERS = {"runway": RunwayVideoProvider, "sora": SoraVideoProvider, "veo": VeoVideoProvider, "flux": FluxVideoProvider, "local_wan": ComfyWanVideoProvider}
+
+# provider_name của adapter local (connection_type=="local_endpoint") theo từng task —
+# dùng ở _build_asset_provider() để biết constructor không nhận api_key (khác cloud),
+# xem §05 mục 2 (mở rộng local_endpoint sang tts/image/video, trước đó chỉ llm).
+_LOCAL_ASSET_PROVIDER_NAMES = {"piper"}  # local_sdxl/local_wan dùng base_url (nhánh mặc định), không cần liệt kê ở đây
 
 
 class NoProviderConfiguredError(Exception):
@@ -41,6 +52,27 @@ class NoProviderConfiguredError(Exception):
     không khởi tạo được — người dùng cần vào Cài đặt → Provider AI để xử lý (đã build
     theo yêu cầu: không còn âm thầm dùng Mock provider thay thế, phải cảnh báo rõ để
     người dùng chủ động cập nhật cấu hình, xem IMPLEMENTATION_REPORT.md)."""
+
+
+def _free_local_tts_vram(db: Session) -> None:
+    """Giải phóng VRAM của TTS local dùng GPU thật (hiện chỉ OmniVoice — Piper chạy CPU,
+    không cần) TRƯỚC khi LLM local (Ollama) sắp nạp model — chiều ngược lại của
+    `render/engine.py::_free_llm_vram_if_local`. Đo thật lúc verify OmniVoice: ComfyUI
+    SDXL + OmniVoice cùng thường trú ~12.1GB/16GB (RTX 5060 Ti), Ollama nạp thêm
+    qwen3:14b (~9.6GB) làm TRÀN VRAM — Research thất bại HẲN (không chỉ chậm), xem
+    IMPLEMENTATION_REPORT.md mục 22. Best-effort, không raise — dọn VRAM thất bại không
+    nên chặn luồng LLM chính."""
+    cfg = (
+        db.query(ProviderConfig)
+        .filter(ProviderConfig.task == "tts", ProviderConfig.connection_type == "local_endpoint", ProviderConfig.provider_name == "omnivoice", ProviderConfig.enabled == True)  # noqa: E712
+        .first()
+    )
+    if cfg is None:
+        return
+    try:
+        OmniVoiceProvider(base_url=cfg.endpoint_url or "").unload()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def build_llm_provider(cfg: ProviderConfig) -> LLMProvider:
@@ -74,6 +106,8 @@ def get_llm(db: Session, *, task_role: str = "default") -> LLMProvider:
         raise NoProviderConfiguredError(
             "Chưa cấu hình Provider AI cho LLM. Vào Cài đặt → Provider AI để kết nối Claude/GPT/Gemini hoặc model local (Ollama/vLLM)."
         )
+    if cfg.connection_type == "local_endpoint" and cfg.provider_name != "mock":
+        _free_local_tts_vram(db)
     try:
         return build_llm_provider(cfg)
     except Exception as e:  # noqa: BLE001
@@ -101,6 +135,18 @@ def _build_asset_provider(cfg: ProviderConfig, adapters: dict):
     adapter_cls = adapters.get(cfg.provider_name)
     if adapter_cls is None:
         raise ValueError(f'Provider "{cfg.display_name}" ({cfg.provider_name}) chưa hỗ trợ thực thi thật.')
+    if cfg.connection_type == "local_endpoint":
+        # Local (§05 mục 2, mở rộng sang tts/image/video) — không dùng api_key. Piper
+        # (TTS) chạy in-process, không có server nào để trỏ base_url tới (khác
+        # ComfyUI dùng cho image/video local — xem app/providers/image_comfy_sdxl.py,
+        # video_comfy_wan.py).
+        if cfg.provider_name in _LOCAL_ASSET_PROVIDER_NAMES:
+            return adapter_cls(model_name=cfg.model_name or "")
+        # local_sdxl/local_wan — **mới (2026-08-22)**: giờ truyền THÊM `model_name`
+        # (trước chỉ truyền `base_url`) để checkpoint SDXL đổi được qua Cài đặt → Provider
+        # AI mà không cần sửa code, xem app/providers/image_comfy_sdxl.py — rỗng vẫn giữ
+        # đúng hành vi mặc định cũ (constructor tự fallback về checkpoint gốc).
+        return adapter_cls(base_url=cfg.endpoint_url or "", model_name=cfg.model_name or "")
     api_key = decrypt_secret(cfg.api_key_encrypted) if cfg.api_key_encrypted else ""
     try:
         if cfg.provider_name == "elevenlabs":

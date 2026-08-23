@@ -4,8 +4,9 @@ provider trước khi có adapter thật.
 
 Đã thực thi thật — KHÔNG còn ở file này: ElevenLabs (TTS, tts_elevenlabs.py), OpenAI
 Image (image_openai.py), Sora (video_sora.py) — M2; Gemini TTS (tts_gemini.py), Gemini
-Image (image_gemini.py), Google Veo (video_veo.py) — đợt 2. Các provider còn lại dưới
-đây (Vbee, Flux, Midjourney, Runway, OpenAI TTS) vẫn chỉ là khai báo interface — chưa
+Image (image_gemini.py), Google Veo (video_veo.py) — đợt 2; Flux Image + Video
+(image_flux.py/video_flux.py, Black Forest Labs) — đợt 3 (2026-08-16). Các provider còn
+lại dưới đây (Vbee, Midjourney, Runway, OpenAI TTS) vẫn chỉ là khai báo interface — chưa
 research/implement, để làm ở đợt sau.
 """
 from app.providers.base import ImageProvider, ProviderStatus, TTSProvider, VideoProvider
@@ -22,21 +23,8 @@ class VbeeTTSProvider(TTSProvider, NotImplementedMixin):
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
 
-    def synthesize(self, text: str, *, emotion: str = "") -> bytes:
+    def synthesize(self, text: str, *, emotion: str = "", reference_audio: bytes | None = None) -> bytes:
         self._not_implemented("Vbee TTS synthesize")
-
-    def test_connection(self) -> ProviderStatus:
-        return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
-
-
-class FluxImageProvider(ImageProvider, NotImplementedMixin):
-    provider_name = "flux"
-
-    def __init__(self, api_key: str = ""):
-        self.api_key = api_key
-
-    def generate(self, prompt: str) -> bytes:
-        self._not_implemented("Flux image generate")
 
     def test_connection(self) -> ProviderStatus:
         return ProviderStatus(ok=bool(self.api_key), message="Đã lưu key — CHƯA xác minh kết nối thật (provider này chưa gọi API, chỉ kiểm tra đã nhập key)")
@@ -48,7 +36,7 @@ class MidjourneyImageProvider(ImageProvider, NotImplementedMixin):
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
 
-    def generate(self, prompt: str) -> bytes:
+    def generate(self, prompt: str, *, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> bytes:
         self._not_implemented("Midjourney image generate")
 
     def test_connection(self) -> ProviderStatus:
@@ -61,7 +49,7 @@ class RunwayVideoProvider(VideoProvider, NotImplementedMixin):
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
 
-    def generate(self, prompt: str) -> bytes:
+    def generate(self, prompt: str, *, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> bytes:
         self._not_implemented("Runway video generate")
 
     def test_connection(self) -> ProviderStatus:
@@ -82,7 +70,7 @@ class OpenAITTSProvider(TTSProvider, NotImplementedMixin):
     def __init__(self, api_key: str = ""):
         self.api_key = api_key
 
-    def synthesize(self, text: str, *, emotion: str = "") -> bytes:
+    def synthesize(self, text: str, *, emotion: str = "", reference_audio: bytes | None = None) -> bytes:
         self._not_implemented("OpenAI TTS synthesize")
 
     def test_connection(self) -> ProviderStatus:

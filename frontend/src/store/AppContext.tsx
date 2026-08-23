@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import { api } from "../api/client";
 import type { ChannelSummary } from "../api/types";
 
-type View = "dashboard" | "project" | "settings";
+type View = "dashboard" | "project" | "settings" | "trash" | "library";
 
 interface AppState {
   view: View;
@@ -12,12 +12,19 @@ interface AppState {
   sidebarCollapsed: boolean;
   rightPanelOpen: boolean;
   expandedChannels: Record<string, boolean>;
+  // Short-form (2026-08-21) — mở rộng danh sách short-form con dưới 1 project long-form
+  // trong Sidebar, cùng pattern `expandedChannels` (key = id project long-form).
+  expandedProjects: Record<string, boolean>;
   hasLlmProvider: boolean;
   projectsVersion: Record<string, number>;
   goDashboard: () => void;
   goSettings: () => void;
+  goTrash: () => void;
+  goLibrary: () => void;
   openProject: (channelId: string, projectId: string) => void;
   toggleChannel: (channelId: string) => void;
+  toggleProject: (projectId: string) => void;
+  expandProject: (projectId: string) => void;
   toggleSidebar: () => void;
   toggleRightPanel: () => void;
   refreshChannels: () => Promise<void>;
@@ -35,6 +42,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [expandedChannels, setExpandedChannels] = useState<Record<string, boolean>>({});
+  const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
   const [hasLlmProvider, setHasLlmProvider] = useState(true);
   const [projectsVersion, setProjectsVersion] = useState<Record<string, number>>({});
 
@@ -58,6 +66,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setActiveProjectId(null);
   };
   const goSettings = () => setView("settings");
+  const goTrash = () => setView("trash");
+  const goLibrary = () => setView("library");
   const openProject = (channelId: string, projectId: string) => {
     setActiveChannelId(channelId);
     setActiveProjectId(projectId);
@@ -65,6 +75,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setExpandedChannels((s) => ({ ...s, [channelId]: true }));
   };
   const toggleChannel = (channelId: string) => setExpandedChannels((s) => ({ ...s, [channelId]: !s[channelId] }));
+  const toggleProject = (projectId: string) => setExpandedProjects((s) => ({ ...s, [projectId]: !s[projectId] }));
+  const expandProject = (projectId: string) => setExpandedProjects((s) => (s[projectId] ? s : { ...s, [projectId]: true }));
   const toggleSidebar = () => setSidebarCollapsed((s) => !s);
   const toggleRightPanel = () => setRightPanelOpen((s) => !s);
   const bumpProjectsVersion = (channelId: string) => setProjectsVersion((s) => ({ ...s, [channelId]: (s[channelId] || 0) + 1 }));
@@ -77,12 +89,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     sidebarCollapsed,
     rightPanelOpen,
     expandedChannels,
+    expandedProjects,
     hasLlmProvider,
     projectsVersion,
     goDashboard,
     goSettings,
+    goTrash,
+    goLibrary,
     openProject,
     toggleChannel,
+    toggleProject,
+    expandProject,
     toggleSidebar,
     toggleRightPanel,
     refreshChannels,

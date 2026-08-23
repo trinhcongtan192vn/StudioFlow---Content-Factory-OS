@@ -17,6 +17,17 @@ def _get_key() -> bytes:
 
 
 def encrypt_secret(plain: str) -> str:
+    """`.strip()` — **mới (2026-08-22)**: bug thật phát hiện lúc điều tra Flux API key
+    "đúng nhưng test connection vẫn lỗi" — 1 trong các đường lưu API key ở frontend
+    thiếu `.trim()`, khoảng trắng/ký tự xuống dòng thừa dính vào key vẫn lưu được, tới
+    lúc gọi API mới lộ ra bằng lỗi httpx `LocalProtocolError` khó hiểu (xem
+    `app/providers/flux_common.py::check_auth`). Chặn NGAY TẠI NGUỒN — API key hợp lệ
+    không bao giờ CẦN khoảng trắng ở đầu/cuối, strip ở đây áp dụng cho MỌI provider
+    (điểm DUY NHẤT gọi hàm này, xem `app/routers/providers.py`), không cần sửa từng nơi
+    gọi riêng lẻ."""
+    if not plain:
+        return ""
+    plain = plain.strip()
     if not plain:
         return ""
     f = Fernet(_get_key())

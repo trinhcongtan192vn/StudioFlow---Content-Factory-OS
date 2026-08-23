@@ -37,10 +37,12 @@ def test_list_prompt_templates_seeded(client):
     resp = client.get("/prompt-templates")
     assert resp.status_code == 200
     templates = resp.json()
-    assert len(templates) >= 9  # PROMPT_SEED trong app/seed.py
-    outline_tpl = next(t for t in templates if t["task"] == "outline")
-    assert outline_tpl["body"]  # active version phải có nội dung
-    assert len(outline_tpl["versions"]) >= 1
+    # 3 template còn lại sau khi bỏ AI Research/Outline/Hook/Full-Script + Pack Review
+    # (2026-08-17, mục 44) — chỉ còn nhóm Visual Studio (ảnh/video/giọng đọc từng shot).
+    assert len(templates) >= 3  # PROMPT_SEED trong app/seed.py
+    visual_tpl = next(t for t in templates if t["task"] == "visual_image")
+    assert visual_tpl["body"]  # active version phải có nội dung
+    assert len(visual_tpl["versions"]) >= 1
 
 
 def test_create_prompt_template(client, unique_name):
@@ -144,17 +146,27 @@ def test_budget_detail_empty_when_no_expense(client, channel):
 def test_budget_detail_groups_after_pipeline_usage(client, project_with_brief):
     """Chạy 1 bước pipeline thật (provider Mock, cost=0 nhưng vẫn ghi log request) rồi
     kiểm tra budget detail group đúng theo project/provider (bug đã sửa: record_usage
-    + endpoint /budget/{id}/detail)."""
+    + endpoint /budget/{id}/detail).
+
+    2026-08-17 (mục 44): đường cũ dùng /research + /gate1 để có usage LLM — cả 2 đã bỏ
+    cùng AI Research/Outline/Hook. Đổi sang: import script (không gọi AI) + "Tạo lại
+    Visual" cho 1 shot (`regenerate-visual`, VẪN gọi LLM thật để sinh prompt ảnh) — cùng
+    mục đích tạo 1 lượt usage LLM thật qua provider Mock."""
+    import io
+
     pid = project_with_brief["id"]
     channel_id = project_with_brief["channel_id"]
 
-    r1 = client.post(f"/projects/{pid}/research")
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    row = ["B01", "0:00–0:05", "Image", "Cảnh mở", "Nhạc nền", "Xin chào các bạn."]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, row])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shots = client.post(f"/projects/{pid}/visual/generate").json()["shots"]
+    shot_id = shots[0]["shot_id"]
+
+    r1 = client.post(f"/projects/{pid}/visual/shots/{shot_id}/regenerate-visual")
     assert r1.status_code == 200, r1.text
-    research = r1.json()
-    outline_id = research["research"]["outlines"][0]["id"]
-    hook_id = research["hooks"][0]["id"]
-    r2 = client.post(f"/projects/{pid}/gate1", json={"chosen_outline_id": outline_id, "chosen_hook_id": hook_id})
-    assert r2.status_code == 200, r2.text
 
     resp = client.get(f"/budget/{channel_id}/detail")
     assert resp.status_code == 200

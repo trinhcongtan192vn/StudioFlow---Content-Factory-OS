@@ -4,12 +4,12 @@
 
 ## Sản phẩm là gì
 
-StudioFlow là **desktop app single-user** giúp một người vận hành nhiều kênh YouTube long-form tiếng Việt: biến brief + dữ liệu thô thành một **Production Pack** chuẩn hoá (kịch bản đa cột + shot list + prompt AI + title/thumbnail concept). AI làm phần tổng hợp & viết; con người kiểm soát chất lượng tại **2 human-gate bắt buộc**.
+StudioFlow là **desktop app single-user** giúp một người vận hành nhiều kênh YouTube long-form tiếng Việt: từ kịch bản có sẵn (upload CSV/Excel), sinh ảnh/video/giọng đọc cho từng shot bằng AI rồi ghép thành video hoàn chỉnh — chuẩn hoá trong 1 **Production Pack** (kịch bản đa cột + shot list). AI làm phần sinh asset; con người kiểm soát chất lượng bằng cách duyệt từng shot trước khi ghép MP4 (§Đã build 2026-08-17 — bỏ hẳn luồng AI viết kịch bản + gate duyệt Pack giữa các bước, xem IMPLEMENTATION_REPORT.md mục 44).
 
 **Nguyên tắc lõi:**
 1. **Production Pack (JSON) là artifact trung tâm** — mọi downstream chỉ đọc schema, không đọc file người-đọc.
 2. **Ưu tiên số 1 là chất lượng kịch bản/retention** — mọi đánh đổi nghiêng về phía này.
-3. **Không bao giờ có nút "generate all"** — 2 gate không được bypass.
+3. **Mỗi bước là hành động rõ ràng người dùng tự bấm** — không tự động chạy ngầm qua nhiều bước, không có 1 nút duy nhất chạy trọn pipeline.
 4. **Provider AI thay thế được** — cloud (Claude/Gemini/OpenAI…) và local (Qwen/DeepSeek/Kimi qua GPU) đều là plugin sau một interface chung.
 5. **Single-user, không RBAC** — không phân quyền nhiều người.
 
@@ -46,6 +46,6 @@ StudioFlow là **desktop app single-user** giúp một người vận hành nhi�
 
 ## Phạm vi MVP (M1) tóm tắt
 
-Trong: Channel & BrandProfile · Brief intake 4 nhóm · Script Studio (Research → Gate #1 → Generation) · Hook Variants (3 kiểu, không điểm) · Retention Guardrail (cảnh báo) · Production Pack + Prompt Builder · Gate #2 · Export Pack · **toàn bộ khu Cài đặt admin** · nạp retention thủ công.
+Trong: Channel & BrandProfile · Brief intake (tuỳ chọn, 4 nhóm) · Upload script (CSV/Excel — con đường duy nhất để có script, xem `03_api.md` mục Script Import) · Script Studio · Visual Studio (sinh ảnh/video/giọng đọc từng shot bằng AI, duyệt từng shot) · Retention Guardrail (cảnh báo) · Production Pack + Prompt Builder · Export Pack · **toàn bộ khu Cài đặt admin** · nạp retention thủ công.
 
 Ngoài (mốc sau): in-app render (M2) · repurposing (M3) · correlation tự động/YouTube API (M4).

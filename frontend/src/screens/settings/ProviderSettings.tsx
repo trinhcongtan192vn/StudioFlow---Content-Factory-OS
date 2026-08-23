@@ -23,7 +23,8 @@ const CLOUD_CATALOG: Record<string, { provider_name: string; display_name: strin
     { provider_name: "gemini", display_name: "Gemini TTS", models: ["gemini-3.1-flash-tts-preview", "gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts"] },
   ],
   image: [
-    { provider_name: "flux", display_name: "Flux", models: ["flux-1.1-pro", "flux-schnell"] },
+    { provider_name: "flux", display_name: "Flux (Black Forest Labs)", models: ["flux-2-pro", "flux-2-max", "flux-2-flex", "flux-2-klein-9b", "flux-2-klein-4b"] },
+    { provider_name: "flux_kontext", display_name: "Flux Kontext (fluxapi.ai)", models: ["flux-kontext-pro", "flux-kontext-max"] },
     { provider_name: "midjourney", display_name: "Midjourney", models: ["v6"] },
     { provider_name: "openai", display_name: "OpenAI Image (GPT Image)", models: ["gpt-image-2", "gpt-image-1-mini"] },
     { provider_name: "gemini", display_name: "Gemini Image (Nano Banana)", models: ["gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"] },
@@ -32,8 +33,139 @@ const CLOUD_CATALOG: Record<string, { provider_name: string; display_name: strin
     { provider_name: "runway", display_name: "Runway", models: ["gen-4", "gen-3-alpha"] },
     { provider_name: "sora", display_name: "Sora (OpenAI)", models: ["sora-2", "sora-2-pro"] },
     { provider_name: "veo", display_name: "Google Veo", models: ["veo-3.1-generate-preview", "veo-3.1-fast-generate-preview"] },
+    { provider_name: "flux", display_name: "Flux 3 Video (Black Forest Labs)", models: ["flux-3-video-hd", "flux-3-video-fhd"] },
   ],
 };
+
+// Provider local (connection_type="local_endpoint") theo từng nhóm task — mở rộng từ
+// chỉ LLM (Ollama/vLLM/LM Studio) sang cả tts/image/video (piper/local_sdxl/local_wan),
+// xem backend/app/providers/factory.py::_build_asset_provider + IMPLEMENTATION_REPORT.md.
+// MẢNG (không phải 1 lựa chọn/nhóm) — từ khi có OmniVoice làm lựa chọn TTS local THỨ 2
+// (song song Piper), cùng dạng CLOUD_CATALOG (có <select> chọn provider khi >1 lựa chọn).
+type LocalCatalogEntry = { provider_name: string; display_name: string; endpoint_url: string; model_name: string; needs_endpoint: boolean; hint: string };
+const LOCAL_CATALOG: Record<string, LocalCatalogEntry[]> = {
+  llm: [
+    {
+      provider_name: "local",
+      display_name: "Local GPU (Ollama)",
+      endpoint_url: "http://localhost:11434/v1",
+      model_name: "qwen3:14b",
+      needs_endpoint: true,
+      hint: "Dùng cho model mã nguồn mở chạy tại máy có GPU (Qwen, DeepSeek, Kimi…) qua endpoint OpenAI-compatible — Ollama, vLLM, LM Studio. Chi phí $0, dữ liệu không rời máy.",
+    },
+  ],
+  tts: [
+    {
+      provider_name: "piper",
+      display_name: "Piper TTS (local, CPU)",
+      endpoint_url: "",
+      model_name: "vi_VN-vais1000-medium",
+      needs_endpoint: false,
+      hint: "Piper chạy in-process (không cần endpoint mạng) — tải giọng .onnx về backend/models/piper/ trước (xem IMPLEMENTATION_REPORT.md). Điền đúng tên file giọng (không kèm .onnx) vào ô Model.",
+    },
+    {
+      provider_name: "omnivoice",
+      display_name: "OmniVoice (local GPU, voice cloning)",
+      endpoint_url: "http://127.0.0.1:8199",
+      model_name: "omnivoice",
+      needs_endpoint: true,
+      hint: "Nhân bản giọng (zero-shot voice cloning) từ audio mẫu — cần cài + chạy OmniVoice server riêng trước (mặc định cổng 8199, venv tách biệt — xem IMPLEMENTATION_REPORT.md). Dùng chung giọng thương hiệu qua BrandProfile nếu có cấu hình.",
+    },
+  ],
+  image: [
+    {
+      provider_name: "local_sdxl",
+      display_name: "ComfyUI SDXL (local GPU)",
+      endpoint_url: "http://127.0.0.1:8188",
+      // Trước là "sdxl" (placeholder không phải tên file thật, chưa từng có tác dụng) —
+      // mới (2026-08-22): field này giờ ĐIỀU KHIỂN THẬT checkpoint dùng để sinh ảnh, để
+      // trống dùng mặc định của app (xem hint bên dưới).
+      model_name: "",
+      needs_endpoint: true,
+      hint: "Cần cài + chạy ComfyUI trước (mặc định cổng 8188). Để trống ô Model dùng checkpoint mặc định của app — hoặc điền ĐÚNG tên file .safetensors đang có trong thư mục ComfyUI/models/checkpoints (VD sau khi đổi sang checkpoint fine-tune) để đổi checkpoint mà không cần sửa code.",
+    },
+  ],
+  video: [
+    {
+      provider_name: "local_wan",
+      display_name: "ComfyUI Wan2.2 (local GPU)",
+      endpoint_url: "http://127.0.0.1:8188",
+      model_name: "wan2.2-ti2v-5b",
+      needs_endpoint: true,
+      hint: "Cùng ComfyUI với Image (cổng 8188) — cần checkpoint Wan2.2 TI2V-5B đã tải sẵn.",
+    },
+  ],
+};
+
+/** Dropdown checkpoint/LoRA THẬT lấy từ ComfyUI đang chạy — **mới (2026-08-22)**, theo
+ * yêu cầu người dùng: cho CHỌN thay vì phải tự gõ đúng tên file (dễ gõ sai, không biết
+ * ComfyUI thật đang có file nào). Dùng chung cho ô "Model" của provider `local_sdxl`
+ * (kind="checkpoints") LẪN ô "Style LoRA" ở ChannelDialog.tsx (kind="loras") — cùng 1
+ * ComfyUI, cùng cơ chế liệt kê (xem `api.listLocalSdxlModels`).
+ * ComfyUI chưa chạy/không kết nối được → fallback về ô nhập tay (KHÔNG chặn cấu hình,
+ * chỉ mất tiện ích chọn nhanh) kèm thông báo lỗi rõ ràng. */
+export function ComfyModelSelect({
+  kind, value, baseUrl, onChange, placeholder, emptyLabel,
+}: {
+  kind: "checkpoints" | "loras";
+  value: string;
+  baseUrl: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  emptyLabel: string;
+}) {
+  const [models, setModels] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .listLocalSdxlModels(kind, baseUrl || undefined)
+      .then((res) => {
+        if (!cancelled) {
+          setModels(res.models);
+          setLoading(false);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof ApiError ? e.message : "Không kết nối được ComfyUI để lấy danh sách.");
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, baseUrl]);
+
+  if (loading) {
+    return <input className="input" value={value} disabled placeholder="Đang tải danh sách từ ComfyUI..." />;
+  }
+  if (error || !models) {
+    return (
+      <div>
+        <input className="input" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+        <div style={{ fontSize: 11, color: "var(--color-danger)", marginTop: 4 }}>{error || "Không lấy được danh sách — nhập tay tên file."}</div>
+      </div>
+    );
+  }
+  // Giá trị hiện có nhưng ComfyUI không (còn) thấy file đó (VD đã xoá/đổi tên) — vẫn hiện
+  // trong dropdown để không "mất" cấu hình đang lưu, không tự ý reset về rỗng.
+  const options = value && !models.includes(value) ? [value, ...models] : models;
+  return (
+    <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">{emptyLabel}</option>
+      {options.map((m) => (
+        <option key={m} value={m}>
+          {m}
+        </option>
+      ))}
+    </select>
+  );
+}
 
 export default function ProviderSettings() {
   const [group, setGroup] = useState<(typeof GROUPS)[number]>("llm");
@@ -205,10 +337,31 @@ export default function ProviderSettings() {
 
             {pv.connection_type === "local_endpoint" && pv.provider_name !== "mock" ? (
               <div className="field" style={{ margin: 0 }}>
-                <label>Endpoint URL (Ollama/vLLM/LM Studio)</label>
-                <input className="input" defaultValue={pv.endpoint_url || ""} onBlur={(e) => api.patchProvider(pv.id, { endpoint_url: e.target.value }).then(load)} placeholder="http://localhost:11434/v1" />
-                <label style={{ marginTop: 6 }}>Model</label>
-                <input className="input" defaultValue={pv.model_name || ""} onBlur={(e) => api.patchProvider(pv.id, { model_name: e.target.value }).then(load)} placeholder="qwen2.5:32b" />
+                {(() => {
+                  const localEntry = LOCAL_CATALOG[pv.task]?.find((c) => c.provider_name === pv.provider_name);
+                  return (
+                    <>
+                      {localEntry?.needs_endpoint !== false && (
+                        <>
+                          <label>Endpoint URL</label>
+                          <input className="input" defaultValue={pv.endpoint_url || ""} onBlur={(e) => api.patchProvider(pv.id, { endpoint_url: e.target.value }).then(load)} placeholder={localEntry?.endpoint_url} />
+                        </>
+                      )}
+                      <label style={{ marginTop: 6 }}>Model</label>
+                      {pv.provider_name === "local_sdxl" ? (
+                        <ComfyModelSelect
+                          kind="checkpoints"
+                          value={pv.model_name || ""}
+                          baseUrl={pv.endpoint_url || ""}
+                          onChange={(v) => api.patchProvider(pv.id, { model_name: v }).then(load)}
+                          emptyLabel="— Mặc định app (Painter's Checkpoint) —"
+                        />
+                      ) : (
+                        <input className="input" defaultValue={pv.model_name || ""} onBlur={(e) => api.patchProvider(pv.id, { model_name: e.target.value }).then(load)} placeholder={localEntry?.model_name} />
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             ) : pv.available_models.length > 0 ? (
               <div className="field" style={{ margin: 0 }}>
@@ -294,9 +447,12 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
   const [displayName, setDisplayName] = useState(CLOUD_CATALOG[group][0]?.display_name || "");
   const [cloudModel, setCloudModel] = useState(CLOUD_CATALOG[group][0]?.models[0] || "");
   const [apiKey, setApiKey] = useState("");
-  const [endpointUrl, setEndpointUrl] = useState("http://localhost:11434/v1");
-  const [localDisplayName, setLocalDisplayName] = useState("Local GPU (Ollama)");
-  const [modelName, setModelName] = useState("qwen2.5:32b");
+  const localCatalog = LOCAL_CATALOG[group] || [];
+  const [localProviderName, setLocalProviderName] = useState(localCatalog[0]?.provider_name || "");
+  const selectedLocalCatalog = localCatalog.find((c) => c.provider_name === localProviderName);
+  const [endpointUrl, setEndpointUrl] = useState(localCatalog[0]?.endpoint_url || "");
+  const [localDisplayName, setLocalDisplayName] = useState(localCatalog[0]?.display_name || "");
+  const [modelName, setModelName] = useState(localCatalog[0]?.model_name || "");
   const [saving, setSaving] = useState(false);
 
   // Sau khi thêm, test connection NGAY trong dialog (không bắt tự bấm Test riêng sau
@@ -326,8 +482,8 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
     try {
       const pv =
         connectionType === "cloud_api"
-          ? await api.createProvider({ task: group, provider_name: providerName, display_name: displayName, connection_type: "cloud_api", api_key: apiKey, model_name: cloudModel })
-          : await api.createProvider({ task: "llm", provider_name: "local", display_name: localDisplayName, connection_type: "local_endpoint", endpoint_url: endpointUrl, model_name: modelName });
+          ? await api.createProvider({ task: group, provider_name: providerName, display_name: displayName, connection_type: "cloud_api", api_key: apiKey.trim(), model_name: cloudModel })
+          : await api.createProvider({ task: group, provider_name: localProviderName, display_name: localDisplayName, connection_type: "local_endpoint", endpoint_url: endpointUrl, model_name: modelName });
       setCreatedId(pv.id);
       await runTest(pv.id);
     } finally {
@@ -395,21 +551,19 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
     <div className="dialog-backdrop" onClick={onClose}>
       <div className="dialog" style={{ width: "min(460px,100%)" }} onClick={(e) => e.stopPropagation()}>
         <div className="dialog-title">Thêm provider — {GROUP_LABEL[group]}</div>
-        {group === "llm" && (
-          <div className="field">
-            <label>Loại kết nối</label>
-            <div className="seg">
-              <label className={`seg-opt ${connectionType === "cloud_api" ? "active" : ""}`}>
-                <input type="radio" checked={connectionType === "cloud_api"} onChange={() => setConnectionType("cloud_api")} />
-                Cloud API
-              </label>
-              <label className={`seg-opt ${connectionType === "local_endpoint" ? "active" : ""}`}>
-                <input type="radio" checked={connectionType === "local_endpoint"} onChange={() => setConnectionType("local_endpoint")} />
-                Local Endpoint (GPU)
-              </label>
-            </div>
+        <div className="field">
+          <label>Loại kết nối</label>
+          <div className="seg">
+            <label className={`seg-opt ${connectionType === "cloud_api" ? "active" : ""}`}>
+              <input type="radio" checked={connectionType === "cloud_api"} onChange={() => setConnectionType("cloud_api")} />
+              Cloud API
+            </label>
+            <label className={`seg-opt ${connectionType === "local_endpoint" ? "active" : ""}`}>
+              <input type="radio" checked={connectionType === "local_endpoint"} onChange={() => setConnectionType("local_endpoint")} />
+              Local (GPU/CPU)
+            </label>
           </div>
-        )}
+        </div>
 
         {connectionType === "cloud_api" ? (
           <>
@@ -451,20 +605,52 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
           </>
         ) : (
           <>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              Dùng cho model mã nguồn mở chạy tại máy có GPU (Qwen, DeepSeek, Kimi…) qua endpoint OpenAI-compatible — Ollama, vLLM, LM Studio. Chi phí $0, dữ liệu không rời máy (PRD §10.2b).
-            </div>
+            {localCatalog.length > 1 && (
+              <div className="field">
+                <label>Engine</label>
+                <select
+                  className="input"
+                  value={localProviderName}
+                  onChange={(e) => {
+                    const next = localCatalog.find((c) => c.provider_name === e.target.value);
+                    setLocalProviderName(e.target.value);
+                    setLocalDisplayName(next?.display_name || e.target.value);
+                    setEndpointUrl(next?.endpoint_url || "");
+                    setModelName(next?.model_name || "");
+                  }}
+                >
+                  {localCatalog.map((c) => (
+                    <option key={c.provider_name} value={c.provider_name}>
+                      {c.display_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div style={{ fontSize: 12, opacity: 0.75 }}>{selectedLocalCatalog?.hint}</div>
             <div className="field">
               <label>Tên hiển thị</label>
               <input className="input" value={localDisplayName} onChange={(e) => setLocalDisplayName(e.target.value)} />
             </div>
-            <div className="field">
-              <label>Endpoint URL</label>
-              <input className="input" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder="http://localhost:11434/v1" />
-            </div>
+            {selectedLocalCatalog?.needs_endpoint && (
+              <div className="field">
+                <label>Endpoint URL</label>
+                <input className="input" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder={selectedLocalCatalog.endpoint_url} />
+              </div>
+            )}
             <div className="field">
               <label>Tên model</label>
-              <input className="input" value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="qwen2.5:32b" />
+              {localProviderName === "local_sdxl" ? (
+                <ComfyModelSelect
+                  kind="checkpoints"
+                  value={modelName}
+                  baseUrl={endpointUrl}
+                  onChange={setModelName}
+                  emptyLabel="— Mặc định app (Painter's Checkpoint) —"
+                />
+              ) : (
+                <input className="input" value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder={selectedLocalCatalog?.model_name} />
+              )}
             </div>
           </>
         )}

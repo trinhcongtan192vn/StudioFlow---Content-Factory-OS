@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config import project_dir
@@ -7,11 +8,17 @@ from app.db import get_db
 from app.filestore import read_json, write_bytes, write_json, write_versioned
 from app.models import PackVersion, Project
 from app.providers.factory import NoProviderConfiguredError, get_image_chain
+from app.providers.image_comfy_sdxl import estimate_cost as estimate_local_sdxl_cost
 from app.providers.image_gemini import estimate_cost as estimate_gemini_image_cost
 from app.providers.image_openai import estimate_cost as estimate_openai_image_cost
 from app.routers.pipeline import record_asset_usage
+from app.timeutil import vn_isoformat
 
-_IMAGE_COST_FN = {"openai": estimate_openai_image_cost, "gemini": estimate_gemini_image_cost}
+# Bảng riêng của thumbnail (KHÁC _IMAGE_COST_FN trong app/render/engine.py, dùng cho
+# ảnh shot) — thiếu "local_sdxl" ở đây từng làm sinh thumbnail bằng SDXL local bị tính
+# nhầm $0.06 (rơi về fallback estimate_openai_image_cost) dù chi phí thật là $0, phát
+# hiện lúc người dùng test thật (IMPLEMENTATION_REPORT.md).
+_IMAGE_COST_FN = {"openai": estimate_openai_image_cost, "gemini": estimate_gemini_image_cost, "local_sdxl": estimate_local_sdxl_cost}
 
 router = APIRouter(tags=["pack"])
 
@@ -71,6 +78,7 @@ def generate_thumbnail(project_id: str, db: Session = Depends(get_db)):
     prompt = ". ".join(prompt_parts) + ". YouTube thumbnail, bold, high-contrast, dễ đọc ở kích thước nhỏ, aspect 16:9."
 
     ym["thumbnail_status"] = "generating"
+    ym["thumbnail_approved"] = False  # ảnh mới → cần duyệt lại, xem YoutubeMeta.thumbnail_approved
     pack["youtube_meta"] = ym
     write_json(pdir / "pack.json", pack)
 
@@ -115,7 +123,60 @@ def get_thumbnail_asset(project_id: str, db: Session = Depends(get_db)):
     return FileResponse(path)
 
 
+_UPLOAD_EXT_BY_CONTENT_TYPE = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+
+
+@router.post("/projects/{project_id}/pack/thumbnail/upload")
+async def upload_thumbnail(project_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Thay cho sinh bằng AI — người dùng tự upload ảnh thumbnail có sẵn từ máy. Cùng
+    vai trò "anchor" như ảnh AI sinh (xem `approve_thumbnail` bên dưới +
+    app/render/engine.py::_read_anchor_image) — không cần thumbnail_description, không
+    tốn phí provider."""
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, project_id)
+    pack = read_json(pdir / "pack.json") or {}
+    ym = pack.get("youtube_meta") or {}
+
+    ext = _UPLOAD_EXT_BY_CONTENT_TYPE.get(file.content_type or "")
+    if not ext:
+        raise HTTPException(400, "Chỉ nhận ảnh PNG/JPEG/WEBP")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "File ảnh rỗng")
+
+    path = pdir / "assets" / f"thumbnail.{ext}"
+    write_bytes(path, data)
+    ym.update(thumbnail_status="ready", thumbnail_asset_path=str(path), thumbnail_provider="upload", thumbnail_error=None, thumbnail_approved=False)
+    pack["youtube_meta"] = ym
+    write_json(pdir / "pack.json", pack)
+    db.commit()
+    return pack
+
+
+class ThumbnailApproveBody(BaseModel):
+    approved: bool = True
+
+
+@router.post("/projects/{project_id}/pack/thumbnail/approve")
+def approve_thumbnail(project_id: str, body: ThumbnailApproveBody, db: Session = Depends(get_db)):
+    """Duyệt ảnh thumbnail (AI sinh hoặc upload tay) — điều kiện BẮT BUỘC để Visual
+    Studio mở khoá nút sinh asset ảnh/video từng shot (xem app/routers/render.py::
+    _require_thumbnail_approved), vì ảnh này trở thành "anchor" tham chiếu xuyên suốt
+    project (Tier 2 — nhất quán phong cách/nhân vật giữa các shot)."""
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, project_id)
+    pack = read_json(pdir / "pack.json") or {}
+    ym = pack.get("youtube_meta") or {}
+    if body.approved and ym.get("thumbnail_status") != "ready":
+        raise HTTPException(400, "Chưa có ảnh thumbnail sẵn sàng để duyệt")
+    ym["thumbnail_approved"] = body.approved
+    pack["youtube_meta"] = ym
+    write_json(pdir / "pack.json", pack)
+    db.commit()
+    return pack
+
+
 @router.get("/projects/{project_id}/pack/versions")
 def pack_versions(project_id: str, db: Session = Depends(get_db)):
     versions = db.query(PackVersion).filter(PackVersion.project_id == project_id).order_by(PackVersion.version.desc()).all()
-    return [{"version": v.version, "status_at_save": v.status_at_save, "created_at": v.created_at.isoformat()} for v in versions]
+    return [{"version": v.version, "status_at_save": v.status_at_save, "created_at": vn_isoformat(v.created_at)} for v in versions]

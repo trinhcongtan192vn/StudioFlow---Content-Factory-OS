@@ -19,20 +19,30 @@ Quy ước placeholder: `{{brand_voice}}`, `{{forbidden}}`, `{{content_pillars}}
 > Editor không có bước AI-assist nào) đã bị GỠ khỏi seed thay vì để mồ côi trên màn
 > Prompt Templates.
 >
+> **Đã build lại, 2026-08-17 (mục 44 IMPLEMENTATION_REPORT.md) — 7/10 dòng bảng dưới
+> đã XOÁ HẲN khỏi `PROMPT_SEED` (`backend/app/seed.py`) và không còn điểm gọi nào
+> trong `generation.py`**: `outline`, `hook`, `script`, `script_revise`,
+> `script_breakdown`, `visual_shots_init`, `thumbnail` — cùng lúc bỏ hẳn AI Research/
+> Outline/Hook/Full-Script/Pack Review. "Upload script" (import CSV/Excel) là con
+> đường DUY NHẤT còn lại để có kịch bản/shot ban đầu — không gọi AI nào ở bước đó, chỉ
+> seed thẳng từ nội dung file. **CHỈ CÒN 3 task key thật** (đánh dấu ✅ dưới đây), cả 3
+> đều là hành động "Tạo lại" người dùng chủ động bấm ở Visual Studio SAU khi đã có shot
+> (không dùng lúc tạo shot ban đầu).
+>
 > | task key (DB) | Điểm gọi (generation.py) | Tham số `{{...}}` riêng (ngoài BrandProfile chung) |
 > |---|---|---|
-> | `outline` | `generate_research` — mục 1 | `topic`, `brief`, `outline_count` |
-> | `hook` | `generate_hooks` — mục 2 | `chosen_outline`, `hook_count` |
-> | `script` | `generate_full_script` — mục 3 | `outline`, `hook`, `framework`, `length` |
-> | `script_revise` | `regenerate_full_script` — endpoint `/script/regenerate` | `current_script`, `user_feedback`, `length` |
-> | `script_breakdown` | `breakdown_script` — bóc tách Full Script → body đa cột | CHỈ `script_text` (không inject BrandProfile) |
-> | `visual_shots_init` | `generate_shots` — sinh HÀNG LOẠT shot ban đầu khi vào Visual Studio | `script` |
-> | `visual_image` | `regenerate_shot_visual_fx` khi shot `visual_type=image` — nút "Tạo lại Visual" | `script_snippet`, `visual_description` |
-> | `visual_video` | `regenerate_shot_visual_fx` khi shot `visual_type=video` — nút "Tạo lại Visual" | `script_snippet`, `visual_description` |
-> | `visual_tts` | `regenerate_shot_audio_sfx` — nút "Tạo lại giọng đọc" | `script_snippet`, `emotion_description`, `voice_profile` |
-> | `thumbnail` | `generate_titles_and_meta` — mục 5, gộp thêm description SEO + hashtags (`youtube_meta`) | `brief`, `script` |
+> | ~~`outline`~~ | ~~`generate_research` — mục 1~~ **XOÁ** | ~~`topic`, `brief`, `outline_count`~~ |
+> | ~~`hook`~~ | ~~`generate_hooks` — mục 2~~ **XOÁ** | ~~`chosen_outline`, `hook_count`~~ |
+> | ~~`script`~~ | ~~`generate_full_script` — mục 3~~ **XOÁ** | ~~`outline`, `hook`, `framework`, `length`~~ |
+> | ~~`script_revise`~~ | ~~`regenerate_full_script` — endpoint `/script/regenerate`~~ **XOÁ** | ~~`current_script`, `user_feedback`, `length`~~ |
+> | ~~`script_breakdown`~~ | ~~`breakdown_script` — bóc tách Full Script → body đa cột~~ **XOÁ** | ~~CHỈ `script_text` (không inject BrandProfile)~~ |
+> | ~~`visual_shots_init`~~ | ~~`generate_shots` — sinh HÀNG LOẠT shot ban đầu khi vào Visual Studio~~ **XOÁ** | ~~`script`~~ |
+> | ✅ `visual_image` | `regenerate_shot_visual_fx` khi shot `visual_type=image` — nút "Tạo lại Visual" | `script_snippet`, `visual_description` |
+> | ✅ `visual_video` | `regenerate_shot_visual_fx` khi shot `visual_type=video` — nút "Tạo lại Visual" | `script_snippet`, `visual_description` |
+> | ✅ `visual_tts` | `regenerate_shot_audio_sfx` — nút "Tạo lại giọng đọc" | `script_snippet`, `emotion_description`, `voice_profile` |
+> | ~~`thumbnail`~~ | ~~`generate_titles_and_meta` — mục 5, gộp thêm description SEO + hashtags (`youtube_meta`)~~ **XOÁ** | ~~`brief`, `script`~~ |
 >
-> Tham số BrandProfile chung (mọi task trừ `script_breakdown`): `channel`,
+> Tham số BrandProfile chung (mọi task còn lại): `channel`,
 > `brand_voice`, `forbidden`, `content_pillars`, `hook_formats`, `visual_style_prompt`,
 > `retention_benchmark` — dựng trong `_brand_ctx()`. Danh sách tham số đầy đủ theo
 > từng task cũng hiển thị trực tiếp trên màn 🧩 Prompt Templates (mở rộng 1 template
@@ -53,7 +63,10 @@ Quy ước placeholder: `{{brand_voice}}`, `{{forbidden}}`, `{{content_pillars}}
 > — app single-user không có quản lý user (§CLAUDE.md nguyên tắc 5); version do người
 > dùng tự sửa trong app ghi "Bạn".
 
-## 1. AI Research
+## 1. AI Research ~~(XOÁ HẲN, 2026-08-17, mục 44)~~
+
+> Không còn task key `outline`, không còn điểm gọi nào trong `generation.py`. Giữ nội
+> dung dưới đây làm tài liệu lịch sử ý định — xem blockquote đầu file.
 
 **Vai trò:** tổng hợp raw_knowledge + tạo 2–3 dàn ý theo góc nhìn khác nhau. Có thể chạy model local.
 
@@ -73,7 +86,10 @@ Trả về JSON: { "synthesis": "...", "outlines": [{ "id","angle","beats":[...]
 Chỉ trả JSON, không thêm chữ nào khác.
 ```
 
-## 2. Hook Variants
+## 2. Hook Variants ~~(XOÁ HẲN, 2026-08-17, mục 44)~~
+
+> Không còn task key `hook`, không còn Human Gate #1 chọn Hook. Giữ nội dung dưới đây
+> làm tài liệu lịch sử ý định.
 
 **Vai trò:** sinh 3 Hook theo 3 kiểu tâm lý. **KHÔNG kèm điểm số** — con người chọn.
 
@@ -90,7 +106,11 @@ Trả JSON: { "hooks": [{ "spoken","visual","psychological_type" }] }
 Chỉ trả JSON.
 ```
 
-## 3. AI Generation kịch bản chi tiết
+## 3. AI Generation kịch bản chi tiết ~~(XOÁ HẲN, 2026-08-17, mục 44)~~
+
+> Không còn task key `script`/`script_revise`/`script_breakdown`. Kịch bản chỉ đến từ
+> import CSV/Excel (`03_api.md` mục Script Import). Giữ nội dung dưới đây làm tài liệu
+> lịch sử ý định.
 
 **Vai trò:** viết Master Production Script đa cột sau Gate #1. **Khuyến nghị model cloud mạnh nhất** (ảnh hưởng retention).
 
@@ -112,7 +132,12 @@ Yêu cầu:
 Trả JSON đúng schema ProductionPack.script (§04). Chỉ trả JSON.
 ```
 
-## 4. Shot Prompt Builder
+## 4. Shot Prompt Builder ~~(sinh HÀNG LOẠT ban đầu — XOÁ, 2026-08-17, mục 44)~~
+
+> Task key `visual_shots_init` (sinh cả loạt shot lúc mới vào Visual Studio) đã xoá —
+> `script.source` giờ LUÔN là `"import"`, shot ban đầu seed thẳng từ nội dung file,
+> không gọi AI. Phần "Tạo lại" TỪNG shot riêng lẻ (`visual_image`/`visual_video`) VẪN
+> CÒN — xem mục 43's ghi chú vòng 4 ở blockquote đầu file, không đổi.
 
 **Vai trò:** từ cột visual của script, sinh prompt AI chuẩn hoá cho từng shot.
 
@@ -126,7 +151,13 @@ prompt (theo style kênh), linked_timestamp_sec.
 Trả JSON: { "shots": [...] } đúng schema §04. Chỉ trả JSON.
 ```
 
-## 5. Title & Thumbnail Concepts
+## 5. Title & Thumbnail Concepts ~~(XOÁ HẲN, 2026-08-17, mục 44)~~
+
+> Không còn task key `thumbnail`, không còn sinh Title/Description/Hashtags/Chapters
+> bằng AI. Thumbnail thật (ảnh + mô tả) chuyển hẳn sang chỉnh tay/sinh ảnh ở Visual
+> Studio (`YoutubeMeta.thumbnail_*`, xem `04_data_schemas.md` §3) — không dùng prompt
+> template nào. Giữ nội dung dưới đây làm tài liệu lịch sử ý định (bao gồm cả các đợt
+> sửa SEO→Conversion/CTR, giới hạn ký tự — nay vô nghĩa vì tính năng không còn tồn tại).
 
 ```
 Tạo 5–10 tiêu đề tối ưu ĐỒNG THỜI SEO YouTube + tò mò (CTR), và 3 concept thumbnail.
@@ -137,6 +168,12 @@ Trả JSON: { "titles":[...], "thumbnail_concepts":[...] } (§04). Chỉ trả J
 ```
 
 ## 6. Rubric chấm Hook Strength (Guardrail — §08)
+
+> **Đã build lại (2026-08-17, mục 44):** code chấm điểm (`app/guardrail/check.py::
+> score_hook_strength`) vẫn còn nguyên (không xoá — hạ tầng guardrail có thể tái dùng
+> sau), NHƯNG không còn đường nào gọi tới với `hook_spoken` khác rỗng nữa (Hook
+> Variants đã xoá, script import không có `hook_spoken` riêng) — Hook Strength trong
+> `retention_check` LUÔN `null` cho project mới. Xem `08_retention_guardrail.md` §1.
 
 **Vai trò:** chấm điểm 0–1 cho guardrail cảnh báo. Đây là điểm **nội bộ**, KHÔNG hiển thị cho người dùng ở bước chọn Hook Variants.
 

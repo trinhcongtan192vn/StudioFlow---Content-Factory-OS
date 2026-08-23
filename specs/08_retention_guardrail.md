@@ -9,6 +9,12 @@ Biến "chất lượng" thành thứ **đo được**. Guardrail chỉ **cảnh
 - So với `retention_benchmark.target_hook_strength` của kênh (§04).
 - Thấp hơn ngưỡng → cảnh báo.
 - **Lưu ý:** điểm này chỉ cho guardrail. Ở bước Hook Variants (Gate #1), variant **không** hiển thị điểm — người dùng chọn theo cảm nhận. Đây là hai việc khác nhau, không mâu thuẫn.
+  > **Đã build lại (2026-08-17, mục 44):** Hook Variants/Gate #1 bỏ HẲN (xem `09_sprint_tasks.md`
+  > EPIC 7) — kịch bản chỉ đến từ import, không có `hook_spoken` riêng nữa. `run_guardrail_check`
+  > (`app/guardrail/check.py`) chỉ chấm Hook Strength khi `hook_spoken` khác rỗng — với script
+  > import, giá trị này luôn rỗng nên **Hook Strength luôn `null`**, guardrail chỉ còn thật sự
+  > tính Anchor Gap + body length + brand-fit. Code chấm điểm vẫn còn nguyên (không xoá, coi như
+  > hạ tầng có thể tái dùng sau), chỉ không còn đường nào gọi tới với `hook_spoken` khác rỗng.
 
 ### Anchor Gap (giây)
 - Duyệt `script.body[]`, tính khoảng cách lớn nhất giữa hai dòng liên tiếp có `anchor=true`.
@@ -43,9 +49,13 @@ Ghi vào `pack.retention_check` (§04):
 
 ## 5. Khi nào chạy
 
-- Tự động sau AI Generation, trước Gate #2 (§03 `/guardrail/check`).
-- Kết quả hiển thị inline trong Script Studio (gạch chân + ghi chú lề) và tổng hợp ở Pack Review.
+- ~~Tự động sau AI Generation, trước Gate #2 (§03 `/guardrail/check`).~~
+- ~~Kết quả hiển thị inline trong Script Studio (gạch chân + ghi chú lề) và tổng hợp ở Pack Review.~~
 - Có thể chạy lại thủ công sau khi sửa.
+
+> **Đã build lại (2026-08-17, mục 44):** không còn "AI Generation"/Gate #2 — guardrail
+> chạy tự động ngay lúc `/script/import/confirm` (import kịch bản). Kết quả vẫn hiển thị
+> inline ở Script Studio; phần "tổng hợp ở Pack Review" không còn (màn đó đã xoá).
 
 ## 6. Nạp retention thủ công (MVP)
 

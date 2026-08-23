@@ -11,14 +11,12 @@ Tóm tắt các điểm mở rộng chính:
 - `Brief.strategy.conversion_point` rút gọn enum còn
   none|affiliate|course|private_traffic (bỏ email_list, gộp zalo_group thành
   private_traffic tổng quát hơn) — khớp UI segmented control trong design.
-- `ProductionPack` thêm khối `research` (synthesis + outlines) và `hooks` ở cấp
-  pack — lưu kết quả AI Research/Hook Variants làm một phần vòng đời của cùng một
-  tài liệu Pack thay vì một artifact tạm rời rạc, giữ đúng nguyên tắc
-  "Pack JSON là artifact trung tâm" khi work-in-progress trước Gate #1.
-- `ProductionPack.shots` thêm `tts_emotion`, `visual_type` — khớp màn Visual Studio
-  (mỗi shot vừa có prompt hình/video vừa có mô tả cảm xúc giọng đọc cùng lúc).
-- `ProductionPack.youtube_meta` (mới) — description SEO, chapters, hashtags —
-  cần thiết cho quy trình đăng YouTube thật, rộng hơn titles/thumbnail_concepts gốc.
+- `ProductionPack.shots` thêm `visual_fx`/`audio_sfx`, `visual_type` — khớp màn Visual
+  Studio (mỗi shot vừa có prompt hình/video vừa có mô tả âm thanh/nhạc nền cùng lúc).
+- `ProductionPack.youtube_meta` giờ CHỈ còn `thumbnail_*` (chỉnh tay + sinh ảnh thật ở
+  Visual Studio) — `research`/`hooks`/`titles`/`description`/`hashtags`/`chapters` đã
+  bỏ HẲN (2026-08-17, mục 44 IMPLEMENTATION_REPORT.md, cùng lúc bỏ AI Research/Outline/
+  Hook + Pack Review/Gate #2 — xem `specs/04_data_schemas.md` §3 để biết lịch sử).
 """
 from __future__ import annotations
 
@@ -57,6 +55,60 @@ class BrandProfile(BaseModel):
     visual_style_prompt: str = ""
     hook_formats_preferred: list[str] = Field(default_factory=list)
     retention_benchmark: RetentionBenchmark = Field(default_factory=RetentionBenchmark)
+    # Logo kênh — **mới (2026-08-22)**, theo yêu cầu người dùng. Thuần hiển thị nhận diện
+    # thương hiệu ở màn Cài đặt/Sửa BrandProfile (VD avatar kênh) — KHÔNG dùng trong pipeline
+    # sinh asset/ghép video (khác `intro_video_path`/`voice_clone_ref_path`), nên không cần
+    # đọc ở app/render/*. Đường dẫn trên đĩa, cùng thư mục channel_dir(channel_id) — rỗng
+    # nếu chưa upload.
+    logo_path: str = ""
+    # Mẫu giọng đọc thương hiệu (audio) — dùng làm reference_audio cho voice cloning
+    # (OmniVoice, xem app/providers/tts_omnivoice.py) khi sinh narration cho MỌI project
+    # của kênh này, giữ giọng nhất quán xuyên suốt portfolio. Đường dẫn trên đĩa, cùng
+    # thư mục channel_dir(channel_id) — rỗng nếu chưa upload (fallback: giọng provider
+    # mặc định, không phải lỗi).
+    voice_clone_ref_path: str = ""
+    # Video/audio thương hiệu — **mới (2026-08-20)**, theo yêu cầu người dùng: phát ở
+    # ĐẦU MỌI video của kênh này khi ghép MP4 (xem app/render/assembly.py::_resolve_intro_
+    # source). CHỈ 1 trong 2 được khác rỗng tại 1 thời điểm (endpoint upload tự xoá cái
+    # còn lại — xem app/routers/channels.py::upload_brand_intro) — người dùng chỉ được
+    # chọn 1 loại. Nếu chỉ có `intro_audio_path` (không có video), lúc ghép sẽ dùng ẢNH
+    # của shot ĐẦU TIÊN (đã sinh xong) trong project làm hình minh hoạ khi audio phát.
+    # Có thể bị GHI ĐÈ (override) bởi shot mở đầu riêng của TỪNG project (`RenderState.
+    # intro`, ưu tiên cao hơn) — xem app/render/schemas.py::IntroAssetStatus.
+    intro_video_path: str = ""
+    intro_audio_path: str = ""
+    # Nhạc nền (background music) MẶC ĐỊNH của kênh — **mới (2026-08-20)**, theo yêu
+    # cầu người dùng: phát ĐÈ LIÊN TỤC dưới TOÀN BỘ video (kể cả intro) khi ghép MP4, âm
+    # lượng chỉnh được tương đối so với giọng đọc chính qua `bg_music_volume` (0.0 =
+    # câm, 1.0 = to bằng giọng đọc — mặc định 0.3, êm dưới nền như thực hành thường
+    # thấy). Có thể bị GHI ĐÈ bởi nhạc nền riêng của TỪNG project (`RenderState.
+    # bg_music`, ưu tiên cao hơn) — xem `app/render/bg_music.py::resolve_bg_music_source`.
+    bg_music_path: str = ""
+    bg_music_volume: float = 0.3
+    # Style LoRA khoá "chữ ký hình ảnh" cho ảnh local SDXL — **mới (2026-08-22)**, theo
+    # yêu cầu người dùng (đợt 2 cải thiện chất lượng ảnh local, xem IMPLEMENTATION_REPORT.
+    # md): 1 checkpoint painterly đơn thuần vẫn dao động phong cách giữa các lần sinh —
+    # Style LoRA là lớp khoá mạnh nhất. `style_lora_path` là TÊN FILE (không phải đường
+    # dẫn tuyệt đối — khác `logo_path`/`intro_video_path`, vì LoRA sống trong thư mục
+    # ComfyUI (`ComfyUI/models/loras/`), KHÔNG PHẢI thư mục channel_dir như các asset khác
+    # — path tuyệt đối cross-machine không có ý nghĩa ở đây, chỉ cần đúng tên file ComfyUI
+    # tìm thấy). Rỗng = không dùng LoRA (hành vi cũ, không đổi cho ai chưa cấu hình). CHỈ
+    # áp dụng cho `local_sdxl` (`ImageProvider.generate()` — provider khác nhận rồi bỏ
+    # qua, xem app/providers/base.py). Mỗi kênh chọn LoRA khác nhau tuỳ phong cách riêng.
+    style_lora_path: str = ""
+    style_lora_strength: float = 0.8
+    # Hiệu ứng lớp phủ (overlay) MẶC ĐỊNH của kênh — **mới (2026-08-22)**, theo yêu cầu
+    # người dùng: 1 video hiệu ứng (VD mưa rơi, tuyết rơi...) blend ĐÈ LIÊN TỤC lên TOÀN
+    # BỘ video (kể cả intro) khi ghép MP4 — cùng cách bg_music hoạt động (KHÁC intro, vốn
+    # chỉ áp dụng cho đoạn mở đầu), xem `app/render/overlay.py::resolve_overlay_source`.
+    # `overlay_effect_opacity` (0.0=tắt hẳn, 1.0=full cường độ, mặc định 0.5) điều khiển
+    # độ sáng overlay TRƯỚC khi blend `screen` — xem `app/render/assembly.py::
+    # _mix_overlay_effect`. Có thể bị GHI ĐÈ bởi override riêng của TỪNG project
+    # (`RenderState.overlay`, ưu tiên cao hơn). File LUÔN là VIDEO (mp4/webm/mov) — không
+    # có preset "loại hiệu ứng" nào có sẵn, người dùng tự upload bất kỳ clip nào (tự do
+    # như `intro_video_path`).
+    overlay_effect_path: str = ""
+    overlay_effect_opacity: float = 0.5
     version: int = 1
 
 
@@ -107,26 +159,6 @@ class Brief(BaseModel):
 # ---------------------------------------------------------------------------
 # ProductionPack (§04 mục 3) — mở rộng theo design
 # ---------------------------------------------------------------------------
-class Outline(BaseModel):
-    id: str
-    title: str
-    points: list[str] = Field(default_factory=list)
-    selected: bool = False
-
-
-class HookVariant(BaseModel):
-    id: str
-    psychological_type: str
-    spoken: str
-    visual: str = ""
-    selected: bool = False
-
-
-class ResearchBlock(BaseModel):
-    synthesis: str = ""
-    outlines: list[Outline] = Field(default_factory=list)
-
-
 class ScriptHook(BaseModel):
     spoken: str = ""
     visual: str = ""
@@ -163,7 +195,10 @@ class Script(BaseModel):
     body: list[ScriptBodyItem] = Field(default_factory=list)
     cta: Optional[ScriptCta] = None
     full_text: str = ""  # bản Full Script liền mạch trước khi bóc tách theo đoạn
-    source: Literal["ai", "import"] = "ai"  # đã build vòng 4 — xem IMPLEMENTATION_REPORT.md
+    # "ai" giữ lại trong Literal chỉ để đọc được project CŨ đã lưu trên đĩa từ trước
+    # 2026-08-17 (mục 44) — luồng AI Research/Outline/Hook/Full-Script đã bỏ hẳn, script
+    # MỚI luôn là "import" (con đường duy nhất còn lại để có script).
+    source: Literal["ai", "import"] = "import"
 
 
 class Shot(BaseModel):
@@ -175,30 +210,23 @@ class Shot(BaseModel):
     audio_sfx: str = ""  # đổi tên từ `tts_emotion` — khớp cột "Âm thanh & Nhạc nền (Audio/SFX)" trong import
     block_id: Optional[str] = None
     linked_timestamp_sec: Optional[int] = None
-
-
-class TitleConcept(BaseModel):
-    text: str
-    seo_score_hint: Optional[str] = None
-    angle: Optional[str] = None
-
-
-class ThumbnailConcept(BaseModel):
-    metaphor: Optional[str] = None
-    text_overlay: Optional[str] = None
-    layout: Optional[str] = None
-    prompt: str = ""
-
-
-class YoutubeChapter(BaseModel):
-    ts_sec: int
-    label: str
+    # Hiệu ứng chuyển cảnh SANG shot kế tiếp (không áp dụng cho shot cuối) — mặc định
+    # "cut" (cắt cứng, giữ nguyên hành vi ghép cũ, không tốn re-encode thêm). Danh sách
+    # giá trị hợp lệ: `render/assembly.py::TRANSITIONS` (nguồn sự thật duy nhất — đổi ở
+    # đây thì đổi cả bên đó). 2026-08-17, theo yêu cầu người dùng ở Visual Studio.
+    transition_to_next: str = "cut"
+    # Hiệu ứng chuyển động camera (Ken Burns: zoom/pan/tilt/roll/orbit) áp cho ẢNH TĨNH
+    # khi ghép MP4 — mặc định "none" (ảnh đứng yên, hành vi cũ). CHỈ có tác dụng khi
+    # `visual_type == "image"` (video đã có chuyển động thật sẵn). Danh sách giá trị hợp
+    # lệ: `render/camera_motion.py::CAMERA_MOTIONS` (nguồn sự thật duy nhất). 2026-08-19,
+    # theo yêu cầu người dùng ở Visual Studio.
+    camera_motion: str = "none"
 
 
 class YoutubeMeta(BaseModel):
-    description: str = ""
-    hashtags: list[str] = Field(default_factory=list)
-    chapters: list[YoutubeChapter] = Field(default_factory=list)
+    # `description`/`hashtags`/`chapters` (sinh bằng AI cùng `titles`) đã bỏ 2026-08-17
+    # (mục 44) cùng lúc bỏ Pack Review — chỉ còn `thumbnail_description` (chỉnh tay,
+    # xem VisualStudio.tsx::ThumbnailCard) và các field thumbnail_* bên dưới.
     thumbnail_description: str = ""
     # Thumbnail sinh ảnh THẬT (M2, tái dùng OpenAI Image adapter — §05 mục 8c) —
     # bổ sung theo yêu cầu người dùng ở Pack Review, KHÔNG dùng render.json riêng như
@@ -208,6 +236,13 @@ class YoutubeMeta(BaseModel):
     thumbnail_asset_path: Optional[str] = None
     thumbnail_provider: Optional[str] = None
     thumbnail_error: Optional[str] = None
+    # Duyệt Thumbnail — BẮT BUỘC trước khi Visual Studio cho sinh asset ảnh/video của
+    # từng shot (xem app/routers/render.py::_require_thumbnail_approved), vì ảnh
+    # thumbnail (AI sinh hoặc người dùng tự upload) đóng vai trò ảnh "anchor" cho toàn
+    # bộ project (Tier 2 — nhất quán phong cách/nhân vật, xem app/render/engine.py). Tự
+    # reset về False mỗi khi thumbnail đổi (sinh lại bằng AI hoặc upload ảnh khác) — ảnh
+    # cũ đã duyệt không còn đúng nữa, cần duyệt lại ảnh mới.
+    thumbnail_approved: bool = False
 
 
 class RetentionCheck(BaseModel):
@@ -222,13 +257,8 @@ class ProductionPack(BaseModel):
     brandprofile_version: int = 1
     status: str = "draft"
 
-    research: Optional[ResearchBlock] = None
-    hooks: list[HookVariant] = Field(default_factory=list)
-
     script: Optional[Script] = None
     shots: list[Shot] = Field(default_factory=list)
-    titles: list[TitleConcept] = Field(default_factory=list)
-    thumbnail_concepts: list[ThumbnailConcept] = Field(default_factory=list)
     youtube_meta: Optional[YoutubeMeta] = None
     repurpose: Optional[dict] = None
     retention_check: Optional[RetentionCheck] = None

@@ -40,12 +40,8 @@ def _render_markdown(pack: dict, project_title: str) -> str:
     lines += ["## Shot List", ""]
     for s in pack.get("shots", []):
         lines.append(f"- **{s.get('shot_id')}** [{s.get('asset_type')}] — {s.get('visual_fx', '')} (Audio/SFX: {s.get('audio_sfx', '')})")
-    lines += ["", "## Titles", ""]
-    for t in pack.get("titles", []):
-        lines.append(f"- {t.get('text')} ({t.get('angle', '')})")
     ym = pack.get("youtube_meta") or {}
-    lines += ["", "## YouTube Description", "", ym.get("description", ""), ""]
-    lines += ["## Thumbnail", ym.get("thumbnail_description", "")]
+    lines += ["", "## Thumbnail", ym.get("thumbnail_description", "")]
     return "\n".join(lines)
 
 
@@ -55,11 +51,13 @@ class ExportBody(BaseModel):
 
 @router.post("/projects/{project_id}/export")
 def export_pack(project_id: str, body: ExportBody, db: Session = Depends(get_db)):
+    """KHÔNG còn gate theo `project.status` (2026-08-17, mục 44 — bỏ hẳn Gate #2) — chỉ
+    cần đã có script để xuất, dùng được ngay từ Output Center không cần chờ duyệt gì."""
     p = _get_project_or_404(db, project_id)
-    if p.status not in ("ready_output", "exported", "published"):
-        raise HTTPException(400, "Yêu cầu project ở trạng thái ready_output (đã qua Gate #2)")
     pdir = project_dir(p.channel_id, project_id)
     pack = read_json(pdir / "pack.json") or {}
+    if not pack.get("script"):
+        raise HTTPException(400, "Chưa có script để export")
     exports_dir = pdir / "exports"
     exports_dir.mkdir(exist_ok=True)
 

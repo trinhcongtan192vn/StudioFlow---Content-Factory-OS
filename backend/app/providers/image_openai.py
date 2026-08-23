@@ -24,9 +24,13 @@ class OpenAIImageProvider(ImageProvider):
         self.api_key = api_key
         self.model_name = model_name or "gpt-image-2"
 
-    def generate(self, prompt: str) -> bytes:
+    def generate(self, prompt: str, *, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> bytes:
+        # "1024x1792" — kích thước DỌC CHUẨN của DALL-E 3/GPT Image (không phải suy
+        # đoán, cùng họ size chính thức với "1792x1024" ngang) — mới (2026-08-21), cho
+        # project short-form (9:16).
+        size = "1024x1792" if aspect_ratio == "9:16" else "1792x1024"
         headers = {"Authorization": f"Bearer {self.api_key}", "content-type": "application/json"}
-        body = {"model": self.model_name, "prompt": prompt, "size": "1792x1024"}
+        body = {"model": self.model_name, "prompt": prompt, "size": size}
         with httpx.Client(timeout=180) as client:
             resp = client.post(API_URL, headers=headers, json=body)
             raise_for_status_with_body(resp)

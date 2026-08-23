@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError } from "../../api/client";
+import { api } from "../../api/client";
 import type { Brief } from "../../api/types";
-import AiErrorBanner from "../../components/AiErrorBanner";
+import ScriptImportControls from "../../components/ScriptImportControls";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 
@@ -27,13 +27,12 @@ function emptyBrief(projectId: string, channelId: string): Brief {
   };
 }
 
-export default function BriefEditor({ project, refresh, busy, setBusy }: StepProps) {
+export default function BriefEditor({ project, refresh }: StepProps) {
   const [brief, setBrief] = useState<Brief | null>(null);
   const [youtubeDraft, setYoutubeDraft] = useState("");
   const [addingYoutube, setAddingYoutube] = useState(false);
   const [addingFile, setAddingFile] = useState(false);
   const [sourceError, setSourceError] = useState<string | null>(null);
-  const [aiError, setAiError] = useState<string | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -52,21 +51,6 @@ export default function BriefEditor({ project, refresh, busy, setBusy }: StepPro
 
   const missingGroup1 = !brief.topic || !brief.insight;
   const missingGroup2 = !brief.audience.description || !brief.strategy.growth_objective;
-  const ctaDisabled = !brief.topic || !brief.audience.description || !brief.strategy.growth_objective || busy;
-
-  async function startResearch() {
-    setBusy(true);
-    setAiError(null);
-    try {
-      await api.putBrief(project.id, brief!);
-      await api.runResearch(project.id);
-      await refresh();
-    } catch (e) {
-      setAiError(e instanceof ApiError ? e.message : "Có lỗi khi chạy Research.");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function addYoutube() {
     if (!youtubeDraft.trim()) return;
@@ -112,15 +96,15 @@ export default function BriefEditor({ project, refresh, busy, setBusy }: StepPro
       <StepHeader
         title="Brief Editor"
         description="Điền 4 nhóm input. Trường thiếu được đánh dấu, không chặn cứng."
-        actions={
-          <button className="btn btn-primary" disabled={ctaDisabled} onClick={startResearch}>
-            Bắt đầu Research
-          </button>
+        actions={<ScriptImportControls project={project} refresh={refresh} />}
+        extra={
+          <div style={{ fontSize: 11.5, opacity: 0.55, marginBottom: "var(--space-3)" }}>
+            Điền các nhóm bên dưới (tùy chọn, dùng để lọc từ ngữ cấm/gợi ý guardrail) rồi nhập kịch bản từ file (CSV/Excel) để vào Script Studio.
+          </div>
         }
       />
 
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)", maxWidth: 640 }}>
-        {aiError && <AiErrorBanner message={aiError} onDismiss={() => setAiError(null)} />}
         <div className="card" style={{ gap: "var(--space-3)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div className="card-kicker">1 · Chủ đề &amp; Insight</div>
@@ -237,15 +221,6 @@ export default function BriefEditor({ project, refresh, busy, setBusy }: StepPro
             </div>
           )}
         </div>
-
-        {busy && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--color-accent)", fontSize: 13, padding: "var(--space-2) 0" }}>
-            <svg className="sf-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 12a9 9 0 11-6.219-8.56" />
-            </svg>
-            Đang tổng hợp tài liệu &amp; tạo dàn ý...
-          </div>
-        )}
       </div>
     </div>
   );

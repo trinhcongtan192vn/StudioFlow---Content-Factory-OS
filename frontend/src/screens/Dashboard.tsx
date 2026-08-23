@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { ProjectSummary } from "../api/types";
 import ChannelDialog from "../components/ChannelDialog";
@@ -17,7 +17,7 @@ export default function Dashboard() {
 
   async function handleDelete(e: React.MouseEvent, id: string, name: string) {
     e.stopPropagation();
-    if (!confirm(`Xóa kênh "${name}"? Toàn bộ project sẽ bị archive.`)) return;
+    if (!confirm(`Xóa kênh "${name}"? Sẽ chuyển vào Thùng rác — có thể khôi phục lại sau.`)) return;
     await api.patchChannel(id, { archived: true });
     await app.refreshChannels();
     if (selected === id) setSelected(null);
@@ -75,8 +75,6 @@ export default function Dashboard() {
             </div>
             <div className="card-meta" style={{ marginTop: 6 }}>
               <span>{ch.running_count} đang chạy</span>
-              <span>·</span>
-              <span>{ch.review_count} chờ duyệt</span>
             </div>
           </div>
         ))}
@@ -89,27 +87,53 @@ export default function Dashboard() {
             <thead>
               <tr>
                 <th>Dự án</th>
+                <th>Loại</th>
                 <th>Trạng thái</th>
                 <th>Bước hiện tại</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {projects.map((p) => (
-                <tr key={p.id} onClick={() => app.openProject(selected, p.id)} style={{ cursor: "pointer" }}>
-                  <td>{p.title}</td>
-                  <td>
-                    <span className="tag" style={{ background: "color-mix(in srgb, " + (STATUS_DOT_COLOR[p.status] || "var(--color-neutral-600)") + " 20%, transparent)", color: STATUS_DOT_COLOR[p.status] || "inherit" }}>
-                      {STATUS_LABEL[p.status] || p.status}
-                    </span>
-                  </td>
-                  <td style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>{STEP_LABELS[p.step] || "—"}</td>
-                  <td style={{ textAlign: "right", color: "var(--color-accent)" }}>Mở →</td>
-                </tr>
-              ))}
+              {projects
+                .filter((p) => !p.parent_project_id)
+                .map((p) => {
+                  const shorts = projects.filter((c) => c.parent_project_id === p.id);
+                  return (
+                    <Fragment key={p.id}>
+                      <tr onClick={() => app.openProject(selected, p.id)} style={{ cursor: "pointer" }}>
+                        <td>{p.title}</td>
+                        <td>
+                          <span className="tag tag-outline">Long-form</span>
+                        </td>
+                        <td>
+                          <span className="tag" style={{ background: "color-mix(in srgb, " + (STATUS_DOT_COLOR[p.status] || "var(--color-neutral-600)") + " 20%, transparent)", color: STATUS_DOT_COLOR[p.status] || "inherit" }}>
+                            {STATUS_LABEL[p.status] || p.status}
+                          </span>
+                        </td>
+                        <td style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>{STEP_LABELS[p.step] || "—"}</td>
+                        <td style={{ textAlign: "right", color: "var(--color-accent)" }}>Mở →</td>
+                      </tr>
+                      {shorts.map((s) => (
+                        <tr key={s.id} onClick={() => app.openProject(selected, s.id)} style={{ cursor: "pointer" }}>
+                          <td style={{ paddingLeft: "var(--space-6)", color: "color-mix(in srgb, var(--color-text) 85%, transparent)" }}>↳ {s.title}</td>
+                          <td>
+                            <span className="tag tag-accent-2">Short 9:16</span>
+                          </td>
+                          <td>
+                            <span className="tag" style={{ background: "color-mix(in srgb, " + (STATUS_DOT_COLOR[s.status] || "var(--color-neutral-600)") + " 20%, transparent)", color: STATUS_DOT_COLOR[s.status] || "inherit" }}>
+                              {STATUS_LABEL[s.status] || s.status}
+                            </span>
+                          </td>
+                          <td style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>{STEP_LABELS[s.step] || "—"}</td>
+                          <td style={{ textAlign: "right", color: "var(--color-accent)" }}>Mở →</td>
+                        </tr>
+                      ))}
+                    </Fragment>
+                  );
+                })}
               {projects.length === 0 && (
                 <tr>
-                  <td colSpan={4} style={{ opacity: 0.6, padding: "var(--space-3) 0" }}>
+                  <td colSpan={5} style={{ opacity: 0.6, padding: "var(--space-3) 0" }}>
                     Chưa có project nào — mở kênh ở sidebar trái và bấm "Project mới".
                   </td>
                 </tr>

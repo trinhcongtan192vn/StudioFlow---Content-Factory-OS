@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from app.crypto import decrypt_secret, encrypt_secret, mask_secret
 from app.db import get_db
 from app.models import AuditLog, ProviderConfig
-from app.providers.factory import _IMAGE_ADAPTERS, _TTS_ADAPTERS, _VIDEO_ADAPTERS, build_llm_provider
+from app.providers.factory import _IMAGE_ADAPTERS, _TTS_ADAPTERS, _VIDEO_ADAPTERS, _build_asset_provider, build_llm_provider
+from app.providers.image_comfy_sdxl import list_comfyui_models
 
 router = APIRouter(tags=["providers"])
 
@@ -23,7 +24,10 @@ CLOUD_MODELS = {
     "gemini": ["gemini-3.6-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
     "elevenlabs": ["eleven_v3", "eleven_turbo"],
     "vbee": ["vbee-female-01", "vbee-male-01"],
-    "flux": ["flux-1.1-pro", "flux-schnell"],
+    "flux": ["flux-2-pro", "flux-2-max", "flux-2-flex", "flux-2-klein-9b", "flux-2-klein-4b"],
+    # fluxapi.ai (bên thứ 3, KHÁC bfl.ai) — thêm 2026-08-22, xem
+    # app/providers/image_flux_kontext.py cho lý do có 2 provider Flux Image song song.
+    "flux_kontext": ["flux-kontext-pro", "flux-kontext-max"],
     "midjourney": ["v6"],
     "runway": ["gen-4", "gen-3-alpha"],
     "sora": ["sora-2", "sora-2-pro"],
@@ -38,6 +42,7 @@ CLOUD_MODELS_BY_TASK = {
     ("image", "openai"): ["gpt-image-2", "gpt-image-1-mini"],
     ("image", "gemini"): ["gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"],
     ("video", "veo"): ["veo-3.1-generate-preview", "veo-3.1-fast-generate-preview"],
+    ("video", "flux"): ["flux-3-video-hd", "flux-3-video-fhd"],
 }
 
 
@@ -85,8 +90,6 @@ class ProviderCreate(BaseModel):
 def create_provider(body: ProviderCreate, db: Session = Depends(get_db)):
     if body.connection_type not in ("cloud_api", "local_endpoint"):
         raise HTTPException(400, "connection_type phải là cloud_api hoặc local_endpoint")
-    if body.connection_type == "local_endpoint" and body.task != "llm":
-        raise HTTPException(400, "Local Endpoint hiện chỉ áp dụng cho LLM (§05 mục 9 / §10.2b PRD)")
     models = _cloud_models_for(body.task, body.provider_name)
     pv = ProviderConfig(
         task=body.task,
@@ -165,12 +168,13 @@ def test_provider(provider_id: int, db: Session = Depends(get_db)):
         if pv.task == "llm":
             adapter = build_llm_provider(pv)
         else:
-            key = decrypt_secret(pv.api_key_encrypted) if pv.api_key_encrypted else ""
+            # Dùng chung _build_asset_provider (factory.py) thay vì tự khởi tạo adapter
+            # ở đây — bản cũ luôn gọi adapter_cls(api_key=...) bất kể connection_type,
+            # nên provider local (piper/local_sdxl/local_wan, không nhận api_key) lỗi
+            # TypeError khi bấm Test (phát hiện lúc verify thật local AI provider, xem
+            # IMPLEMENTATION_REPORT.md).
             registry = {"tts": _TTS_ADAPTERS, "image": _IMAGE_ADAPTERS, "video": _VIDEO_ADAPTERS}[pv.task]
-            adapter_cls = registry.get(pv.provider_name)
-            if not adapter_cls:
-                raise ValueError("Không hỗ trợ provider này")
-            adapter = adapter_cls(api_key=key)
+            adapter = _build_asset_provider(pv, registry)
         status = adapter.test_connection()
     except Exception as e:  # noqa: BLE001
         status = None
@@ -183,3 +187,21 @@ def test_provider(provider_id: int, db: Session = Depends(get_db)):
     db.add(AuditLog(action="Test kết nối", detail=f"{pv.display_name} — {'thành công' if status.ok else status.message}"))
     db.commit()
     return {"ok": status.ok, "message": status.message}
+
+
+@router.get("/providers/local-sdxl/models")
+def get_local_sdxl_models(kind: str, base_url: str = ""):
+    """Liệt kê checkpoint/LoRA THẬT đang có trong ComfyUI — **mới (2026-08-22)**, theo
+    yêu cầu người dùng: cho CHỌN (dropdown) thay vì phải tự gõ đúng tên file. `kind` =
+    `checkpoints` (đổ vào ô "Model" của provider `local_sdxl`, Cài đặt → Provider AI)
+    hoặc `loras` (đổ vào ô "Style LoRA" của BrandProfile, Sửa BrandProfile — dùng CHUNG
+    endpoint này dù 2 màn khác nhau, vì cùng 1 ComfyUI/cùng cơ chế liệt kê, xem
+    `app/providers/image_comfy_sdxl.py::list_comfyui_models`). 502 nếu ComfyUI chưa chạy
+    được — KHÔNG âm thầm trả rỗng (frontend cần phân biệt "chưa có file" với "chưa kết
+    nối được ComfyUI")."""
+    if kind not in ("checkpoints", "loras"):
+        raise HTTPException(400, "kind phải là checkpoints hoặc loras")
+    try:
+        return {"models": list_comfyui_models(kind, base_url=base_url)}
+    except RuntimeError as e:
+        raise HTTPException(502, str(e)) from e

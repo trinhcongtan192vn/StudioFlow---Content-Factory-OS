@@ -21,9 +21,25 @@ export default function Sidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [app.expandedChannels, app.projectsVersion]);
 
-  async function handleNewProject(channelId: string) {
-    const p = await api.createProject(channelId, "Dự án mới chưa có tên");
+  // Short-form (2026-08-21) — tự mở rộng project long-form cha khi project ĐANG MỞ là
+  // 1 short-form con của nó, để người dùng luôn thấy được vị trí hiện tại trong cây,
+  // không cần tự bấm mở rộng thủ công.
+  useEffect(() => {
+    if (!app.activeProjectId) return;
+    for (const projects of Object.values(projectsByChannel)) {
+      const active = projects.find((p) => p.id === app.activeProjectId);
+      if (active?.parent_project_id) {
+        app.expandProject(active.parent_project_id);
+        break;
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [app.activeProjectId, projectsByChannel]);
+
+  async function handleNewProject(channelId: string, parentProjectId?: string) {
+    const p = await api.createProject(channelId, parentProjectId ? "Short mới chưa có tên" : "Dự án mới chưa có tên", parentProjectId);
     setProjectsByChannel((s) => ({ ...s, [channelId]: [p, ...(s[channelId] || [])] }));
+    if (parentProjectId) app.expandProject(parentProjectId);
     app.openProject(channelId, p.id);
   }
 
@@ -46,6 +62,8 @@ export default function Sidebar() {
         <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center", paddingBottom: 2 }}>
           <div className="hr" style={{ width: 20, margin: "0 auto" }} />
           <NavIcon active={app.view === "dashboard"} onClick={app.goDashboard} title="Dashboard" icon="grid" />
+          <NavIcon active={app.view === "library"} onClick={app.goLibrary} title="Thư viện" icon="library" />
+          <NavIcon active={app.view === "trash"} onClick={app.goTrash} title="Thùng rác" icon="trash" />
           <NavIcon active={app.view === "settings"} onClick={app.goSettings} title="Cài đặt" icon="gear" />
         </div>
       </div>
@@ -86,26 +104,80 @@ export default function Sidebar() {
               </div>
               {expanded && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 1, paddingLeft: 30, marginTop: 2 }}>
-                  {projects.map((p) => (
-                    <div
-                      key={p.id}
-                      onClick={() => app.openProject(ch.id, p.id)}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        padding: "5px 6px",
-                        cursor: "pointer",
-                        borderRadius: 6,
-                        fontSize: 12,
-                        background: app.activeProjectId === p.id ? "color-mix(in srgb, var(--color-accent) 14%, transparent)" : "transparent",
-                        color: app.activeProjectId === p.id ? "var(--color-accent-300)" : "inherit",
-                      }}
-                    >
-                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_DOT_COLOR[p.status] || "var(--color-neutral-600)", flex: "none" }} />
-                      <div style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title}</div>
-                    </div>
-                  ))}
+                  {projects
+                    .filter((p) => !p.parent_project_id)
+                    .map((p) => {
+                      const shorts = projects.filter((c) => c.parent_project_id === p.id);
+                      const projectExpanded = !!app.expandedProjects[p.id];
+                      return (
+                        <div key={p.id}>
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                              padding: "5px 6px",
+                              cursor: "pointer",
+                              borderRadius: 6,
+                              fontSize: 12,
+                              background: app.activeProjectId === p.id ? "color-mix(in srgb, var(--color-accent) 14%, transparent)" : "transparent",
+                              color: app.activeProjectId === p.id ? "var(--color-accent-300)" : "inherit",
+                            }}
+                          >
+                            <div
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                app.toggleProject(p.id);
+                              }}
+                              style={{ flex: "none", opacity: shorts.length ? 1 : 0.25, cursor: shorts.length ? "pointer" : "default" }}
+                              title={shorts.length ? "Short-form thuộc project này" : undefined}
+                            >
+                              <Chevron down={projectExpanded} />
+                            </div>
+                            <div
+                              onClick={() => app.openProject(ch.id, p.id)}
+                              style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}
+                            >
+                              <div style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_DOT_COLOR[p.status] || "var(--color-neutral-600)", flex: "none" }} />
+                              <div style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title}</div>
+                            </div>
+                          </div>
+                          {projectExpanded && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 1, paddingLeft: 20, marginTop: 1 }}>
+                              {shorts.map((s) => (
+                                <div
+                                  key={s.id}
+                                  onClick={() => app.openProject(ch.id, s.id)}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    padding: "4px 6px",
+                                    cursor: "pointer",
+                                    borderRadius: 6,
+                                    fontSize: 11.5,
+                                    background: app.activeProjectId === s.id ? "color-mix(in srgb, var(--color-accent) 14%, transparent)" : "transparent",
+                                    color: app.activeProjectId === s.id ? "var(--color-accent-300)" : "inherit",
+                                  }}
+                                >
+                                  <div style={{ width: 5, height: 5, borderRadius: "50%", background: STATUS_DOT_COLOR[s.status] || "var(--color-neutral-600)", flex: "none" }} />
+                                  <span className="tag tag-outline" style={{ fontSize: 9, padding: "1px 4px", flex: "none" }}>
+                                    9:16
+                                  </span>
+                                  <div style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</div>
+                                </div>
+                              ))}
+                              <div
+                                onClick={() => handleNewProject(ch.id, p.id)}
+                                style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 6px", cursor: "pointer", color: "var(--color-accent)", fontSize: 11.5, borderRadius: 6 }}
+                              >
+                                <PlusIcon size={11} /> Short mới
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   <div
                     onClick={() => handleNewProject(ch.id)}
                     style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 6px", cursor: "pointer", color: "var(--color-accent)", fontSize: 12, borderRadius: 6 }}
@@ -128,6 +200,8 @@ export default function Sidebar() {
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <div className="hr" style={{ margin: "0 0 var(--space-2)" }} />
         <NavRow active={app.view === "dashboard"} onClick={app.goDashboard} label="Dashboard" icon="grid" />
+        <NavRow active={app.view === "library"} onClick={app.goLibrary} label="Thư viện" icon="library" />
+        <NavRow active={app.view === "trash"} onClick={app.goTrash} label="Thùng rác" icon="trash" />
         <NavRow active={app.view === "settings"} onClick={app.goSettings} label="Cài đặt" icon="gear" />
       </div>
 
@@ -194,7 +268,7 @@ function PlusIcon({ size = 13 }: { size?: number }) {
   );
 }
 
-function NavRow({ active, onClick, label, icon }: { active: boolean; onClick: () => void; label: string; icon: "grid" | "gear" }) {
+function NavRow({ active, onClick, label, icon }: { active: boolean; onClick: () => void; label: string; icon: "grid" | "gear" | "trash" | "library" }) {
   return (
     <div
       onClick={onClick}
@@ -206,7 +280,7 @@ function NavRow({ active, onClick, label, icon }: { active: boolean; onClick: ()
   );
 }
 
-function NavIcon({ active, onClick, title, icon }: { active: boolean; onClick: () => void; title: string; icon: "grid" | "gear" }) {
+function NavIcon({ active, onClick, title, icon }: { active: boolean; onClick: () => void; title: string; icon: "grid" | "gear" | "trash" | "library" }) {
   return (
     <div
       onClick={onClick}
@@ -218,7 +292,14 @@ function NavIcon({ active, onClick, title, icon }: { active: boolean; onClick: (
   );
 }
 
-function IconGlyph({ icon }: { icon: "grid" | "gear" }) {
+function IconGlyph({ icon }: { icon: "grid" | "gear" | "trash" | "library" }) {
+  if (icon === "library")
+    return (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 19.5A2.5 2.5 0 016.5 17H20" />
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
+      </svg>
+    );
   if (icon === "grid")
     return (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -226,6 +307,16 @@ function IconGlyph({ icon }: { icon: "grid" | "gear" }) {
         <rect x="14" y="3" width="7" height="7" />
         <rect x="14" y="14" width="7" height="7" />
         <rect x="3" y="14" width="7" height="7" />
+      </svg>
+    );
+  if (icon === "trash")
+    return (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="3 6 5 6 21 6" />
+        <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+        <path d="M10 11v6" />
+        <path d="M14 11v6" />
+        <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
       </svg>
     );
   return (
