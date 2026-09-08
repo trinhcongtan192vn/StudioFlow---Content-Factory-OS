@@ -10,20 +10,33 @@ import type {
   CreativeAssetKind,
   GpuEncodeStatus,
   GpuStatus,
+  ImageLayerPosition,
   ImportPreview,
+  LayerBlendMode,
+  LayerPosition,
+  LocalServicesResponse,
+  ClipRightsStatus,
+  ProcessedClip,
   ProductionPack,
   ProjectSummary,
   PromptTemplateOut,
   ProviderOut,
+  RawVideo,
   RenderState,
   RetentionOut,
   TrashOut,
+  VaultCandidatesResult,
   VoiceSampleUploadResult,
 } from "./types";
 
 declare global {
   interface Window {
     STUDIOFLOW_API_BASE?: string;
+    // "Xuất Pack" (2026-08-26) — cầu chọn thư mục native, CHỈ tồn tại khi chạy trong
+    // Electron (xem electron/src/preload.ts). Chạy dev server thuần trình duyệt (`npm
+    // run dev:frontend`) sẽ KHÔNG có global này — UI tự fallback về ô nhập đường dẫn
+    // tay, xem OutputCenter.tsx.
+    studioflowNative?: { chooseFolder: () => Promise<string | null>; openFolder: (folderPath: string) => Promise<void> };
   }
 }
 
@@ -101,6 +114,10 @@ const del = <T>(path: string) => req<T>(path, { method: "DELETE" });
 export const api = {
   base: BASE,
   bootstrap: () => get<{ has_llm_provider: boolean; channel_count: number; app_name: string }>("/bootstrap"),
+  // "Local Services & GPU Monitor" — cuối trang Dashboard (2026-08-27).
+  getLocalServices: () => get<LocalServicesResponse>("/system/local-services"),
+  startLocalService: (name: string) => post<{ ok: boolean; message: string }>(`/system/local-services/${name}/start`, {}),
+  stopLocalService: (name: string) => post<{ ok: boolean; message: string }>(`/system/local-services/${name}/stop`, {}),
 
   // Channels
   listChannels: () => get<ChannelSummary[]>("/channels"),
@@ -142,6 +159,16 @@ export const api = {
     return req<BrandProfile>(`/channels/${id}/brandprofile/overlay/upload`, { method: "POST", body: form });
   },
   brandOverlayUrl: (id: string) => `${BASE}/channels/${id}/brandprofile/overlay`,
+  // Ảnh tham chiếu phong cách — mới (2026-08-23), làm lại đợt 2 (2026-08-25, xem
+  // types.ts::BrandProfile.style_reference_paths). Endpoint backend không đổi (vẫn
+  // nhận list) — UI giờ tự giới hạn tối đa 1 ảnh phía frontend (ChannelDialog.tsx).
+  uploadStyleReference: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return req<BrandProfile>(`/channels/${id}/brandprofile/style-references/upload`, { method: "POST", body: form });
+  },
+  deleteStyleReference: (id: string, filename: string) => del<BrandProfile>(`/channels/${id}/brandprofile/style-references/${filename}`),
+  styleReferenceUrl: (id: string, filename: string) => `${BASE}/channels/${id}/brandprofile/style-references/${filename}`,
 
   // Projects
   listProjects: (channelId: string) => get<ProjectSummary[]>(`/channels/${channelId}/projects`),
@@ -211,16 +238,20 @@ export const api = {
   getRetention: (id: string) => get<RetentionOut>(`/projects/${id}/retention`),
   putRetention: (id: string, body: Record<string, number | string | null>) => put<RetentionOut>(`/projects/${id}/retention`, body),
 
-  // Export
-  exportPack: (id: string, format: "markdown" | "pdf" | "json") => post<{ path: string; filename: string }>(`/projects/${id}/export`, { format }),
-  downloadUrl: (id: string, filename: string) => `${BASE}/projects/${id}/exports/${filename}`,
-  downloadExportFile: (id: string, filename: string) => downloadFile(`/projects/${id}/exports/${filename}`, filename),
+  // Export — "Xuất Pack" (2026-08-26, thay "Output A" cũ): gói SRT + assets + giọng đọc
+  // full + video đã ghép (nếu có) ra 1 folder trên máy local, xem app/render/pack_export.py.
+  exportPackBundle: (id: string, destDir: string) =>
+    post<{ dest_dir: string; included: string[]; skipped: { item: string; reason: string }[] }>(`/projects/${id}/export/pack-bundle`, { dest_dir: destDir }),
 
   // Render Studio (M2 Production Layer — sinh asset thật + ghép MP4)
   startRender: (id: string, kind: "both" | "visual" | "narration" = "both", force = false) =>
     post<RenderState>(`/projects/${id}/render/start?kind=${kind}${force ? "&force=true" : ""}`),
   cancelRender: (id: string) => post<RenderState>(`/projects/${id}/render/cancel`),
   getRenderStatus: (id: string) => get<RenderState>(`/projects/${id}/render/status`),
+  // Tốc độ giọng đọc TOÀN BỘ block — nút ở Script Studio (2026-09-02, mục 109). Chỉ
+  // lưu giá trị, áp dụng cho lần (re)generate narration TIẾP THEO (time-stretch file
+  // audio sau khi sinh — xem backend `engine.py::_apply_narration_speed`).
+  patchNarrationSpeed: (id: string, speed: number) => patch<RenderState>(`/projects/${id}/render/narration-speed`, { speed }),
   getGpuStatus: (id: string) => get<GpuStatus>(`/projects/${id}/render/gpu-status`),
   getGpuEncodeStatus: () => get<GpuEncodeStatus>(`/render/gpu-encode-status`),
   approveShotAsset: (id: string, shotId: string, approved = true) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/approve`, { approved }),
@@ -231,8 +262,23 @@ export const api = {
     form.append("file", file);
     return req<RenderState>(`/projects/${id}/render/shots/${shotId}/upload-visual`, { method: "POST", body: form });
   },
+  // Xoá ảnh/video đã sinh/upload/gán cho 1 shot (Visual Studio, 2026-09-02, theo yêu cầu
+  // người dùng — cho phép bỏ 1 asset không ưng ý mà không bị buộc sinh/upload cái khác
+  // ngay). Trả shot về "pending" như chưa từng sinh.
+  removeShotVisual: (id: string, shotId: string) => del<RenderState>(`/projects/${id}/render/shots/${shotId}/visual`),
   regenerateShotNarration: (id: string, shotId: string) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/regenerate-narration`),
+  // Xoá watermark (Visual Studio, 2026-08-28) — tái dùng module app/watermark/ đã build
+  // cho Kho Tài Nguyên. "Không phát hiện watermark" KHÔNG phải lỗi, xem
+  // ShotRenderStatus.visual_watermark_note.
+  removeShotWatermark: (id: string, shotId: string) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/remove-watermark`),
+  removeAllShotsWatermark: (id: string) => post<RenderState>(`/projects/${id}/render/remove-watermark-all`),
+  // Video Slot nguồn "Video từ Kho" (CHANGE_Semantic_BRoll_Asset_Vault.md §7.3).
+  getVaultCandidates: (id: string, shotId: string) => get<VaultCandidatesResult>(`/projects/${id}/render/shots/${shotId}/vault-candidates`),
+  assignVaultClip: (id: string, shotId: string, clipId: string) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/assign-vault-clip`, { clip_id: clipId }),
   assembleVideo: (id: string, config?: AssembleConfig) => post<RenderState>(`/projects/${id}/render/assemble`, config),
+  // "Đặt lại tiến trình bị treo" — mới (2026-09-02, mục 111). 409 nếu tiến trình vẫn
+  // đang chạy THẬT SỰ (không phải kẹt) — xem docstring backend `reset_stuck_assembly`.
+  resetStuckAssembly: (id: string) => post<RenderState>(`/projects/${id}/render/assemble/reset`),
   renderShotAssetUrl: (id: string, shotId: string, kind: "visual" | "narration") => `${BASE}/projects/${id}/render/shots/${shotId}/asset/${kind}`,
   renderDownloadUrl: (id: string) => `${BASE}/projects/${id}/render/download`,
   downloadRenderFile: (id: string) => downloadFile(`/projects/${id}/render/download`, "final.mp4"),
@@ -268,7 +314,52 @@ export const api = {
   patchProjectOverlayOpacity: (id: string, opacity: number) =>
     patch<RenderState>(`/projects/${id}/render/overlay`, { opacity }),
   deleteProjectOverlay: (id: string) => del<RenderState>(`/projects/${id}/render/overlay`),
+  enableOverlayInherit: (id: string) => patch<RenderState>(`/projects/${id}/render/overlay/inherit`, {}),
   projectOverlayUrl: (id: string) => `${BASE}/projects/${id}/render/overlay/asset`,
+  // Video nền chung cho toàn bộ block (2026-09-02) — xem types.ts::BackgroundVideoOverride.
+  // Nhiều video (mới 2026-09-02, mục 110) — mỗi lần upload THÊM 1 video vào asset_paths.
+  uploadProjectBackgroundVideo: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return req<RenderState>(`/projects/${id}/render/background-video/upload`, { method: "POST", body: form });
+  },
+  deleteProjectBackgroundVideoItem: (id: string, index: number) => del<RenderState>(`/projects/${id}/render/background-video/${index}`),
+  deleteProjectBackgroundVideo: (id: string) => del<RenderState>(`/projects/${id}/render/background-video`),
+  patchProjectBackgroundVideoSettings: (id: string, body: Partial<{ random_order: boolean; transition: string }>) =>
+    patch<RenderState>(`/projects/${id}/render/background-video`, body),
+  projectBackgroundVideoUrl: (id: string, index: number) => `${BASE}/projects/${id}/render/background-video/asset/${index}`,
+  // Layer video định vị theo lưới 3x3 (VD voice wave, logo) — mới (2026-09-02, mục 112)
+  // — xem types.ts::VideoLayer. `blend_mode` — mới (mục 113): "alpha" (mặc định, nguồn
+  // CÓ SẴN kênh alpha — WebM VP9/MOV ProRes4444) hoặc "screen" (nguồn NỀN ĐEN ĐẶC,
+  // không alpha — cùng kỹ thuật overlay hiệu ứng lớp phủ nhưng định vị cục bộ).
+  uploadProjectLayer: (id: string, file: File, position: LayerPosition, widthPct: number, opacity: number, blendMode: LayerBlendMode) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("position", position);
+    form.append("width_pct", String(widthPct));
+    form.append("opacity", String(opacity));
+    form.append("blend_mode", blendMode);
+    return req<RenderState>(`/projects/${id}/render/layers/upload`, { method: "POST", body: form });
+  },
+  patchProjectLayer: (id: string, layerId: string, body: Partial<{ position: LayerPosition; width_pct: number; opacity: number; blend_mode: LayerBlendMode }>) =>
+    patch<RenderState>(`/projects/${id}/render/layers/${layerId}`, body),
+  deleteProjectLayer: (id: string, layerId: string) => del<RenderState>(`/projects/${id}/render/layers/${layerId}`),
+  projectLayerAssetUrl: (id: string, layerId: string) => `${BASE}/projects/${id}/render/layers/${layerId}/asset`,
+  // Layer ẢNH định vị — mới (2026-09-02, mục 115) — xem types.ts::ImageLayer. Song song
+  // layer video ở trên, chỉ khác: nhận ảnh (PNG/JPEG/WEBP), position có thêm "full".
+  uploadProjectImageLayer: (id: string, file: File, position: ImageLayerPosition, widthPct: number, opacity: number, blendMode: LayerBlendMode) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("position", position);
+    form.append("width_pct", String(widthPct));
+    form.append("opacity", String(opacity));
+    form.append("blend_mode", blendMode);
+    return req<RenderState>(`/projects/${id}/render/image-layers/upload`, { method: "POST", body: form });
+  },
+  patchProjectImageLayer: (id: string, layerId: string, body: Partial<{ position: ImageLayerPosition; width_pct: number; opacity: number; blend_mode: LayerBlendMode }>) =>
+    patch<RenderState>(`/projects/${id}/render/image-layers/${layerId}`, body),
+  deleteProjectImageLayer: (id: string, layerId: string) => del<RenderState>(`/projects/${id}/render/image-layers/${layerId}`),
+  projectImageLayerAssetUrl: (id: string, layerId: string) => `${BASE}/projects/${id}/render/image-layers/${layerId}/asset`,
 
   // Thư viện Creative Asset (nhạc nền/video/ảnh/giọng đọc dùng lại nhiều nơi)
   listLibraryAssets: (kind?: CreativeAssetKind) => get<CreativeAsset[]>(`/library/assets${kind ? `?kind=${kind}` : ""}`),
@@ -280,6 +371,53 @@ export const api = {
   renameLibraryAsset: (assetId: string, name: string) => patch<CreativeAsset>(`/library/assets/${assetId}`, { name }),
   deleteLibraryAsset: (assetId: string) => del<{ ok: boolean }>(`/library/assets/${assetId}`),
   libraryAssetUrl: (assetId: string) => `${BASE}/library/assets/${assetId}/file`,
+
+  // Kho Tài Nguyên / Asset Vault (CHANGE_Semantic_BRoll_Asset_Vault.md) — kho tư liệu
+  // video TOÀN CỤC (2026-08-27, khác Thư viện Creative Asset ở trên), 1 video gốc gắn
+  // được NHIỀU kênh dạng tag — lọc theo kênh qua `channelId` tuỳ chọn.
+  listRawVideos: (channelId?: string) => get<RawVideo[]>(`/asset-vault/raw${channelId ? `?channel_id=${encodeURIComponent(channelId)}` : ""}`),
+  getAssetVaultFolders: () => get<{ raw_dir: string; clips_dir: string }>("/asset-vault/folders"),
+  uploadRawVideo: (channelIds: string[], file: File, importNote = "") => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("channel_ids", JSON.stringify(channelIds));
+    if (importNote) form.append("import_note", importNote);
+    return req<RawVideo>("/asset-vault/raw/upload", { method: "POST", body: form });
+  },
+  importRawVideoFromUrl: (channelIds: string[], url: string, importNote = "") =>
+    post<RawVideo>("/asset-vault/raw/import-url", { url, channel_ids: channelIds, import_note: importNote }),
+  patchRawVideoChannels: (rawId: string, channelIds: string[]) =>
+    patch<RawVideo>(`/asset-vault/raw/${rawId}/channels`, { channel_ids: channelIds }),
+  deleteRawVideo: (rawId: string) => del<{ ok: boolean }>(`/asset-vault/raw/${rawId}`),
+  rawVideoFileUrl: (rawId: string) => `${BASE}/asset-vault/raw/${rawId}/file`,
+  batchTagRawVideoChannels: (rawIds: string[], channelIds: string[]) =>
+    post<RawVideo[]>("/asset-vault/raw/batch-tag-channels", { raw_ids: rawIds, channel_ids: channelIds }),
+  batchDeleteRawVideos: (rawIds: string[]) => post<{ ok: boolean; deleted: number }>("/asset-vault/raw/batch-delete", { raw_ids: rawIds }),
+  detectScenes: (rawId: string) => post<RawVideo>(`/asset-vault/raw/${rawId}/detect-scenes`),
+  manualCutClip: (rawId: string, startSec: number, endSec: number) =>
+    post<ProcessedClip>(`/asset-vault/raw/${rawId}/manual-cut`, { start_sec: startSec, end_sec: endSec }),
+  captionAllClips: (rawId: string) => post<RawVideo>(`/asset-vault/raw/${rawId}/caption-all`),
+  // Xoá watermark trước khi cắt cảnh (app/watermark/, Florence-2 + LaMa) — chạy nền, poll
+  // qua listRawVideos() để theo dõi progress_current/total giống detect-scenes.
+  removeWatermark: (rawId: string) => post<RawVideo>(`/asset-vault/raw/${rawId}/remove-watermark`),
+  listProcessedClips: (filters?: { channel_id?: string; raw_video_id?: string; rights_status?: string; tag?: string; mood_tone?: string }) => {
+    const qs = filters ? Object.entries(filters).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v as string)}`).join("&") : "";
+    return get<ProcessedClip[]>(`/asset-vault/clips${qs ? `?${qs}` : ""}`);
+  },
+  clipFileUrl: (clipId: string) => `${BASE}/asset-vault/clips/${clipId}/file`,
+  patchProcessedClip: (clipId: string, body: Partial<{ caption: string; tags: string[]; mood_tone: string; rights_status: ClipRightsStatus; rights_note: string; active: boolean }>) =>
+    patch<ProcessedClip>(`/asset-vault/clips/${clipId}`, body),
+  batchPatchProcessedClips: (body: { clip_ids: string[]; rights_status?: ClipRightsStatus; add_tag?: string; active?: boolean }) =>
+    post<ProcessedClip[]>("/asset-vault/clips/batch", body),
+  // Tag kênh RIÊNG của clip (2026-08-28) — độc lập với raw_video cha, xem
+  // IMPLEMENTATION_REPORT.md mục 98.
+  patchClipChannels: (clipId: string, channelIds: string[]) =>
+    patch<ProcessedClip>(`/asset-vault/clips/${clipId}/channels`, { channel_ids: channelIds }),
+  batchTagClipChannels: (clipIds: string[], channelIds: string[]) =>
+    post<ProcessedClip[]>("/asset-vault/clips/batch-tag-channels", { clip_ids: clipIds, channel_ids: channelIds }),
+  captionClipsBatch: (clipIds: string[]) => post<{ ok: boolean; count: number }>("/asset-vault/clips/caption-batch", { clip_ids: clipIds }),
+  deleteProcessedClip: (clipId: string) => del<{ ok: boolean }>(`/asset-vault/clips/${clipId}`),
+  batchDeleteProcessedClips: (clipIds: string[]) => post<{ ok: boolean; deleted: number }>("/asset-vault/clips/batch-delete", { clip_ids: clipIds }),
 
   // Providers
   listProviders: () => get<ProviderOut[]>("/providers"),
@@ -300,6 +438,11 @@ export const api = {
     const params = new URLSearchParams({ kind });
     if (baseUrl) params.set("base_url", baseUrl);
     return get<{ models: string[] }>(`/providers/local-sdxl/models?${params.toString()}`);
+  },
+  listLocalAiModels: (baseUrl?: string) => {
+    const params = new URLSearchParams();
+    if (baseUrl) params.set("base_url", baseUrl);
+    return get<{ models: string[] }>(`/providers/localai/models?${params.toString()}`);
   },
 
   // Settings

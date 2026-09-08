@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../../api/client";
 import type { ProviderOut } from "../../api/types";
 
-const GROUPS = ["llm", "tts", "image", "video"] as const;
-const GROUP_LABEL: Record<string, string> = { llm: "LLM", tts: "TTS", image: "Image", video: "Video" };
+// "vision"/"embedding" — mới (CHANGE_Semantic_BRoll_Asset_Vault.md), phục vụ captioning
+// + semantic matching Channel Asset Vault. Cùng pattern task đã có (llm/tts/image/video).
+const GROUPS = ["llm", "tts", "image", "video", "vision", "embedding"] as const;
+const GROUP_LABEL: Record<string, string> = { llm: "LLM", tts: "TTS", image: "Image", video: "Video", vision: "Vision", embedding: "Embedding" };
 
 // Khớp CLOUD_MODELS trong backend/app/routers/providers.py — danh sách model hiện có
 // mỗi provider, chọn ngay lúc thêm thay vì phải sửa lại sau (phản hồi phần "còn thiếu"
@@ -35,6 +37,13 @@ const CLOUD_CATALOG: Record<string, { provider_name: string; display_name: strin
     { provider_name: "veo", display_name: "Google Veo", models: ["veo-3.1-generate-preview", "veo-3.1-fast-generate-preview"] },
     { provider_name: "flux", display_name: "Flux 3 Video (Black Forest Labs)", models: ["flux-3-video-hd", "flux-3-video-fhd"] },
   ],
+  vision: [
+    { provider_name: "gemini_vision", display_name: "Gemini Vision", models: ["gemini-3.1-flash", "gemini-2.5-flash-lite"] },
+  ],
+  // Chưa có provider embedding CLOUD nào tích hợp (chỉ LocalAI local, xem LOCAL_CATALOG
+  // bên dưới) — mảng RỖNG (không phải thiếu key) để tránh `CLOUD_CATALOG[group][0]` văng
+  // lỗi runtime khi mở dialog "+ Thêm provider" ở tab Embedding.
+  embedding: [],
 };
 
 // Provider local (connection_type="local_endpoint") theo từng nhóm task — mở rộng từ
@@ -47,11 +56,15 @@ const LOCAL_CATALOG: Record<string, LocalCatalogEntry[]> = {
   llm: [
     {
       provider_name: "local",
-      display_name: "Local GPU (Ollama)",
+      display_name: "Local GPU (Ollama / LocalAI)",
       endpoint_url: "http://localhost:11434/v1",
       model_name: "qwen3:14b",
       needs_endpoint: true,
-      hint: "Dùng cho model mã nguồn mở chạy tại máy có GPU (Qwen, DeepSeek, Kimi…) qua endpoint OpenAI-compatible — Ollama, vLLM, LM Studio. Chi phí $0, dữ liệu không rời máy.",
+      // **Cập nhật (2026-08-25)** — adapter này ĐÃ generic (`LocalOpenAICompatProvider`,
+      // không hardcode riêng Ollama), chỉ cần trỏ Endpoint URL đúng service đang chạy —
+      // đổi thành `http://127.0.0.1:8080/v1` + tên model đã đăng ký trong LocalAI (VD
+      // "qwen2.5") để dùng LocalAI thay Ollama, KHÔNG cần thêm engine riêng.
+      hint: "Dùng cho model mã nguồn mở chạy tại máy có GPU (Qwen, DeepSeek, Kimi…) qua endpoint OpenAI-compatible — Ollama (mặc định, cổng 11434), vLLM, LM Studio, hoặc LocalAI (đổi Endpoint URL thành http://127.0.0.1:8080/v1). Chi phí $0, dữ liệu không rời máy.",
     },
   ],
   tts: [
@@ -84,6 +97,19 @@ const LOCAL_CATALOG: Record<string, LocalCatalogEntry[]> = {
       needs_endpoint: true,
       hint: "Cần cài + chạy ComfyUI trước (mặc định cổng 8188). Để trống ô Model dùng checkpoint mặc định của app — hoặc điền ĐÚNG tên file .safetensors đang có trong thư mục ComfyUI/models/checkpoints (VD sau khi đổi sang checkpoint fine-tune) để đổi checkpoint mà không cần sửa code.",
     },
+    {
+      // LocalAI (github.com/mudler/LocalAI) — **mới (2026-08-25)**, song song ComfyUI
+      // SDXL ở trên theo kế hoạch migrate đã duyệt (KHÔNG thay thế ComfyUI ở đợt này,
+      // chọn thử để verify trước khi quyết định chuyển hẳn). LoRA lấy từ BrandProfile
+      // (mục "Style LoRA") vẫn dùng được — provider tự đồng bộ vào model LocalAI qua
+      // API quản lý model runtime, không cần đăng ký tay YAML cho mỗi lần đổi LoRA.
+      provider_name: "localai_image",
+      display_name: "LocalAI (local GPU)",
+      endpoint_url: "http://127.0.0.1:8080",
+      model_name: "",
+      needs_endpoint: true,
+      hint: "Cần cài + chạy LocalAI trước (mặc định cổng 8080, github.com/mudler/LocalAI). Để trống ô Model để app tự đăng ký/đồng bộ 1 model dùng checkpoint + LoRA từ BrandProfile — CHƯA verify thật, nếu lỗi hãy báo lại nguyên văn để chỉnh đúng API LocalAI đang cài.",
+    },
   ],
   video: [
     {
@@ -93,6 +119,63 @@ const LOCAL_CATALOG: Record<string, LocalCatalogEntry[]> = {
       model_name: "wan2.2-ti2v-5b",
       needs_endpoint: true,
       hint: "Cùng ComfyUI với Image (cổng 8188) — cần checkpoint Wan2.2 TI2V-5B đã tải sẵn.",
+    },
+    {
+      // LocalAI video — **mới (2026-08-25)**, RỦI RO CAO NHẤT trong toàn bộ migrate:
+      // API `/v1/videos` rất mới, chưa có case study rộng (xem docstring
+      // video_localai.py). Song song ComfyUI Wan2.2 ở trên, KHÔNG thay thế.
+      provider_name: "localai_video",
+      display_name: "LocalAI Wan2.2 (local GPU) — CHƯA verify",
+      endpoint_url: "http://127.0.0.1:8080",
+      model_name: "wan2.2-ti2v-5b",
+      needs_endpoint: true,
+      hint: "Cần cài + chạy LocalAI trước (mặc định cổng 8080) + đăng ký model Wan2.2. Endpoint video của LocalAI rất mới, CHƯA verify qua GPU thật — nếu lỗi, báo lại nguyên văn phản hồi LocalAI để chỉnh đúng.",
+    },
+  ],
+  vision: [
+    {
+      // Khuyến nghị mặc định (2026-08-26) — máy dev xác nhận KHÔNG cài LocalAI (cổng
+      // 8080 không có gì lắng nghe), chỉ có Ollama đang chạy sẵn cho task `llm`. Tái
+      // dùng ĐÚNG service đó qua shim OpenAI-compat của Ollama thay vì bắt cài thêm 1
+      // service mới — model `moondream` (~1.7GB) đã pull + verify thật qua Ollama.
+      provider_name: "ollama_vision",
+      display_name: "Ollama Vision (local GPU, Moondream)",
+      endpoint_url: "http://127.0.0.1:11434/v1",
+      model_name: "moondream",
+      needs_endpoint: true,
+      hint: "Gắn nhãn ảnh cho Kho tư liệu (Cấu hình kênh → Kho Tài nguyên) — dùng CHUNG Ollama đã chạy cho LLM (cổng 11434, `ollama pull moondream` nếu chưa có model).",
+    },
+    {
+      // Gắn nhãn ảnh (caption/tags/mood_tone) cho Channel Asset Vault — mặc định
+      // Moondream (nhẹ ~2-4GB VRAM) thay vì Qwen2.5-VL 7B (~12GB) đề xuất gốc trong
+      // change-spec: máy dev đã xác nhận CHẬT VRAM (OmniVoice giữ sẵn ~9.9GB) — Qwen2.5-VL
+      // sẽ liên tục tranh chấp VRAM. Dùng CHUNG endpoint /v1/chat/completions với LLM
+      // thường (đã xác nhận qua tài liệu LocalAI chính thức), không phải endpoint riêng.
+      provider_name: "localai_vision",
+      display_name: "LocalAI Vision (local GPU, Moondream)",
+      endpoint_url: "http://127.0.0.1:8080",
+      model_name: "moondream2",
+      needs_endpoint: true,
+      hint: "Gắn nhãn ảnh cho Kho tư liệu (Cấu hình kênh → Kho Tài nguyên) — cần cài + chạy LocalAI riêng (cổng 8080) + đăng ký model vision (mặc định moondream2). Chỉ chọn mục này nếu bạn có cài LocalAI thật — nếu không, dùng \"Ollama Vision\" ở trên (tái dùng Ollama đã có sẵn).",
+    },
+  ],
+  embedding: [
+    {
+      // Khuyến nghị mặc định — xem lý do ở "Ollama Vision" phía trên.
+      provider_name: "ollama_embedding",
+      display_name: "Ollama Embeddings (local GPU)",
+      endpoint_url: "http://127.0.0.1:11434/v1",
+      model_name: "nomic-embed-text",
+      needs_endpoint: true,
+      hint: "Sinh vector cho tìm kiếm ngữ nghĩa (semantic matching) Kho tư liệu — dùng CHUNG Ollama đã chạy cho LLM (cổng 11434, `ollama pull nomic-embed-text` nếu chưa có model).",
+    },
+    {
+      provider_name: "localai_embedding",
+      display_name: "LocalAI Embeddings (local GPU)",
+      endpoint_url: "http://127.0.0.1:8080",
+      model_name: "all-MiniLM-L6-v2",
+      needs_endpoint: true,
+      hint: "Cần cài + chạy LocalAI riêng (cổng 8080), đăng ký model embedding (mặc định all-MiniLM-L6-v2). Chỉ chọn mục này nếu bạn có cài LocalAI thật — nếu không, dùng \"Ollama Embeddings\" ở trên.",
     },
   ],
 };
@@ -154,6 +237,64 @@ export function ComfyModelSelect({
   }
   // Giá trị hiện có nhưng ComfyUI không (còn) thấy file đó (VD đã xoá/đổi tên) — vẫn hiện
   // trong dropdown để không "mất" cấu hình đang lưu, không tự ý reset về rỗng.
+  const options = value && !models.includes(value) ? [value, ...models] : models;
+  return (
+    <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">{emptyLabel}</option>
+      {options.map((m) => (
+        <option key={m} value={m}>
+          {m}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** Dropdown model ĐÃ ĐĂNG KÝ trong LocalAI — **mới (2026-08-25)**, tương tự
+ * `ComfyModelSelect` nhưng khác nguồn: LocalAI liệt kê model LOGIC đã đăng ký
+ * (`GET /v1/models`), KHÔNG PHẢI file checkpoint thô trên đĩa như ComfyUI — model cần
+ * đăng ký trước (YAML hoặc qua `LocalAIImageProvider._apply_model`, tự động khi có
+ * LoRA từ BrandProfile) mới hiện ở đây. LocalAI chưa chạy/không kết nối được → fallback
+ * ô nhập tay, cùng hành vi `ComfyModelSelect`. */
+function LocalAIModelSelect({ value, baseUrl, onChange, emptyLabel }: { value: string; baseUrl: string; onChange: (v: string) => void; emptyLabel: string }) {
+  const [models, setModels] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .listLocalAiModels(baseUrl || undefined)
+      .then((res) => {
+        if (!cancelled) {
+          setModels(res.models);
+          setLoading(false);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof ApiError ? e.message : "Không kết nối được LocalAI để lấy danh sách.");
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl]);
+
+  if (loading) {
+    return <input className="input" value={value} disabled placeholder="Đang tải danh sách từ LocalAI..." />;
+  }
+  if (error || !models) {
+    return (
+      <div>
+        <input className="input" value={value} onChange={(e) => onChange(e.target.value)} placeholder="VD studioflow-sdxl (để trống dùng tự động)" />
+        <div style={{ fontSize: 11, color: "var(--color-danger)", marginTop: 4 }}>{error || "Không lấy được danh sách — nhập tay tên model."}</div>
+      </div>
+    );
+  }
   const options = value && !models.includes(value) ? [value, ...models] : models;
   return (
     <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
@@ -356,6 +497,13 @@ export default function ProviderSettings() {
                           onChange={(v) => api.patchProvider(pv.id, { model_name: v }).then(load)}
                           emptyLabel="— Mặc định app (Painter's Checkpoint) —"
                         />
+                      ) : pv.provider_name === "localai_image" ? (
+                        <LocalAIModelSelect
+                          value={pv.model_name || ""}
+                          baseUrl={pv.endpoint_url || ""}
+                          onChange={(v) => api.patchProvider(pv.id, { model_name: v }).then(load)}
+                          emptyLabel="— Tự động đăng ký/đồng bộ (studioflow-sdxl) —"
+                        />
                       ) : (
                         <input className="input" defaultValue={pv.model_name || ""} onBlur={(e) => api.patchProvider(pv.id, { model_name: e.target.value }).then(load)} placeholder={localEntry?.model_name} />
                       )}
@@ -442,7 +590,9 @@ export default function ProviderSettings() {
 }
 
 function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClose: () => void; onCreated: () => void }) {
-  const [connectionType, setConnectionType] = useState<"cloud_api" | "local_endpoint">("cloud_api");
+  // Mặc định tab "Local" khi nhóm này KHÔNG có provider cloud nào (VD "embedding", chỉ
+  // có LocalAI) — tránh mở ra form cloud rỗng, người dùng phải tự bấm đổi tab.
+  const [connectionType, setConnectionType] = useState<"cloud_api" | "local_endpoint">(CLOUD_CATALOG[group].length > 0 ? "cloud_api" : "local_endpoint");
   const [providerName, setProviderName] = useState(CLOUD_CATALOG[group][0]?.provider_name || "");
   const [displayName, setDisplayName] = useState(CLOUD_CATALOG[group][0]?.display_name || "");
   const [cloudModel, setCloudModel] = useState(CLOUD_CATALOG[group][0]?.models[0] || "");
@@ -647,6 +797,13 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
                   baseUrl={endpointUrl}
                   onChange={setModelName}
                   emptyLabel="— Mặc định app (Painter's Checkpoint) —"
+                />
+              ) : localProviderName === "localai_image" ? (
+                <LocalAIModelSelect
+                  value={modelName}
+                  baseUrl={endpointUrl}
+                  onChange={setModelName}
+                  emptyLabel="— Tự động đăng ký/đồng bộ (studioflow-sdxl) —"
                 />
               ) : (
                 <input className="input" value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder={selectedLocalCatalog?.model_name} />

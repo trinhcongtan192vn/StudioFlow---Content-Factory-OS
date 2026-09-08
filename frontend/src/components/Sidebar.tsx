@@ -62,6 +62,7 @@ export default function Sidebar() {
         <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center", paddingBottom: 2 }}>
           <div className="hr" style={{ width: 20, margin: "0 auto" }} />
           <NavIcon active={app.view === "dashboard"} onClick={app.goDashboard} title="Dashboard" icon="grid" />
+          <NavIcon active={app.view === "asset_vault"} onClick={app.goAssetVault} title="Kho Tài nguyên" icon="vault" />
           <NavIcon active={app.view === "library"} onClick={app.goLibrary} title="Thư viện" icon="library" />
           <NavIcon active={app.view === "trash"} onClick={app.goTrash} title="Thùng rác" icon="trash" />
           <NavIcon active={app.view === "settings"} onClick={app.goSettings} title="Cài đặt" icon="gear" />
@@ -200,6 +201,7 @@ export default function Sidebar() {
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <div className="hr" style={{ margin: "0 0 var(--space-2)" }} />
         <NavRow active={app.view === "dashboard"} onClick={app.goDashboard} label="Dashboard" icon="grid" />
+        <NavRow active={app.view === "asset_vault"} onClick={app.goAssetVault} label="Kho Tài nguyên" icon="vault" />
         <NavRow active={app.view === "library"} onClick={app.goLibrary} label="Thư viện" icon="library" />
         <NavRow active={app.view === "trash"} onClick={app.goTrash} label="Thùng rác" icon="trash" />
         <NavRow active={app.view === "settings"} onClick={app.goSettings} label="Cài đặt" icon="gear" />
@@ -268,7 +270,7 @@ function PlusIcon({ size = 13 }: { size?: number }) {
   );
 }
 
-function NavRow({ active, onClick, label, icon }: { active: boolean; onClick: () => void; label: string; icon: "grid" | "gear" | "trash" | "library" }) {
+function NavRow({ active, onClick, label, icon }: { active: boolean; onClick: () => void; label: string; icon: "grid" | "gear" | "trash" | "library" | "vault" }) {
   return (
     <div
       onClick={onClick}
@@ -280,7 +282,7 @@ function NavRow({ active, onClick, label, icon }: { active: boolean; onClick: ()
   );
 }
 
-function NavIcon({ active, onClick, title, icon }: { active: boolean; onClick: () => void; title: string; icon: "grid" | "gear" | "trash" | "library" }) {
+function NavIcon({ active, onClick, title, icon }: { active: boolean; onClick: () => void; title: string; icon: "grid" | "gear" | "trash" | "library" | "vault" }) {
   return (
     <div
       onClick={onClick}
@@ -292,7 +294,14 @@ function NavIcon({ active, onClick, title, icon }: { active: boolean; onClick: (
   );
 }
 
-function IconGlyph({ icon }: { icon: "grid" | "gear" | "trash" | "library" }) {
+function IconGlyph({ icon }: { icon: "grid" | "gear" | "trash" | "library" | "vault" }) {
+  if (icon === "vault")
+    return (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="6" width="15" height="12" rx="2" />
+        <path d="M17 9.5l5-2.5v10l-5-2.5" />
+      </svg>
+    );
   if (icon === "library")
     return (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

@@ -6,7 +6,8 @@ from app.config import project_dir
 from app.db import get_db
 from app.filestore import read_json, write_json
 from app.guardrail.check import annotate_body_with_warnings, run_guardrail_check
-from app.models import Project, RetentionEntry
+from app.models import Project, ProcessedClip, RetentionEntry
+from app.render import engine
 from app.routers.pipeline import record_usage
 
 router = APIRouter(tags=["guardrail", "retention"])
@@ -17,6 +18,38 @@ def _get_project_or_404(db: Session, project_id: str) -> Project:
     if not p:
         raise HTTPException(404, "Không tìm thấy project")
     return p
+
+
+def _check_rights_warnings(db: Session, pdir, project_id: str, channel_id: str, pack: dict) -> list[dict]:
+    """CHANGE_Semantic_BRoll_Asset_Vault.md §6 — cảnh báo shot dùng clip Kho Tài Nguyên
+    CHƯA xác minh bản quyền. KHÔNG chặn cứng (single-user, người dùng tự quyết) — cùng
+    mức độ nghiêm trọng "amber" như hook_strength/anchor_gap (`run_guardrail_check`).
+    Đọc `render.json` (không phải `pack.json`) vì `linked_clip_id` sống ở
+    `ShotRenderStatus` — xem docstring `app/render/schemas.py::ShotRenderStatus`.
+
+    `channel_id` KHÔNG còn dùng để lọc `ProcessedClip` (kho đã chuyển toàn cục,
+    2026-08-27, `ProcessedClip` không có `channel_id` riêng nữa) — giữ tham số vì
+    `linked_clip_id` đã TỰ định danh đúng 1 clip cụ thể (validate quyền thuộc kênh lúc
+    `assign_vault_clip`, xem `render.py`), không cần lọc lại ở đây."""
+    state = engine.load_render_state(pdir, project_id)
+    shots_by_id = {s["shot_id"]: s for s in pack.get("shots", [])}
+    warnings: list[dict] = []
+    for status in state.shots:
+        if not status.linked_clip_id:
+            continue
+        clip = db.query(ProcessedClip).filter(ProcessedClip.clip_id == status.linked_clip_id).first()
+        if not clip or clip.rights_status != "unverified":
+            continue
+        shot = shots_by_id.get(status.shot_id) or {}
+        warnings.append(
+            {
+                "type": "rights",
+                "severity": "amber",
+                "at_timestamp_sec": shot.get("linked_timestamp_sec"),
+                "message": f"Shot {status.shot_id} dùng clip {status.linked_clip_id} từ Kho tư liệu CHƯA xác minh bản quyền",
+            }
+        )
+    return warnings
 
 
 @router.post("/projects/{project_id}/guardrail/check")
@@ -42,6 +75,7 @@ def guardrail_check(project_id: str, db: Session = Depends(get_db)):
         pain_points=brief.get("audience", {}).get("pain_points", []),
         usage=usage,
     )
+    result["warnings"] = result["warnings"] + _check_rights_warnings(db, pdir, project_id, p.channel_id, pack)
     pack["script"]["body"] = annotate_body_with_warnings(body, result["warnings"])
     pack["retention_check"] = result
     write_json(pdir / "pack.json", pack)

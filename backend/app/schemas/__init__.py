@@ -46,6 +46,15 @@ class RetentionBenchmark(BaseModel):
     target_body_len_min: int = 8
 
 
+class StyleLoraEntry(BaseModel):
+    """1 dòng trong `BrandProfile.style_loras` — **mới (2026-08-23)**, thay
+    `style_lora_path`/`style_lora_strength` (đơn, mục 64) để STACK được nhiều LoRA cùng
+    lúc (VD 1 LoRA sơn dầu + 1 LoRA thuỷ mặc), theo đề xuất người dùng chống thiên lệch
+    văn hoá Nhật/Hàn của checkpoint/LoRA gốc — xem IMPLEMENTATION_REPORT.md."""
+    name: str  # tên file THẬT trong ComfyUI/models/loras/ — cùng quy ước style_lora_path cũ
+    strength: float = 0.8
+
+
 class BrandProfile(BaseModel):
     channel_id: str
     niche: str = ""
@@ -53,6 +62,49 @@ class BrandProfile(BaseModel):
     content_pillars: list[ContentPillar] = Field(default_factory=list)
     forbidden: list[str] = Field(default_factory=list)
     visual_style_prompt: str = ""
+    # Cultural lock — **mới (2026-08-23)**, theo yêu cầu người dùng: checkpoint/LoRA
+    # phong cách "Á Đông/thuỷ mặc" trên Civitai tuyệt đại đa số train từ dữ liệu Nhật
+    # (anime/Danbooru/ukiyo-e) và Trung/Hàn (webtoon/hanbok) — ảnh sinh ra dễ mang nét
+    # Nhật/Hàn dù không yêu cầu, KỂ CẢ khi checkpoint/LoRA đã chọn đúng hướng "painterly"
+    # (mục 64). `cultural_lock_positive` — từ khoá Việt Nam CỤ THỂ theo đúng triều đại/
+    # thời kỳ (trang phục, kiến trúc, hoạ tiết) — để RỖNG mặc định, KHÁC `_negative` bên
+    # dưới, vì đúng/sai theo TỪNG kênh + bối cảnh lịch sử cụ thể, không có 1 default nào
+    # đúng cho mọi kênh — người dùng tự điền ở màn Sửa BrandProfile. Nối vào prompt DƯƠNG
+    # cho MỌI provider (cloud lẫn local) — đây là vấn đề ĐÚNG/SAI nội dung văn hoá, không
+    # phải tối ưu riêng model local như `visual_style_prompt`/`motion_tone`.
+    cultural_lock_positive: str = ""
+    # `cultural_lock_negative` — cụm loại trừ văn hoá ngoại lai. TỪNG default KHÔNG RỖNG
+    # (gợi ý cụm loại trừ Nhật/Hàn phổ quát) — đổi thành RỖNG mặc định (2026-09-02, theo
+    # yêu cầu người dùng: kênh mới tạo phải trống hẳn, không có giá trị ẩn nào). Cụm gợi ý
+    # cũ giữ lại làm PLACEHOLDER (chỉ hiện mờ trong ô nhập, không phải giá trị thật) ở
+    # `ChannelDialog.tsx` — người dùng tự bấm điền nếu muốn dùng, không còn tự động áp cho
+    # mọi kênh. CHỈ áp dụng được cho provider có negative-prompt THẬT (`local_sdxl`/
+    # `local_wan` qua ComfyUI CLIPTextEncode(negative) — OpenAI/Gemini/Flux không có tham
+    # số negative prompt nào trong adapter hiện tại). KHÔNG nhét câu phủ định vào prompt
+    # DƯƠNG cho cloud — bài học thật từ mục 66 (phủ định trong prompt dương yếu hơn hẳn
+    # negative-prompt thật) — xem `app/render/engine.py::generate_visual_asset`.
+    cultural_lock_negative: str = ""
+    # Ảnh tham chiếu phong cách (IPAdapter) — **mới (2026-08-23)**, theo yêu cầu người
+    # dùng: "cho model xem trực tiếp tranh cung đình/tư liệu bảo tàng/Đông Hồ/Hàng Trống
+    # thật" để ép đúng thị giác Việt — hiệu quả hơn hẳn chỉ dùng chữ, vì tách được PHONG
+    # CÁCH khỏi BỐ CỤC (khác cơ chế img2img/anchor image đã có — Tier 2, `reference_image`
+    # số ít — vốn để ẢNH GỐC ảnh hưởng TRỰC TIẾP lên bố cục/màu). Đảo ngược quyết định
+    # "không dùng IPAdapter" đã ghi ở docstring `image_comfy_sdxl.py`/specs/05 §8d (custom
+    # node cộng đồng, rủi ro lệch tên/version) — người dùng đã xác nhận chấp nhận đánh
+    # đổi này. Đường dẫn TUYỆT ĐỐI trong `channel_dir(id)/style_refs/` (khác style_loras —
+    # LoRA sống trong ComfyUI, ảnh tham chiếu sống trong workspace của app). CHỈ áp dụng
+    # `local_sdxl` — provider khác không hỗ trợ ảnh tham chiếu kiểu này.
+    style_reference_paths: list[str] = Field(default_factory=list)
+    style_reference_weight: float = 0.6
+    # Tông chuyển động cho video AI local (Wan2.2) — **mới (2026-08-23)**, theo
+    # StudioFlow_Video_Improvement_Plan.md: video diffusion cần 1 ràng buộc chuyển
+    # động RIÊNG (khác `visual_style_prompt` — đó là phong cách/tông màu THỊ GIÁC,
+    # không nói gì về tốc độ/kiểu chuyển động) — nối vào prompt qua `app/render/engine.py::
+    # _build_video_motion_prompt`, CHỈ áp dụng cho provider `local_wan` (không áp cho
+    # Sora/Veo/Flux — ngoài phạm vi cải tiến này). TỪNG default "chậm, tinh tế" không rỗng
+    # — đổi thành RỖNG mặc định (2026-09-02, theo yêu cầu người dùng: kênh mới tạo phải
+    # trống hẳn). Gợi ý cũ giữ lại làm PLACEHOLDER ở `ChannelDialog.tsx`.
+    motion_tone: str = ""
     hook_formats_preferred: list[str] = Field(default_factory=list)
     retention_benchmark: RetentionBenchmark = Field(default_factory=RetentionBenchmark)
     # Logo kênh — **mới (2026-08-22)**, theo yêu cầu người dùng. Thuần hiển thị nhận diện
@@ -85,18 +137,19 @@ class BrandProfile(BaseModel):
     # bg_music`, ưu tiên cao hơn) — xem `app/render/bg_music.py::resolve_bg_music_source`.
     bg_music_path: str = ""
     bg_music_volume: float = 0.3
-    # Style LoRA khoá "chữ ký hình ảnh" cho ảnh local SDXL — **mới (2026-08-22)**, theo
-    # yêu cầu người dùng (đợt 2 cải thiện chất lượng ảnh local, xem IMPLEMENTATION_REPORT.
-    # md): 1 checkpoint painterly đơn thuần vẫn dao động phong cách giữa các lần sinh —
-    # Style LoRA là lớp khoá mạnh nhất. `style_lora_path` là TÊN FILE (không phải đường
-    # dẫn tuyệt đối — khác `logo_path`/`intro_video_path`, vì LoRA sống trong thư mục
-    # ComfyUI (`ComfyUI/models/loras/`), KHÔNG PHẢI thư mục channel_dir như các asset khác
-    # — path tuyệt đối cross-machine không có ý nghĩa ở đây, chỉ cần đúng tên file ComfyUI
-    # tìm thấy). Rỗng = không dùng LoRA (hành vi cũ, không đổi cho ai chưa cấu hình). CHỈ
-    # áp dụng cho `local_sdxl` (`ImageProvider.generate()` — provider khác nhận rồi bỏ
-    # qua, xem app/providers/base.py). Mỗi kênh chọn LoRA khác nhau tuỳ phong cách riêng.
-    style_lora_path: str = ""
-    style_lora_strength: float = 0.8
+    # Auto-ducking nhạc nền (CHANGE_Semantic_BRoll_Asset_Vault.md §9b.5) — tự giảm nhạc
+    # nền khi có giọng đọc (sidechain compressor), thay vì trộn ở 1 mức volume cố định
+    # xuyên suốt. Mặc định TẮT — giữ nguyên hành vi cũ cho kênh chưa cấu hình. Xem
+    # `app/render/assembly.py::_mix_bg_music`.
+    bg_music_ducking_enabled: bool = False
+    # Style LoRA khoá "chữ ký hình ảnh" cho ảnh local SDXL — **mới (2026-08-22, mục 64)**,
+    # **đổi sang STACK nhiều LoRA (2026-08-23)**: 1 LoRA đơn không đủ vừa khoá chất liệu
+    # (VD sơn dầu) VỪA ép đúng hướng văn hoá Việt (VD thuỷ mặc Trung Quốc thuần khác hẳn
+    # thuỷ mặc Nhật) — theo đề xuất người dùng, stack 2-3 LoRA ở mức 0.5-0.8 mỗi cái. Mỗi
+    # `StyleLoraEntry.name` là TÊN FILE (không phải đường dẫn tuyệt đối — LoRA sống trong
+    # `ComfyUI/models/loras/`, KHÔNG PHẢI channel_dir như các asset khác). Rỗng = không
+    # dùng LoRA nào (hành vi cũ). CHỈ áp dụng `local_sdxl` — provider khác bỏ qua.
+    style_loras: list[StyleLoraEntry] = Field(default_factory=list)
     # Hiệu ứng lớp phủ (overlay) MẶC ĐỊNH của kênh — **mới (2026-08-22)**, theo yêu cầu
     # người dùng: 1 video hiệu ứng (VD mưa rơi, tuyết rơi...) blend ĐÈ LIÊN TỤC lên TOÀN
     # BỘ video (kể cả intro) khi ghép MP4 — cùng cách bg_music hoạt động (KHÁC intro, vốn
@@ -109,6 +162,20 @@ class BrandProfile(BaseModel):
     # như `intro_video_path`).
     overlay_effect_path: str = ""
     overlay_effect_opacity: float = 0.5
+    # Style normalization cho hậu kỳ (CHANGE_Semantic_BRoll_Asset_Vault.md §9b.2) — preset
+    # màu CỐ ĐỊNH của kênh, áp cho MỌI clip khi ghép MP4 (thay hằng số toàn hệ thống
+    # `_COLOR_GRADE_FILTER` cũ, xem `app/render/assembly.py::_resolve_color_grade_filter`).
+    # Rỗng = dùng đúng preset mặc định cũ (KHÔNG đổi hành vi cho kênh chưa cấu hình).
+    # Danh sách preset hợp lệ: `render/assembly.py::_GRADE_PRESETS` (nguồn sự thật duy
+    # nhất — không cho nhập chuỗi filter ffmpeg tuỳ ý, tránh over-engineer/rủi ro injection).
+    visual_grade: str = ""
+    # Film grain overlay (opacity thấp) — hiệu ứng thẩm mỹ tuỳ chọn theo kênh, mặc định tắt.
+    grain_enabled: bool = False
+    # Cách xử lý khi clip/ảnh lệch tỷ lệ khung hình so với khung xuất — "crop" (mặc định,
+    # hành vi cũ: scale phủ kín + cắt viền thừa) hoặc "blur" (nền là chính clip đó phóng to
+    # + làm mờ, không mất chi tiết ở rìa — hữu ích khi ghép clip B-roll từ Asset Vault lệch
+    # tỷ lệ). Xem `app/render/assembly.py::_scale_blurfill_filter`.
+    aspect_fill_mode: Literal["crop", "blur"] = "crop"
     version: int = 1
 
 

@@ -57,6 +57,48 @@ class LLMProvider(ABC):
         ...
 
 
+@dataclass
+class VisionResult:
+    caption: str
+    tags: list[str] = field(default_factory=list)
+    mood_tone: str = ""
+
+
+class VisionProvider(ABC):
+    """Task "vision" — captioning ảnh cho Channel Asset Vault
+    (CHANGE_Semantic_BRoll_Asset_Vault.md §3/§3b). TÁCH RIÊNG khỏi `LLMProvider` dù cùng
+    bản chất "gọi model sinh text từ input" — đổi `LLMMessage.content` từ `str` sang
+    `str | list` (để nhét ảnh) sẽ ảnh hưởng MỌI call site LLM hiện có (hook scoring...),
+    rủi ro không cần thiết cho 1 tính năng mới độc lập. Theo đúng pattern 1 ABC/1 task đã
+    có (LLMProvider/TTSProvider/ImageProvider/VideoProvider)."""
+
+    provider_name: str = "base"
+
+    @abstractmethod
+    def caption(self, image_bytes: bytes, *, prompt: str) -> VisionResult:
+        ...
+
+    @abstractmethod
+    def test_connection(self) -> ProviderStatus:
+        ...
+
+
+class EmbeddingProvider(ABC):
+    """Task "embedding" — sinh vector cho semantic matching Asset Vault (§3 giai đoạn B).
+    Interface tối giản (chỉ `embed`) — không cần batch API riêng, khối lượng gọi ở M1 là
+    1 clip/1 lần index, không phải hàng nghìn request đồng thời."""
+
+    provider_name: str = "base"
+
+    @abstractmethod
+    def embed(self, text: str) -> list[float]:
+        ...
+
+    @abstractmethod
+    def test_connection(self) -> ProviderStatus:
+        ...
+
+
 class TTSProvider(ABC):
     """Khai báo interface — MVP không thực thi thật (§05 mục 9), dùng ở M2."""
 
@@ -128,6 +170,31 @@ class VideoProvider(ABC):
     @abstractmethod
     def test_connection(self) -> ProviderStatus:
         ...
+
+
+class GenerationInterrupted(Exception):
+    """Job ComfyUI (ảnh HOẶC video local) đã bị NGẮT qua `/interrupt` — **mới
+    (2026-08-23)**, bug thật phát hiện lúc điều tra shot B01 báo lỗi ("Nguyễn Trãi và án
+    Lệ Chi Viên"): người dùng bấm "Dừng" (`POST /projects/{id}/render/cancel`) gọi
+    `engine.try_interrupt_local_gpu_job()` → ComfyUI `/interrupt` — nhưng ComfyUI báo
+    CẢ interrupt LẪN lỗi thực thi thật (exception/traceback) qua CÙNG
+    `status.status_str == "error"` trong `/history`, chỉ phân biệt được bằng cách soi
+    `status.messages` có message loại `execution_interrupted` hay không (KHÁC
+    `execution_error` — lỗi thật). TRƯỚC ĐÂY mọi `status_str == "error"` đều bị coi là
+    lỗi provider thật (dump nguyên `entry['status']` vào `visual_error`, gồm cả
+    traceback/node id kỹ thuật) — người dùng bấm Dừng nhưng thấy card hiện lỗi rối rắm
+    như thể pipeline bị crash thật. Provider tự phát hiện case này (`raise_if_interrupted`
+    bên dưới) để `app/render/engine.py` xử lý CÙNG NHÁNH với `GenerationCancelled` (dừng
+    ngay, không thử fallback, thông báo rõ "đã dừng" thay vì lỗi kỹ thuật)."""
+
+
+def raise_if_interrupted(status: dict, job_id: str) -> None:
+    """Soi `status.messages` (từ ComfyUI `/history/{id}`) tìm message loại
+    `execution_interrupted` — xem `GenerationInterrupted`. Gọi TRƯỚC khi coi
+    `status_str == "error"` là lỗi thật."""
+    for message in status.get("messages", []):
+        if message and message[0] == "execution_interrupted":
+            raise GenerationInterrupted(f"Job {job_id} đã bị dừng (bấm Dừng, hoặc huỷ trực tiếp trên ComfyUI).")
 
 
 def raise_for_status_with_body(resp) -> None:

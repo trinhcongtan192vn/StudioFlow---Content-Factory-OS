@@ -4,12 +4,22 @@ adapter Image khác trong repo này — `image_openai.py`/`image_gemini.py`) —
 `ai-content-studio` dùng async, ở đây build workflow rồi `POST /prompt` (queue) →
 poll `GET /history/{id}` → `GET /view` (tải ảnh), không dùng websocket.
 
-Khác `ai-content-studio/apps/backend/app/adapters/image_gen/comfy_sdxl.py`: BỎ hẳn
-phần IPAdapter Plus (nhân vật tham chiếu, custom node cộng đồng dễ lệch tên/version) —
-thay vào đó dùng **img2img thuần bằng node ComfyUI gốc** (`LoadImage`+`VAEEncode`+
-`KSampler(denoise<1)`) khi có `reference_image` (Tier 2 — giữ nhất quán phong cách/
-nhân vật giữa các shot qua ảnh "anchor", xem app/render/engine.py). Không có
-`reference_image` → txt2img thuần như trước, hành vi KHÔNG đổi.
+Khác `ai-content-studio/apps/backend/app/adapters/image_gen/comfy_sdxl.py`: BAN ĐẦU bỏ
+hẳn IPAdapter Plus (custom node cộng đồng dễ lệch tên/version), dùng **img2img thuần
+bằng node ComfyUI gốc** (`LoadImage`+`VAEEncode`+`KSampler(denoise<1)`) khi có
+`reference_image` (Tier 2 — giữ nhất quán phong cách/nhân vật giữa các shot qua ảnh
+"anchor", xem app/render/engine.py) — img2img này VẪN GIỮ NGUYÊN, không đổi.
+
+**Đảo ngược 1 phần quyết định trên (2026-08-23)**: người dùng phát hiện checkpoint/LoRA
+"Á Đông/thuỷ mặc" (tuyệt đại đa số train từ dữ liệu Nhật/Trung/Hàn trên Civitai) khiến
+ảnh sinh ra mang nét Nhật/Hàn dù không yêu cầu — img2img/prompt không đủ mạnh để ép
+ngược thiên lệch train. Thêm LẠI IPAdapter (`_add_ipadapter_nodes`) làm lớp "ảnh tham
+chiếu phong cách" TÁCH BIỆT khỏi img2img/anchor ở trên — IPAdapter điều kiện hoá MODEL
+(tách phong cách khỏi bố cục, nhận NHIỀU ảnh cùng lúc), khác img2img seed LATENT (1 ảnh,
+bố cục/màu ảnh gốc ảnh hưởng trực tiếp). Người dùng đã xác nhận chấp nhận rủi ro custom
+node đổi lại — CHƯA verify thật trên ComfyUI+IPAdapter (khác mọi tính năng ComfyUI khác
+trong codebase, đều verify qua GPU thật) — có fallback tự động về không-IPAdapter nếu
+ComfyUI từ chối node (xem `_generate_locked`).
 
 Độ phân giải 1344x768 (~16:9, đúng 1 trong các bucket SDXL được train — khác OpenAI
 Image dùng 1792x1024 vì SDXL ở scale đó chất lượng giảm rõ do lệch xa vùng train).
@@ -19,7 +29,7 @@ import uuid
 
 import httpx
 
-from app.providers.base import ImageProvider, ProviderStatus
+from app.providers.base import ImageProvider, ProviderStatus, raise_if_interrupted
 from app.providers.gpu_lock import gpu_lock
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8188"
@@ -80,25 +90,88 @@ _HEIGHT_VERTICAL = 1344
 # lại bằng ảnh hải đăng ở Tier 2 gốc, kết quả vẫn nhất quán tốt), đồng thời giảm mạnh
 # việc copy nguyên khung/chữ khi anchor là ảnh nhiều chi tiết đồ hoạ như Thumbnail.
 _IMG2IMG_DENOISE = 0.7
+# Ảnh tham chiếu phong cách (IPAdapter) — **mới (2026-08-23)**, xem docstring đầu file
+# (đảo ngược 1 phần quyết định "không dùng IPAdapter"). 2 tên model NGƯỜI DÙNG PHẢI TỰ
+# TẢI đặt đúng thư mục ComfyUI trước khi dùng (xem IMPLEMENTATION_REPORT.md) — đây là
+# LỰA CHỌN PHỔ BIẾN NHẤT đi kèm bản IPAdapter SDXL ("plus", không phải "plus face" —
+# dùng cho phong cách tổng thể, không phải khoá khuôn mặt nhân vật), CHƯA thể xác nhận
+# đúng 100% khớp mọi phiên bản `ComfyUI_IPAdapter_plus` đã cài trên máy người dùng.
+_IPADAPTER_CLIP_VISION_NAME = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+_IPADAPTER_MODEL_NAME = "ip-adapter-plus_sdxl_vit-h.safetensors"
 
 
-def _add_lora_node(workflow: dict, *, lora_name: str, lora_strength: float, clip_encode_node_ids: list[str]) -> None:
-    """Chèn node `LoraLoader` (CÓ SẴN trong ComfyUI core, KHÔNG phải custom node — khác
-    IPAdapter Plus đã cố tình bỏ, xem docstring đầu file) giữa `CheckpointLoaderSimple`
-    (node "4") và mọi node dùng `model`/`clip` của nó — **mới (2026-08-22)**, theo yêu cầu
-    người dùng khoá "chữ ký hình ảnh" (Style LoRA) cho kênh, xem IMPLEMENTATION_REPORT.md.
-    Rỗng `lora_name` (mặc định) → hàm này KHÔNG được gọi, workflow giữ nguyên nối thẳng
-    checkpoint → sampler như trước, không đổi hành vi cho ai chưa cấu hình LoRA."""
-    workflow["13"] = {
-        "class_type": "LoraLoader",
-        "inputs": {"lora_name": lora_name, "strength_model": lora_strength, "strength_clip": lora_strength, "model": ["4", 0], "clip": ["4", 1]},
+def _add_ipadapter_nodes(workflow: dict, *, image_filenames: list[str], weight: float) -> None:
+    """Chèn IPAdapter (CUSTOM NODE `ComfyUI_IPAdapter_plus`, KHÁC mọi node khác trong file
+    này — đều là core ComfyUI) làm lớp "ảnh tham chiếu phong cách" — điều kiện hoá MODEL
+    (tách phong cách khỏi bố cục), KHÁC img2img (`_build_img2img_workflow`) seed LATENT
+    (1 ảnh, bố cục/màu ảnh gốc ảnh hưởng trực tiếp). Đọc THẲNG `workflow["3"]["inputs"]
+    ["model"]` hiện tại làm input — nếu gọi SAU `_add_lora_nodes` (đúng thứ tự trong
+    `_build_txt2img_workflow`/`_build_img2img_workflow`), IPAdapter tự động áp SAU LoRA
+    (LoRA khoá "chữ ký kỹ thuật" trước, IPAdapter khoá "cảm hứng thị giác" sau) — không
+    cần biết LoRA có được dùng hay không, chỉ cần nối tiếp link hiện có.
+
+    NHIỀU ảnh cùng lúc: `LoadImage` từng ảnh rồi chain `ImageBatch` (core ComfyUI, ghép
+    ĐÚNG 2 ảnh/lần) tuần tự — đúng cách ComfyUI xử lý "nhiều ảnh style cùng lúc" cho
+    IPAdapter (IPAdapter tự trung bình hoá embedding của cả batch)."""
+    workflow["90"] = {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": _IPADAPTER_CLIP_VISION_NAME}}
+    workflow["91"] = {"class_type": "IPAdapterModelLoader", "inputs": {"ipadapter_file": _IPADAPTER_MODEL_NAME}}
+    image_link: list | None = None
+    for i, filename in enumerate(image_filenames):
+        load_id = f"92{i}"
+        workflow[load_id] = {"class_type": "LoadImage", "inputs": {"image": filename}}
+        if image_link is None:
+            image_link = [load_id, 0]
+        else:
+            batch_id = f"93{i}"
+            workflow[batch_id] = {"class_type": "ImageBatch", "inputs": {"image1": image_link, "image2": [load_id, 0]}}
+            image_link = [batch_id, 0]
+    workflow["94"] = {
+        "class_type": "IPAdapterApply",
+        "inputs": {
+            "ipadapter": ["91", 0], "clip_vision": ["90", 0], "image": image_link,
+            "model": workflow["3"]["inputs"]["model"], "weight": weight,
+            "weight_type": "linear", "start_at": 0.0, "end_at": 1.0,
+        },
     }
-    workflow["3"]["inputs"]["model"] = ["13", 0]
+    workflow["3"]["inputs"]["model"] = ["94", 0]
+
+
+def _add_lora_nodes(workflow: dict, *, loras: list[dict], clip_encode_node_ids: list[str]) -> None:
+    """Chèn CHUỖI node `LoraLoader` (CÓ SẴN trong ComfyUI core, KHÔNG phải custom node —
+    khác IPAdapter Plus đã cố tình bỏ, xem docstring đầu file) giữa `CheckpointLoaderSimple`
+    (node "4") và mọi node dùng `model`/`clip` của nó — **mới (2026-08-22, đổi sang STACK
+    NHIỀU LoRA 2026-08-23)**: 1 LoRA đơn không đủ vừa khoá chất liệu (VD sơn dầu) vừa ép
+    đúng hướng văn hoá Việt (VD thuỷ mặc Trung Quốc thuần khác thuỷ mặc Nhật) — theo đề
+    xuất người dùng chống thiên lệch văn hoá Nhật/Hàn, stack 2-3 LoRA. Mỗi `LoraLoader`
+    nối tiếp node TRƯỚC (không phải luôn từ checkpoint trực tiếp) — đúng cách ComfyUI
+    stack nhiều LoRA. `loras` rỗng (mặc định) → hàm KHÔNG được gọi, workflow giữ nguyên
+    nối thẳng checkpoint → sampler như trước, không đổi hành vi cho ai chưa cấu hình LoRA
+    nào (tương thích ngược hoàn toàn với trường hợp 1 LoRA cũ)."""
+    model_link = ["4", 0]
+    clip_link = ["4", 1]
+    for i, lora in enumerate(loras):
+        node_id = f"13{i}"
+        workflow[node_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {"lora_name": lora["name"], "strength_model": lora["strength"], "strength_clip": lora["strength"], "model": model_link, "clip": clip_link},
+        }
+        model_link = [node_id, 0]
+        clip_link = [node_id, 1]
+    workflow["3"]["inputs"]["model"] = model_link
     for node_id in clip_encode_node_ids:
-        workflow[node_id]["inputs"]["clip"] = ["13", 1]
+        workflow[node_id]["inputs"]["clip"] = clip_link
 
 
-def _build_txt2img_workflow(*, prompt: str, seed: int, ckpt_name: str = _CHECKPOINT_NAME, lora_name: str = "", lora_strength: float = 0.8, width: int = _WIDTH, height: int = _HEIGHT) -> dict:
+def _negative_prompt_text(base: str, extra_negative: str = "") -> str:
+    """Nối `extra_negative` (VD `cultural_lock_negative` — mới 2026-08-23) vào negative
+    prompt gốc — dùng chung cho cả txt2img/img2img, tránh lặp logic ghép chuỗi."""
+    return f"{base}, {extra_negative}" if extra_negative else base
+
+
+def _build_txt2img_workflow(
+    *, prompt: str, seed: int, ckpt_name: str = _CHECKPOINT_NAME, loras: list[dict] | None = None, extra_negative: str = "",
+    width: int = _WIDTH, height: int = _HEIGHT, style_reference_filenames: list[str] | None = None, style_reference_weight: float = 0.6,
+) -> dict:
     workflow = {
         "3": {
             "class_type": "KSampler",
@@ -111,16 +184,21 @@ def _build_txt2img_workflow(*, prompt: str, seed: int, ckpt_name: str = _CHECKPO
         "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt_name}},
         "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}},
         "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": prompt}},
-        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": _NEGATIVE_PROMPT}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": _negative_prompt_text(_NEGATIVE_PROMPT, extra_negative)}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
         "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "studioflow", "images": ["8", 0]}},
     }
-    if lora_name:
-        _add_lora_node(workflow, lora_name=lora_name, lora_strength=lora_strength, clip_encode_node_ids=["6", "7"])
+    if loras:
+        _add_lora_nodes(workflow, loras=loras, clip_encode_node_ids=["6", "7"])
+    if style_reference_filenames:
+        _add_ipadapter_nodes(workflow, image_filenames=style_reference_filenames, weight=style_reference_weight)
     return workflow
 
 
-def _build_img2img_workflow(*, prompt: str, seed: int, ref_filename: str, ckpt_name: str = _CHECKPOINT_NAME, lora_name: str = "", lora_strength: float = 0.8, width: int = _WIDTH, height: int = _HEIGHT) -> dict:
+def _build_img2img_workflow(
+    *, prompt: str, seed: int, ref_filename: str, ckpt_name: str = _CHECKPOINT_NAME, loras: list[dict] | None = None, extra_negative: str = "",
+    width: int = _WIDTH, height: int = _HEIGHT, style_reference_filenames: list[str] | None = None, style_reference_weight: float = 0.6,
+) -> dict:
     workflow = {
         "3": {
             "class_type": "KSampler",
@@ -132,7 +210,7 @@ def _build_img2img_workflow(*, prompt: str, seed: int, ref_filename: str, ckpt_n
         },
         "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt_name}},
         "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": prompt}},
-        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": f"{_NEGATIVE_PROMPT}, {_IMG2IMG_EXTRA_NEGATIVE}"}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": _negative_prompt_text(f"{_NEGATIVE_PROMPT}, {_IMG2IMG_EXTRA_NEGATIVE}", extra_negative)}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
         "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "studioflow", "images": ["8", 0]}},
         "10": {"class_type": "VAEEncode", "inputs": {"pixels": ["12", 0], "vae": ["4", 2]}},
@@ -142,8 +220,10 @@ def _build_img2img_workflow(*, prompt: str, seed: int, ref_filename: str, ckpt_n
         # sinh ở tỉ lệ riêng, hoặc người dùng tự upload ảnh kích thước bất kỳ).
         "12": {"class_type": "ImageScale", "inputs": {"image": ["11", 0], "width": width, "height": height, "upscale_method": "lanczos", "crop": "disabled"}},
     }
-    if lora_name:
-        _add_lora_node(workflow, lora_name=lora_name, lora_strength=lora_strength, clip_encode_node_ids=["6", "7"])
+    if loras:
+        _add_lora_nodes(workflow, loras=loras, clip_encode_node_ids=["6", "7"])
+    if style_reference_filenames:
+        _add_ipadapter_nodes(workflow, image_filenames=style_reference_filenames, weight=style_reference_weight)
     return workflow
 
 
@@ -161,22 +241,30 @@ class ComfySDXLImageProvider(ImageProvider):
 
     def generate(
         self, prompt: str, *, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9",
-        lora_name: str = "", lora_strength: float = 0.8,
+        loras: list[dict] | None = None, extra_negative: str = "",
+        reference_images: list[bytes] | None = None, style_reference_weight: float = 0.6,
     ) -> bytes:
         # gpu_lock: chặn chạy đồng thời với LLM local (Ollama)/Video local trên cùng GPU
         # — xem app/providers/gpu_lock.py + IMPLEMENTATION_REPORT.md mục 16.6b.
-        # `lora_name`/`lora_strength` — **mới (2026-08-22)** — KHÔNG khai báo trên
-        # `ImageProvider.generate()` (base.py) như `seed`/`reference_image`/`aspect_ratio`
-        # vì đây là khái niệm CHỈ có ý nghĩa với local_sdxl (Style LoRA từ BrandProfile,
-        # xem app/render/engine.py) — không muốn ép MỌI provider khác (OpenAI/Gemini/Flux)
-        # nhận thêm 2 tham số chết không dùng tới. `engine.py` chỉ truyền 2 kwarg này khi
-        # gọi ĐÚNG provider `local_sdxl` (kiểm `provider.provider_name`), không gọi chung.
+        # `loras`/`extra_negative`/`reference_images`/`style_reference_weight` — **mới
+        # (2026-08-22, mở rộng 2026-08-23)** — KHÔNG khai báo trên `ImageProvider.
+        # generate()` (base.py) như `seed`/`reference_image`/`aspect_ratio` vì đây là
+        # khái niệm CHỈ có ý nghĩa với local_sdxl (Style LoRA/cultural lock/ảnh tham
+        # chiếu IPAdapter từ BrandProfile, xem app/render/engine.py) — không muốn ép MỌI
+        # provider khác (OpenAI/Gemini/Flux) nhận thêm tham số chết không dùng tới.
+        # `reference_images` (SỐ NHIỀU, IPAdapter) KHÁC HẲN `reference_image` (SỐ ÍT,
+        # img2img/anchor Tier 2 có sẵn) — 2 cơ chế ĐỘC LẬP, dùng CÙNG lúc được (IPAdapter
+        # áp SAU LoRA lên model, img2img seed latent — không xung đột nhau).
         with gpu_lock:
-            return self._generate_locked(prompt, seed=seed, reference_image=reference_image, aspect_ratio=aspect_ratio, lora_name=lora_name, lora_strength=lora_strength)
+            return self._generate_locked(
+                prompt, seed=seed, reference_image=reference_image, aspect_ratio=aspect_ratio, loras=loras, extra_negative=extra_negative,
+                reference_images=reference_images, style_reference_weight=style_reference_weight,
+            )
 
     def _generate_locked(
         self, prompt: str, *, seed: int | None, reference_image: bytes | None, aspect_ratio: str = "16:9",
-        lora_name: str = "", lora_strength: float = 0.8,
+        loras: list[dict] | None = None, extra_negative: str = "",
+        reference_images: list[bytes] | None = None, style_reference_weight: float = 0.6,
     ) -> bytes:
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
@@ -184,15 +272,36 @@ class ComfySDXLImageProvider(ImageProvider):
         width, height = (_WIDTH_VERTICAL, _HEIGHT_VERTICAL) if aspect_ratio == "9:16" else (_WIDTH, _HEIGHT)
         ckpt_name = self.model_name or _CHECKPOINT_NAME
 
-        with httpx.Client(timeout=30) as client:
+        def _build(*, with_ipadapter: bool, upload_client: httpx.Client) -> dict:
+            style_ref_filenames = None
+            if with_ipadapter and reference_images:
+                style_ref_filenames = [self._upload_image(upload_client, img) for img in reference_images]
             if reference_image is not None:
-                ref_filename = self._upload_image(client, reference_image)
-                workflow = _build_img2img_workflow(prompt=prompt, seed=seed, ref_filename=ref_filename, ckpt_name=ckpt_name, lora_name=lora_name, lora_strength=lora_strength, width=width, height=height)
-            else:
-                workflow = _build_txt2img_workflow(prompt=prompt, seed=seed, ckpt_name=ckpt_name, lora_name=lora_name, lora_strength=lora_strength, width=width, height=height)
+                ref_filename = self._upload_image(upload_client, reference_image)
+                return _build_img2img_workflow(
+                    prompt=prompt, seed=seed, ref_filename=ref_filename, ckpt_name=ckpt_name, loras=loras, extra_negative=extra_negative,
+                    width=width, height=height, style_reference_filenames=style_ref_filenames, style_reference_weight=style_reference_weight,
+                )
+            return _build_txt2img_workflow(
+                prompt=prompt, seed=seed, ckpt_name=ckpt_name, loras=loras, extra_negative=extra_negative,
+                width=width, height=height, style_reference_filenames=style_ref_filenames, style_reference_weight=style_reference_weight,
+            )
+
+        with httpx.Client(timeout=30) as client:
+            workflow = _build(with_ipadapter=True, upload_client=client)
             resp = client.post(f"{self.base_url}/prompt", json={"prompt": workflow, "client_id": client_id})
             if resp.status_code >= 400:
-                raise RuntimeError(f"ComfyUI từ chối job: HTTP {resp.status_code}: {resp.text[:500]}")
+                # Fallback (2026-08-23) — IPAdapter là custom node cộng đồng CHƯA verify
+                # thật trên máy người dùng (xem docstring đầu file); nếu ComfyUI từ chối
+                # (thường "node type not found" khi chưa cài đúng `ComfyUI_IPAdapter_
+                # plus`/model), thử lại NGAY 1 lần KHÔNG IPAdapter thay vì chặn hẳn việc
+                # sinh ảnh — ảnh vẫn ra được (đúng phong cách LoRA/prompt), chỉ thiếu
+                # phần "ảnh tham chiếu".
+                if reference_images:
+                    workflow = _build(with_ipadapter=False, upload_client=client)
+                    resp = client.post(f"{self.base_url}/prompt", json={"prompt": workflow, "client_id": str(uuid.uuid4())})
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"ComfyUI từ chối job: HTTP {resp.status_code}: {resp.text[:500]}")
             prompt_id = resp.json()["prompt_id"]
 
         elapsed = 0.0
@@ -202,12 +311,23 @@ class ComfySDXLImageProvider(ImageProvider):
                 if resp.status_code == 200:
                     history = resp.json()
                     entry = history.get(prompt_id)
-                    if entry and entry.get("outputs"):
-                        image_info = self._first_image_output(entry["outputs"])
-                        if image_info:
-                            return self._download_image(client, image_info)
+                    if entry:
+                        # Bug thật (2026-08-23, phát hiện lúc viết test cho
+                        # `GenerationInterrupted`): kiểm tra `status_str == "error"`
+                        # TRƯỚC ĐÂY nằm LỒNG bên trong `if entry.get("outputs")` — job
+                        # lỗi/bị Dừng THẬT SỰ hầu như KHÔNG BAO GIỜ có `outputs` (đó
+                        # chính là ý nghĩa của "lỗi", chưa kịp render xong), nên nhánh
+                        # raise KHÔNG BAO GIỜ chạy tới — job lỗi bị coi nhầm là "đang
+                        # chạy" cho tới khi hết hẳn `_POLL_TIMEOUT_SEC` mới báo lỗi
+                        # chung chung "không trả kết quả", che mất lý do lỗi thật. Kiểm
+                        # tra `status_str` ĐỘC LẬP với `outputs`, TRƯỚC khi cần outputs.
                         if entry.get("status", {}).get("status_str") == "error":
+                            raise_if_interrupted(entry["status"], prompt_id)
                             raise RuntimeError(f"ComfyUI báo lỗi khi chạy workflow: {entry['status']}")
+                        if entry.get("outputs"):
+                            image_info = self._first_image_output(entry["outputs"])
+                            if image_info:
+                                return self._download_image(client, image_info)
                 time.sleep(_POLL_INTERVAL_SEC)
                 elapsed += _POLL_INTERVAL_SEC
 

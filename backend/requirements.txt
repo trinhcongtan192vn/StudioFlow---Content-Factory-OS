@@ -1,3 +1,23 @@
+# coding: utf-8 — BẮT BUỘC, đặt Ở DÒNG ĐẦU (pip đọc file requirements.txt này KHÔNG mặc
+# định UTF-8 khi thiếu BOM — soi 2 dòng đầu tìm khai báo kiểu PEP263 y hệt dòng này, thiếu
+# thì tự rơi về `locale.getpreferredencoding()`, trên Windows máy này là cp1252, vỡ ngay
+# khi gặp ký tự tiếng Việt bất kỳ trong file — bug thật, xác nhận qua đọc thẳng
+# `pip/_internal/utils/encoding.py::auto_decode`, không suy đoán. Y HỆT lớp lỗi
+# `UnicodeEncodeError` khi PRINT tiếng Việt ra console cp1252 đã gặp nhiều lần trong dự
+# án này, nhưng đây là chiều NGƯỢC LẠI (đọc file, không phải in ra) — cùng nguyên nhân gốc
+# (mặc định code page hệ thống, không phải UTF-8).
+# `torch`/`torchvision` (module xoá watermark, xem dưới) CẦN bản CUDA (`+cu129`, khớp
+# đúng bản đã verify chạy được với GPU máy dev — RTX 5060 Ti/Blackwell, driver 610.88) —
+# KHÔNG có trên PyPI mặc định, phải cho pip biết thêm index này. `pip install -r
+# requirements.txt` đọc thẳng dòng dưới, tự áp dụng cho MỌI package trong file (an toàn —
+# package khác không có hậu tố `+cu129` vẫn resolve bình thường từ PyPI như cũ).
+# **Bug thật gặp lúc cài (2026-08-27)**: cài `torch` CUDA trước, RỒI cài thêm
+# `transformers`/`simple-lama-inpainting` ở 1 lệnh `pip install` RIÊNG (không có dòng
+# `--extra-index-url` này) — pip resolve lại `torch` từ PyPI mặc định (không có bản CUDA
+# nào ở đó cho version này) và ÂM THẦM tụt xuống bản `+cpu` (CUDA biến mất, không có cảnh
+# báo/lỗi gì). Từ nay LUÔN cài từ CHÍNH file requirements.txt này (1 lệnh, 1 lượt resolve)
+# thay vì cài thêm package lẻ tay.
+--extra-index-url https://download.pytorch.org/whl/cu129
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 sqlalchemy==2.0.35
@@ -11,3 +31,36 @@ youtube-transcript-api==1.2.4
 openpyxl==3.1.5
 pytest==8.3.3
 respx==0.21.1
+# Channel Asset Vault (CHANGE_Semantic_BRoll_Asset_Vault.md) — kho tư liệu video theo
+# kênh: cắt cảnh (scenedetect), vector search (chromadb, embedded/file-based — không
+# cần service riêng, khớp triết lý SQLite/file hiện có), tải video theo URL do user tự
+# dán (yt-dlp, CHỈ dùng khi user chủ động xác nhận — không tự động quét).
+chromadb==1.5.9
+scenedetect[opencv]==0.7.1
+yt-dlp==2026.8.19
+# Piper TTS (app/providers/tts_piper.py) — `PiperVoice` load thẳng file `.onnx` (kiến
+# trúc VITS nhỏ, ~30-60MB) bằng onnxruntime, chạy tốt trên CPU.
+onnxruntime==1.28.0
+# Dashboard "Local Services & GPU Monitor" (2026-08-27) — tìm process đang giữ 1 cổng TCP
+# để bật/tắt Ollama/OmniVoice/ComfyUI (app/local_services.py). Trước đó chỉ có mặt gián
+# tiếp qua dependency khác — ghim tường minh vì giờ phụ thuộc trực tiếp.
+psutil==7.2.2
+# Module xoá watermark (app/watermark/, mới 2026-08-27, tái dùng được cho Visual Studio
+# sau này) — tham khảo kiến trúc của github.com/D-Ogi/WatermarkRemover-AI (Florence-2 phát
+# hiện vùng watermark + LaMa inpaint lấp lại) — CHỌN ĐÚNG 2 model này (không phải kỹ thuật
+# nhẹ hơn) vì bản build trước (2.5D Depth-Parallax) đã có tiền lệ ưu tiên né torch, nhưng
+# lần này người dùng CHỈ ĐỊNH rõ tham khảo repo cụ thể — torch đã verify chạy được thật với
+# GPU máy dev (khớp bản `+cu129` ComfyUI đang dùng, xem comment `--extra-index-url` ở đầu
+# file). `torchvision`/`timm`/`einops`/`safetensors` là dependency bắt buộc của
+# `transformers` khi load Florence-2 (kiến trúc dùng cả 2). `simple-lama-inpainting` bọc
+# sẵn model LaMa (~200MB, tự tải 1 lần), API 3 dòng (`SimpleLama()(image, mask)`).
+# `transformers` GHIM 4.49.0 (KHÔNG phải bản mới nhất) — verify thật: 5.16.1 làm code
+# remote của Florence-2 (viết cho API 4.x) crash `AttributeError:
+# 'Florence2LanguageConfig' object has no attribute 'forced_bos_token_id'` lúc nạp config,
+# xem chi tiết `app/watermark/detector.py`.
+torch==2.8.0+cu129
+torchvision==0.23.0+cu129
+transformers==4.49.0
+timm==1.0.28
+einops==0.8.2
+simple-lama-inpainting==0.1.2

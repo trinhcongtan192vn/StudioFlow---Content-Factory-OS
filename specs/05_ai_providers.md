@@ -232,6 +232,33 @@ nữa (đã chuyển hết sang Visual Studio).
 > `titles` ở `/visual/generate` (mô tả ở mục "Thumbnail = anchor bắt buộc" bên dưới)
 > cũng đã GỠ BỎ — giờ là nút riêng `POST /projects/{id}/pack/titles-meta` ở Pack Review
 > (tab Title & Thumbnail), không còn tự động chạy khi vào Visual Studio.
+>
+> **Anchor cho VIDEO (`local_wan`) BẬT LẠI theo cách KHÁC (2026-08-23, mục 73
+> IMPLEMENTATION_REPORT.md)** — theo `StudioFlow_Video_Improvement_Plan.md`: KHÁC hẳn
+> Tier 2 cũ ở trên (1 ảnh Thumbnail dùng CHUNG cho mọi shot, gây lệch nội dung riêng
+> từng shot) — `app/render/engine.py::_try_generate_wan_anchor_image()` sinh 1 ảnh
+> anchor RIÊNG cho ĐÚNG shot đang xử lý (cùng prompt/seed/Style LoRA với ảnh shot đó
+> nếu có), dùng làm `start_image` cho Wan2.2. Best-effort — không cấu hình
+> `local_sdxl`/sinh anchor lỗi đều rơi về T2V thuần, không chặn video. Tier 2 CHO ẢNH
+> (img2img trên Thumbnail) VẪN TẮT — thay đổi này chỉ áp dụng cho VIDEO.
+>
+> **Quyết định "KHÔNG dùng IPAdapter" ĐẢO NGƯỢC MỘT PHẦN (2026-08-23, mục 75
+> IMPLEMENTATION_REPORT.md)** — LƯU Ý: đây là quyết định KHÁC hẳn Tier 2/anchor img2img
+> mô tả ở trên (Tier 2 vẫn TẮT, không đụng gì). `image_comfy_sdxl.py` module docstring
+> từng ghi rõ "KHÔNG dùng IPAdapter — custom node cộng đồng, rủi ro lệch tên/version" khi
+> cân nhắc cơ chế nhất quán phong cách giữa các shot. Người dùng phát hiện ảnh sinh bằng
+> local SDXL mang thiên lệch văn hoá Nhật/Hàn (do checkpoint/LoRA "Á Đông" trên Civitai
+> chủ yếu train từ dữ liệu Nhật/Hàn) và đề xuất dùng ảnh tham chiếu thật (tranh cung đình
+> Nguyễn, Đông Hồ, Hàng Trống) để neo phong cách — xác nhận rõ ràng qua `AskUserQuestion`
+> là chấp nhận rủi ro custom node. Lý do kỹ thuật để đảo ngược: IPAdapter điều kiện hoá
+> MODEL (tách phong cách khỏi bố cục, nhận NHIỀU ảnh cùng lúc qua `ImageBatch`) — đúng
+> nhu cầu "neo phong cách văn hoá" hơn hẳn cơ chế img2img/anchor hiện có (chỉ nhận 1 ảnh,
+> để bố cục/màu ảnh gốc ảnh hưởng trực tiếp lên latent, đã CHỨNG MINH gây lỗi ở Tier 2
+> phía trên). Rủi ro custom node được giữ nguyên như lo ngại ban đầu — xử lý bằng
+> fallback: nếu ComfyUI từ chối node IPAdapter (HTTP ≥ 400), tự động thử lại 1 lần KHÔNG
+> có IPAdapter thay vì chặn hẳn sinh ảnh. Tính năng này **CHƯA verify trên ComfyUI+
+> IPAdapter thật** (khác mọi tính năng ComfyUI khác trong dự án, đều đã verify qua GPU
+> thật của người dùng) — xem chi tiết cơ chế + rủi ro ở §8k bên dưới.
 
 Vấn đề người dùng phát hiện lúc test thật: visual giữa các shot lệch phong cách/tông
 màu dù cùng 1 brand. Xử lý theo 2 tầng, cả 2 đều đã build:
@@ -553,7 +580,179 @@ thật content ngắn bị style nhấn chìm). HẰNG SỐ dùng chung mọi k�
 trước) — CHƯA đưa vào BrandProfile theo từng kênh.
 
 **KHÔNG làm đợt này**: train Style LoRA riêng cho kênh (cần hạ tầng train chưa có), IP-
-Adapter (mâu thuẫn quyết định kiến trúc cũ ở §8d).
+Adapter (mâu thuẫn quyết định kiến trúc cũ ở §8d — **đã ĐẢO NGƯỢC một phần ở §8k**, xem
+bên dưới).
+
+## 8j. Cải thiện sinh video local Wan2.2 — Image-to-Video (đã build 2026-08-23)
+
+Theo `StudioFlow_Video_Improvement_Plan.md` (đợt cải thiện video, tiếp nối §8h/§8i vốn
+chỉ áp cho ẢNH). Chi tiết đầy đủ xem IMPLEMENTATION_REPORT.md mục 73.
+
+**Độ phân giải** (`video_comfy_wan.py::_WIDTH/_HEIGHT`): đổi `1280×704` → **`1344×768`**
+— khớp CHÍNH XÁC bucket SDXL (`image_comfy_sdxl.py`), tránh `ImageScale` co/crop ảnh
+anchor bên dưới.
+
+**Image-to-Video** (`app/render/engine.py::_try_generate_wan_anchor_image`): khi
+provider đang thử là `local_wan`, sinh 1 ảnh anchor bằng ĐÚNG provider `local_sdxl`
+(nếu đã cấu hình) — cùng prompt/seed/Style LoRA (§8i) với shot đó — dùng làm
+`start_image` cho Wan2.2 (cơ chế đã có sẵn trong code từ Tier 2, xem §8d, giờ dùng
+theo cách KHÁC: anchor RIÊNG từng shot, không dùng chung 1 thumbnail). Best-effort —
+không cấu hình `local_sdxl`/sinh anchor lỗi đều rơi về text-to-video thuần, không
+chặn video. **KHÔNG giảm `denoise` KSampler** — video cần denoise đủ mọi frame để
+chuyển động mạch lạc, hạ denoise không có lợi ích tốc độ rõ ràng (chi phí vẫn là
+frame×step) mà có rủi ro artifact — I2V ở đây là đòn bẩy CHẤT LƯỢNG, không phải tốc độ.
+
+**Motion prompt riêng** (`_build_video_motion_prompt`): dùng `BrandProfile.motion_tone`
+(§04) làm ràng buộc chuyển động, tách khỏi `visual_style_prompt` (phong cách thị giác
+tĩnh). Nối bằng câu văn đầy đủ (". ") — Wan dùng text encoder UMT5 XXL (kiểu T5, hiểu
+câu tự nhiên tốt hơn CLIP), KHÔNG theo kiểu từ khoá phẩy-ngăn-cách của `for_local_sdxl`.
+
+**Negative prompt** (`_NEGATIVE_PROMPT`) thêm cụm chống lỗi ĐẶC THÙ video diffusion:
+`flickering, morphing, warping face, identity drift between frames, jittery motion`.
+
+**Rút ngắn clip generation** (`_MAX_GENERATE_SECONDS = 4`): số khung THỰC SỰ gửi cho
+Wan bị chặn ở 4s bất kể shot dài hơn — `assembly.py` tự lặp (`-stream_loop -1`) hoặc
+hấp thụ chênh lệch (`_reflow_video_durations`) để lấp đầy đúng thời lượng thật, không
+vỡ đồng bộ audio/giọng đọc.
+
+**Chiến lược "giảm phụ thuộc Wan"**: đề xuất gốc muốn thêm `shot.motion_type` phân loại
+shot cần AI video thật vs shot dùng ảnh tĩnh + chuyển động camera — QUYẾT ĐỊNH KHÔNG
+thêm field mới, vì cơ chế này ĐÃ CÓ SẴN: `Shot.visual_type=image` + `Shot.camera_motion`
+(Ken Burns 2D — `app/render/camera_motion.py`) phục vụ đúng nhu cầu "ảnh tĩnh + chuyển
+động mượt", chỉ cần HƯỚNG DẪN sử dụng đúng thay vì đổi schema (xem `06_uiux.md`/
+`07_prompt_templates.md`).
+
+## 8k. Cultural lock + multi-LoRA + IPAdapter tham chiếu — chống thiên lệch văn hoá Nhật/Hàn (đã build 2026-08-23)
+
+Người dùng phát hiện: ảnh sinh bằng local SDXL (checkpoint painterly + Style LoRA, §8h/
+§8i) mang nét văn hoá Nhật Bản/Hàn Quốc thay vì Việt Nam (mái cong kiểu Nhật, hoạ tiết
+hanbok, gương mặt kiểu anime) dù không hề yêu cầu trong prompt. Nguyên nhân gốc: tuyệt
+đại đa số checkpoint/LoRA phong cách "Á Đông/thuỷ mặc/oriental" trên Civitai train chủ
+yếu từ dữ liệu Nhật (anime, Danbooru, ukiyo-e) và Trung/Hàn (webtoon, hanbok) — bản thân
+`paintersCheckpointOilPaint_v11`/`InkArtXL_1.2` đang dùng mang sẵn thiên lệch này. Chi
+tiết đầy đủ xem IMPLEMENTATION_REPORT.md mục 75, plan gốc
+`partitioned-sauteeing-pillow.md`. Giải quyết theo 3 phần độc lập, cả 3 đều đã build:
+
+**Phần A — Cultural lock trong prompt (áp dụng MỌI provider, rủi ro thấp).**
+`BrandProfile.cultural_lock_positive` (§04, mặc định RỖNG — đặc thù theo từng kênh/thời
+kỳ lịch sử, người dùng tự điền từ khoá Việt cụ thể: trang phục theo triều đại như áo tứ
+thân/áo giao lĩnh/áo nhật bình/khăn mỏ quạ, kiến trúc như mái đình làng Bắc Bộ/ngói âm
+dương/cột gỗ lim, hoạ tiết như hoa văn rồng thời Nguyễn/gạch Bát Tràng) và
+`BrandProfile.cultural_lock_negative` (mặc định KHÔNG rỗng — cụm loại trừ phổ quát cho
+mọi kênh Việt Nam: `japanese kimono, torii gate, korean hanbok, japanese architecture,
+korean architecture, anime style, manga, japanese art style`). `cultural_lock_positive`
+nối vào CẢ prompt local (`for_local_sdxl`) LẪN cloud trong `_build_visual_prompt`/
+`_build_video_motion_prompt` (`engine.py`) — đây là vấn đề ĐÚNG/SAI nội dung văn hoá,
+không phải tối ưu riêng cho model local. `cultural_lock_negative` CHỈ áp dụng được cho
+provider có negative-prompt thật (`local_sdxl`/`local_wan` qua ComfyUI
+`CLIPTextEncode(negative)` — xác nhận qua code: OpenAI/Gemini/Flux KHÔNG có tham số
+negative prompt nào) — KHÔNG nhét câu phủ định vào prompt DƯƠNG cho cloud (bài học mục
+66: câu phủ định trong prompt dương yếu hơn hẳn negative-prompt thật). Cloud chỉ hưởng
+lợi từ phần dương. `image_comfy_sdxl.py`/`video_comfy_wan.py` nhận thêm
+`extra_negative: str = ""`, nối vào `_NEGATIVE_PROMPT` sẵn có khi build node
+`CLIPTextEncode` âm.
+
+**Phần B — Stack nhiều Style LoRA (thay 1 → nhiều, chỉ dùng core `LoraLoader`, rủi ro
+thấp).** `BrandProfile.style_lora_path`/`style_lora_strength` (đơn, §8i) ĐỔI THẲNG (không
+giữ song song — tính năng mới build 1 ngày trước, chưa có dữ liệu thật phụ thuộc cấu
+trúc cũ) thành `style_loras: list[StyleLoraEntry]` với
+`StyleLoraEntry{name: str, strength: float = 0.8}`. `image_comfy_sdxl.py::_add_lora_node`
+(số ít, node `"13"`) đổi thành `_add_lora_nodes` (số nhiều) — CHAIN nhiều node
+`LoraLoader` liên tiếp, node thứ `i` có id `f"13{i}"` (LoRA đầu là `"130"`, KHÁC id `"13"`
+cũ), mỗi node nối `model`/`clip` từ node LoRA TRƯỚC (không phải luôn từ checkpoint `"4"`)
+— vẫn chỉ dùng core node có sẵn, không cần custom node. Ví dụ đúng đề xuất người dùng:
+ClassipeintXL (0.7-0.8, sơn dầu) + 1 LoRA thuỷ mặc Trung Quốc thuần (0.6-0.8, nguồn
+không lẫn Nhật) — LUÔN kết hợp với cultural lock Phần A vì bản thân trigger word gốc của
+các LoRA "an toàn" nhất vẫn thường neo theo chủ thể Trung Quốc, chưa phải Việt Nam.
+
+**Phần C — Ảnh tham chiếu qua IPAdapter (rủi ro cao — custom node cộng đồng, CHƯA verify
+thật).** `BrandProfile.style_reference_paths: list[str]` (nhiều ảnh, lưu
+`channel_dir(id)/style_refs/`) + `style_reference_weight: float = 0.6` (1 trọng số dùng
+chung cả bộ ảnh). Đây là tính năng LIST-based đầu tiên trong BrandProfile assets (khác
+mọi asset khác — logo/intro/bg-music đều 1 file overwrite-in-place) — mỗi ảnh 1 filename
+vĩnh viễn (`_new_id("ref")`), KHÔNG cần cache-bust. 3 endpoint CRUD mới
+(`app/routers/channels.py`): `POST .../style-references/upload` (thêm 1 ảnh vào danh
+sách), `DELETE .../style-references/{filename}`, `GET .../style-references/{filename}`.
+
+**Đảo ngược quyết định kiến trúc**: `image_comfy_sdxl.py` module docstring từng ghi rõ
+"KHÔNG dùng IPAdapter — custom node cộng đồng, rủi ro lệch tên/version" (xem §8d, §8i).
+Người dùng chấp nhận rủi ro này qua `AskUserQuestion` (chọn "IPAdapter (khuyến nghị của
+bạn)") vì lý do đúng: IPAdapter điều kiện hoá MODEL (tách phong cách khỏi bố cục, nhận
+NHIỀU ảnh cùng lúc) — hiệu quả hơn hẳn img2img/anchor hiện có (1 ảnh, bố cục/màu ảnh gốc
+ảnh hưởng trực tiếp lên latent — đã CHỨNG MINH gây lỗi ở Tier 2, §8d). Hàm mới
+`_add_ipadapter_nodes(workflow, *, image_filenames, weight)`: `CLIPVisionLoader`
+(`CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors`, cần tự tải vào
+`ComfyUI/models/clip_vision/`) + `IPAdapterModelLoader`
+(`ip-adapter-plus_sdxl_vit-h.safetensors`, vào `ComfyUI/models/ipadapter/`) + với mỗi ảnh
+1 `LoadImage`, nếu >1 ảnh thì chain `ImageBatch` (core node) gộp thành 1 batch +
+`IPAdapterApply` (weight_type `linear`, `start_at=0`, `end_at=1`) nối vào `model` — ÁP
+SAU LoRA nếu cả 2 cùng dùng (đọc `workflow["3"].inputs.model` hiện có, nên gọi
+`_add_ipadapter_nodes` sau `_add_lora_nodes` tự động chain đúng thứ tự: LoRA khoá "chữ ký
+kỹ thuật" trước, IPAdapter khoá "cảm hứng thị giác" sau). Áp dụng được cho CẢ
+`_build_txt2img_workflow` LẪN `_build_img2img_workflow` (IPAdapter điều kiện hoá model,
+độc lập với img2img seed latent).
+
+**Fallback khi IPAdapter lỗi**: `_generate_locked()` — nếu ComfyUI từ chối job có node
+IPAdapter (HTTP ≥ 400, submit `/prompt`), tự động thử lại NGAY 1 lần KHÔNG có IPAdapter
+(coi như không có ảnh tham chiếu) thay vì chặn hẳn sinh ảnh; nếu lần thử lại cũng lỗi mới
+raise. `engine.py::_local_sdxl_kwargs(brand)` (hàm mới, dùng chung cho cả sinh ảnh và
+sinh anchor cho video §8j) đọc `style_loras`/`cultural_lock_negative`/
+`style_reference_paths`/`style_reference_weight` từ BrandProfile thành kwargs cho
+`local_sdxl.generate()`.
+
+**RỦI RO CHƯA GIẢI QUYẾT — cần người dùng verify thật**: Phần C dùng bộ node
+(`CLIPVisionLoader`/`IPAdapterModelLoader`/`IPAdapterApply` của
+`ComfyUI_IPAdapter_plus`) tương đối ổn định qua các bản nhưng **CHƯA thể verify trên
+ComfyUI+IPAdapter thật** trong môi trường dev — khác MỌI tính năng ComfyUI khác trong dự
+án (đều đã verify qua GPU thật của người dùng). Cần người dùng: (1) cài
+`ComfyUI_IPAdapter_plus`, (2) tải 2 model (CLIP-Vision, IPAdapter SDXL) vào đúng thư mục
+trên, (3) upload vài ảnh tham chiếu thật (tranh cung đình Nguyễn, Đông Hồ, Hàng Trống) ở
+màn Sửa brand profile, (4) sinh thử 1 shot đối chiếu kết quả — nếu ComfyUI báo lỗi
+"node type not found"/tên tham số sai, báo lại NGUYÊN VĂN lỗi để chỉnh đúng tên node
+theo đúng bản đã cài.
+
+**Verify đã làm**: 368 test backend pass (bao gồm 6 test mới cho cultural lock/
+`_local_sdxl_kwargs`, test chain nhiều `LoraLoader` với node id `"130"`/`"131"`, 6 test
+mới cho IPAdapter — `LoadImage`/`ImageBatch`/`IPAdapterApply`/thứ tự sau LoRA/fallback
+HTTP 400), `tsc --noEmit` sạch. KHÔNG/CHƯA verify: hành vi thật của ComfyUI khi chạy
+workflow có IPAdapter (xem rủi ro ở trên).
+
+## 8l. Task "vision"/"embedding" — Channel Asset Vault (mới 2026-08-26)
+
+CHANGE_Semantic_BRoll_Asset_Vault.md §3/§3b — 2 task MỚI, theo ĐÚNG pattern 1 ABC/1 task
+đã có (`VisionProvider`/`EmbeddingProvider`, `app/providers/base.py`), KHÔNG nhét vào
+`LLMProvider`/`LLMMessage` hiện có (đổi `content` từ `str` sang `str | list` để nhét ảnh
+sẽ ảnh hưởng MỌI call site LLM đang có — hook scoring, v.v. — rủi ro không cần thiết).
+
+**Vision (captioning ảnh cho clip B-roll)**:
+- `ollama_vision` (mặc định — đổi 2026-08-26) — máy dev xác nhận THẬT KHÔNG cài LocalAI
+  (port 8080 không có gì lắng nghe), chỉ có Ollama chạy sẵn cho task `llm` (port 11434).
+  Tái dùng ĐÚNG service đó qua shim OpenAI-compat của Ollama (`{base_url}/chat/
+  completions`, cùng format `messages[].content` mảng OpenAI-vision) thay vì bắt cài
+  thêm 1 service mới — **đã verify thật** qua `curl` trực tiếp: model `moondream`
+  (~1.7GB, `ollama pull moondream`) trả về caption hợp lệ. Dùng chung `gpu_lock` với
+  `local_openai_compat.py` (cùng tiến trình Ollama/GPU).
+- `localai_vision` — giữ lại cho người dùng nào CÓ cài LocalAI riêng (provider thay thế
+  được, CLAUDE.md nguyên tắc #4) — gọi CHUNG endpoint `/v1/chat/completions` với LLM
+  thường qua LocalAI (đã xác nhận qua tài liệu chính thức
+  localai.io/docs/features/gpt-vision/). Model mặc định `moondream2` (~2-4GB VRAM) —
+  Qwen2.5-VL 7B (~12GB, đề xuất gốc change-spec) vẫn dùng được khi VRAM cho phép (đổi
+  Model trong Cài đặt), theo chiến lược "2 tầng" change-spec §3b đề xuất.
+- `gemini_vision` — tuỳ chọn cloud, không tốn VRAM, chất lượng cao hơn, có chi phí.
+
+**Embedding (vector cho semantic matching)**:
+- `ollama_embedding` (mặc định — đổi 2026-08-26) — cùng lý do trên, `POST
+  {base_url}/embeddings` qua Ollama, model `nomic-embed-text` (~274MB, `ollama pull
+  nomic-embed-text`) — **đã verify thật** qua `curl`, trả về vector 768 chiều hợp lệ.
+- `localai_embedding` — giữ lại cho người dùng có LocalAI riêng — `POST
+  {base_url}/v1/embeddings`, tự dự phòng sang `POST {base_url}/embeddings` nếu bản đầu
+  trả 404 (tài liệu chính thức ghi endpoint KHÔNG có tiền tố `/v1` — CHƯA verify 100%
+  với bản LocalAI thật của người dùng, đúng bài học mục 77 về endpoint `/video`). Model
+  mặc định `all-MiniLM-L6-v2`.
+
+Cả `ollama_*` và `localai_*` đều `connection_type="local_endpoint"` (base_url+model_name,
+không api_key) — dùng CHUNG nhánh `_build_asset_provider` (`factory.py`) đã xử lý cho
+`local_sdxl`/`local_wan`/`localai_image`/`localai_video`, không thêm nhánh riêng.
 
 ## 9. Ràng buộc MVP
 

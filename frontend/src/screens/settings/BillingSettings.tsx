@@ -111,6 +111,7 @@ function BillingDetail({ channelId, channelName, onBack }: { channelId: string; 
       ) : rows.length === 0 ? (
         <div style={{ opacity: 0.6, fontSize: 13 }}>Chưa có lệnh gọi AI nào ghi nhận chi phí cho kênh này.</div>
       ) : (
+        <div style={{ overflowX: "auto" }}>
         <table className="table" style={{ marginBottom: "var(--space-2)" }}>
           <thead>
             <tr>
@@ -151,6 +152,7 @@ function BillingDetail({ channelId, channelName, onBack }: { channelId: string; 
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );

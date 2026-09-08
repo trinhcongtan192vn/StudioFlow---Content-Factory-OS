@@ -16,8 +16,12 @@ interface Draft {
   maxAnchorGapSec: string;
   targetBodyLenMin: string;
   visualStylePrompt: string;
-  styleLoraPath: string;
-  styleLoraStrength: string;
+  culturalLockPositive: string;
+  culturalLockNegative: string;
+  motionTone: string;
+  styleLoras: { name: string; strength: string }[];
+  styleReferencePaths: string[];
+  styleReferenceWeight: string;
   logoPath: string;
   voiceCloneRefPath: string;
   introVideoPath: string;
@@ -40,8 +44,12 @@ function emptyDraft(): Draft {
     maxAnchorGapSec: "45",
     targetBodyLenMin: "8",
     visualStylePrompt: "",
-    styleLoraPath: "",
-    styleLoraStrength: "0.8",
+    culturalLockPositive: "",
+    culturalLockNegative: "",
+    motionTone: "",
+    styleLoras: [],
+    styleReferencePaths: [],
+    styleReferenceWeight: "0.6",
     logoPath: "",
     voiceCloneRefPath: "",
     introVideoPath: "",
@@ -65,8 +73,18 @@ function draftFromProfile(name: string, niche: string, bp: BrandProfile): Draft 
     maxAnchorGapSec: String(bp.retention_benchmark?.max_anchor_gap_sec ?? 45),
     targetBodyLenMin: String(bp.retention_benchmark?.target_body_len_min ?? 8),
     visualStylePrompt: bp.visual_style_prompt || "",
-    styleLoraPath: bp.style_lora_path || "",
-    styleLoraStrength: String(bp.style_lora_strength ?? 0.8),
+    culturalLockPositive: bp.cultural_lock_positive || "",
+    // Bug thật (2026-09-02, user báo xoá trắng field rồi lưu — mở lại vẫn còn giá trị) —
+    // TỪNG dùng `|| "<gợi ý mặc định>"` ở đây, khiến chuỗi rỗng THẬT SỰ đã lưu (falsy)
+    // không phân biệt được với "chưa từng có giá trị" — form lại tự điền gợi ý cũ, TRÔNG
+    // như chưa lưu được dù backend đã lưu đúng chuỗi rỗng. Đổi về `|| ""` (khớp mọi field
+    // khác trong hàm này) — gợi ý cũ chuyển thành PLACEHOLDER (chỉ hiện mờ, không phải giá
+    // trị thật) ở JSX bên dưới.
+    culturalLockNegative: bp.cultural_lock_negative || "",
+    motionTone: bp.motion_tone || "",
+    styleLoras: (bp.style_loras || []).map((l) => ({ name: l.name, strength: String(l.strength ?? 0.8) })),
+    styleReferencePaths: bp.style_reference_paths || [],
+    styleReferenceWeight: String(bp.style_reference_weight ?? 0.6),
     logoPath: bp.logo_path || "",
     voiceCloneRefPath: bp.voice_clone_ref_path || "",
     introVideoPath: bp.intro_video_path || "",
@@ -275,6 +293,51 @@ export default function ChannelDialog({ mode, channelId, onClose, onSaved }: { m
     }
   }
 
+  // Ảnh tham chiếu phong cách — mới (2026-08-23), làm lại đợt 2 (2026-08-25): đợt đầu
+  // dùng IPAdapter (nhiều ảnh, chưa từng verify) — đợt 2 chuyển sang img2img qua LocalAI
+  // (`image_localai.py`), CHỈ nhận 1 ảnh/lần. UI giờ đơn giản hơn hẳn (1 ô ảnh thay
+  // gallery nhiều ảnh) — upload ảnh mới TỰ XOÁ ảnh cũ trước (backend endpoint không đổi,
+  // vẫn nhận list — frontend tự đảm bảo tối đa 1 phần tử).
+  const [uploadingStyleRef, setUploadingStyleRef] = useState(false);
+  const [styleRefError, setStyleRefError] = useState<string | null>(null);
+  const styleRefFileRef = useRef<HTMLInputElement | null>(null);
+
+  async function uploadStyleReference(file: File) {
+    if (!channelId) return;
+    setUploadingStyleRef(true);
+    setStyleRefError(null);
+    try {
+      // Xoá ảnh cũ (nếu có) TRƯỚC khi upload ảnh mới — giữ đúng bất biến "tối đa 1 ảnh"
+      // (img2img LocalAI chỉ dùng ảnh đầu tiên, giữ nhiều ảnh chỉ gây nhầm lẫn UI).
+      for (const path of draft.styleReferencePaths) {
+        const filename = path.split(/[\\/]/).pop() || "";
+        if (filename) await api.deleteStyleReference(channelId, filename);
+      }
+      const result = await api.uploadStyleReference(channelId, file);
+      set("styleReferencePaths", result.style_reference_paths || []);
+    } catch (e) {
+      setStyleRefError(e instanceof ApiError ? e.message : "Có lỗi khi upload ảnh tham chiếu.");
+    } finally {
+      setUploadingStyleRef(false);
+      if (styleRefFileRef.current) styleRefFileRef.current.value = "";
+    }
+  }
+
+  async function removeStyleReference(path: string) {
+    if (!channelId) return;
+    setUploadingStyleRef(true);
+    setStyleRefError(null);
+    try {
+      const filename = path.split(/[\\/]/).pop() || "";
+      const updated = await api.deleteStyleReference(channelId, filename);
+      set("styleReferencePaths", updated.style_reference_paths || []);
+    } catch (e) {
+      setStyleRefError(e instanceof ApiError ? e.message : "Có lỗi khi xoá ảnh tham chiếu.");
+    } finally {
+      setUploadingStyleRef(false);
+    }
+  }
+
   useEffect(() => {
     if (mode === "edit" && channelId) {
       api.getChannel(channelId).then((ch) => {
@@ -311,8 +374,12 @@ export default function ChannelDialog({ mode, channelId, onClose, onSaved }: { m
         content_pillars: pillars.map((name) => ({ name, weight: pillars.length ? Math.round((1 / pillars.length) * 100) / 100 : 0 })),
         forbidden: taboos,
         visual_style_prompt: draft.visualStylePrompt,
-        style_lora_path: draft.styleLoraPath.trim(),
-        style_lora_strength: parseFloat(draft.styleLoraStrength) || 0.8,
+        cultural_lock_positive: draft.culturalLockPositive.trim(),
+        cultural_lock_negative: draft.culturalLockNegative.trim(),
+        motion_tone: draft.motionTone.trim(),
+        style_loras: draft.styleLoras.filter((l) => l.name.trim()).map((l) => ({ name: l.name.trim(), strength: parseFloat(l.strength) || 0.8 })),
+        style_reference_paths: draft.styleReferencePaths,
+        style_reference_weight: parseFloat(draft.styleReferenceWeight) || 0.6,
         logo_path: draft.logoPath,
         voice_clone_ref_path: draft.voiceCloneRefPath,
         intro_video_path: draft.introVideoPath,
@@ -371,15 +438,129 @@ export default function ChannelDialog({ mode, channelId, onClose, onSaved }: { m
               <input className="input" value={draft.visualStylePrompt} onChange={(e) => set("visualStylePrompt", e.target.value)} placeholder="archival tone, muted sepia" />
             </div>
             <div className="field">
-              <label>Style LoRA cho ảnh local SDXL (tuỳ chọn)</label>
+              <label>Tông chuyển động video AI local (motion_tone)</label>
+              <input className="input" value={draft.motionTone} onChange={(e) => set("motionTone", e.target.value)} placeholder="chuyển động chậm, tinh tế, không giật gân" />
+              <span style={{ fontSize: 11.5, opacity: 0.6 }}>Chỉ áp dụng cho video AI sinh bằng model local (Wan2.2) — không áp dụng cho provider cloud (Sora/Veo/Flux).</span>
+            </div>
+            {/* Cultural lock — mới (2026-08-23), theo yêu cầu người dùng: checkpoint/LoRA
+                phong cách "Á Đông" tuyệt đại đa số train từ dữ liệu Nhật/Trung/Hàn — ảnh
+                sinh ra dễ mang nét Nhật/Hàn dù không yêu cầu. 2 field này ép rõ hướng
+                văn hoá Việt Nam. */}
+            <div className="field">
+              <label>Từ khoá văn hoá Việt Nam (bắt buộc xuất hiện)</label>
+              <textarea
+                className="input"
+                rows={2}
+                value={draft.culturalLockPositive}
+                onChange={(e) => set("culturalLockPositive", e.target.value)}
+                placeholder="áo tứ thân, áo giao lĩnh, khăn mỏ quạ, mái đình làng Bắc Bộ, ngói âm dương, hoạ tiết rồng thời Nguyễn..."
+              />
+              <span style={{ fontSize: 11.5, opacity: 0.6 }}>Ghi cụ thể theo đúng triều đại/bối cảnh video (trang phục, kiến trúc, hoạ tiết) — áp dụng cho MỌI provider (cloud lẫn local).</span>
+            </div>
+            <div className="field">
+              <label>Loại trừ văn hoá ngoại lai (negative prompt)</label>
+              <textarea
+                className="input"
+                rows={2}
+                value={draft.culturalLockNegative}
+                onChange={(e) => set("culturalLockNegative", e.target.value)}
+                placeholder="japanese kimono, torii gate, korean hanbok, japanese architecture, korean architecture, anime style, manga, japanese art style"
+              />
+              <span style={{ fontSize: 11.5, opacity: 0.6 }}>Chỉ có tác dụng đầy đủ với ảnh/video AI sinh bằng model LOCAL (SDXL/Wan2.2) — provider cloud không hỗ trợ negative prompt.</span>
+            </div>
+            <div className="field">
+              <label>Style LoRA cho ảnh local SDXL (tuỳ chọn, có thể chọn nhiều)</label>
               <div style={{ fontSize: 11.5, opacity: 0.65, marginBottom: 6 }}>
-                Chỉ áp dụng khi provider ảnh là "ComfyUI SDXL (local GPU)" — khoá phong cách nhất quán hơn chỉ dùng prompt. Danh sách lấy từ ComfyUI đang chạy — để "Không dùng" nếu không cần LoRA.
+                Chỉ áp dụng khi provider ảnh là "ComfyUI SDXL (local GPU)". Xếp chồng 2-3 LoRA (VD 1 LoRA chất liệu + 1 LoRA hướng văn hoá) ở mức 0.5-0.8 mỗi cái thường cho kết quả tốt hơn 1 LoRA đơn.
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 100px", gap: 8 }}>
-                <ComfyModelSelect kind="loras" value={draft.styleLoraPath} baseUrl="" onChange={(v) => set("styleLoraPath", v)} emptyLabel="— Không dùng —" />
-                <input className="input" type="number" min={0} max={2} step={0.05} value={draft.styleLoraStrength} onChange={(e) => set("styleLoraStrength", e.target.value)} title="Trọng số áp dụng (0.7-0.8 vừa phải, 1.0+ mạnh hơn)" />
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {draft.styleLoras.map((lora, i) => (
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 90px 32px", gap: 8 }}>
+                    <ComfyModelSelect
+                      kind="loras"
+                      value={lora.name}
+                      baseUrl=""
+                      onChange={(v) => set("styleLoras", draft.styleLoras.map((l, j) => (j === i ? { ...l, name: v } : l)))}
+                      emptyLabel="— Chọn LoRA —"
+                    />
+                    <input
+                      className="input"
+                      type="number"
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      value={lora.strength}
+                      onChange={(e) => set("styleLoras", draft.styleLoras.map((l, j) => (j === i ? { ...l, strength: e.target.value } : l)))}
+                      title="Trọng số áp dụng (0.5-0.8 vừa phải, 1.0+ mạnh hơn)"
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-icon btn-secondary"
+                      title="Bỏ LoRA này"
+                      onClick={() => set("styleLoras", draft.styleLoras.filter((_, j) => j !== i))}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+                <button type="button" className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 10px", alignSelf: "flex-start" }} onClick={() => set("styleLoras", [...draft.styleLoras, { name: "", strength: "0.8" }])}>
+                  + Thêm LoRA
+                </button>
               </div>
             </div>
+            {mode === "edit" && (
+              <div className="field">
+                <label>Ảnh tham chiếu phong cách (tuỳ chọn)</label>
+                <div style={{ fontSize: 11.5, opacity: 0.65, marginBottom: 6 }}>
+                  Cho model xem 1 ảnh thật (tranh cung đình/tư liệu bảo tàng/Đông Hồ/Hàng Trống) để neo đúng thị giác Việt Nam — hiệu quả hơn chỉ dùng chữ. Qua img2img (LocalAI) — <strong>chỉ nhận 1 ảnh</strong>, upload ảnh mới sẽ thay ảnh cũ. Nếu ảnh tham chiếu nhiều chi tiết đồ hoạ, ảnh sinh ra có thể bị "copy" nguyên khung/chữ thay vì chỉ mượn phong cách — thử giảm thanh trượt bên dưới hoặc bỏ hẳn nếu gặp vấn đề này.
+                </div>
+                {draft.styleReferencePaths.length > 0 ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <img
+                      src={api.styleReferenceUrl(channelId!, draft.styleReferencePaths[0].split(/[\\/]/).pop() || "")}
+                      alt="Ảnh tham chiếu phong cách"
+                      style={{ width: 72, height: 72, objectFit: "cover", borderRadius: "var(--radius-sm)", flex: "none" }}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ fontSize: 12, padding: "5px 8px", flex: "none" }}
+                      onClick={() => removeStyleReference(draft.styleReferencePaths[0])}
+                      disabled={uploadingStyleRef}
+                    >
+                      {uploadingStyleRef ? "Đang xoá..." : "Xoá"}
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input
+                      ref={styleRefFileRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      style={{ display: "none" }}
+                      disabled={uploadingStyleRef}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) uploadStyleReference(f);
+                      }}
+                    />
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 8px" }} onClick={() => styleRefFileRef.current?.click()} disabled={uploadingStyleRef}>
+                      {uploadingStyleRef ? "Đang tải lên..." : "Upload ảnh tham chiếu"}
+                    </button>
+                  </div>
+                )}
+                {styleRefError && <div style={{ fontSize: 11.5, color: "var(--color-danger)", marginTop: 4 }}>{styleRefError}</div>}
+                {draft.styleReferencePaths.length > 0 && (
+                  <div style={{ marginTop: 8, maxWidth: 320 }}>
+                    <label style={{ fontSize: 11 }}>Mức giữ phong cách ảnh tham chiếu ({Math.round((parseFloat(draft.styleReferenceWeight) || 0.6) * 100)}%)</label>
+                    <input type="range" min={0} max={1} step={0.05} value={draft.styleReferenceWeight} onChange={(e) => set("styleReferenceWeight", e.target.value)} style={{ width: "100%" }} />
+                  </div>
+                )}
+              </div>
+            )}
             {mode === "edit" && (
               <div className="field">
                 <label>Logo kênh</label>

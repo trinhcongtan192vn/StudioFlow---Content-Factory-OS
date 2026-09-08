@@ -23,17 +23,22 @@ function formatDuration(sec: number): string {
 
 /** Render Studio — CHỈ còn bước ghép video (ffmpeg). Sinh asset (ảnh/video/giọng đọc)
  * đã chuyển sang Visual Studio (bước ④, trước Gate #2) — nơi người dùng sinh + duyệt
- * từng shot trực tiếp. Màn này đọc lại đúng trạng thái đã duyệt đó (`render.json`,
- * qua GET /render/status) và chỉ cho ghép khi mọi shot đã `visual_status=="ready"` +
- * `approved`. Nhúng trong Output Center (thẻ "Render in-app"), không phải step
- * Stepper riêng — khớp specs/06_uiux.md §7.
+ * từng shot trực tiếp. Màn này đọc lại đúng trạng thái đó (`render.json`, qua GET
+ * /render/status) và chỉ cho ghép khi mọi shot đã `visual_status=="ready"` (không còn
+ * gate theo `approved` — bỏ 2026-09-02, theo yêu cầu người dùng: bỏ luồng duyệt block,
+ * không cần duyệt mới ghép được). Nhúng THẲNG trong Output Center — **đổi (2026-08-26), theo yêu cầu người
+ * dùng**: trước đây núp sau nút "Mở Render Studio" (che bằng `renderOpen` state, xem
+ * lịch sử component), giờ hiển thị NGAY khi vào Output Center, không cần thêm 1 bước
+ * bấm để thấy — đây vốn đã là đường xuất video CHÍNH (duy nhất còn lại sau khi bỏ
+ * "Output A"), không có lý do gì phải ẩn sau 1 entry point riêng nữa.
  *
  * Cấu hình export (độ phân giải/codec/chất lượng, giống hộp thoại export phần mềm edit
  * video) + thanh tiến trình (theo segment, kèm ước lượng thời gian còn lại) — thêm
  * theo yêu cầu người dùng, xem app/render/assembly.py cho phần backend tương ứng. */
-export default function RenderStudio({ project, onClose }: { project: ProjectSummary; pack: ProductionPack; onClose: () => void }) {
+export default function RenderStudio({ project }: { project: ProjectSummary; pack: ProductionPack }) {
   const [state, setState] = useState<RenderState | null>(null);
   const [assembling, setAssembling] = useState(false);
+  const [resettingStuck, setResettingStuck] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<AssembleConfig>({ resolution: "1080p", codec: "h264", quality: "medium", use_gpu: false });
   // Trạng thái NVENC thật của máy — không chỉ tra `ffmpeg -encoders`, vì encoder có thể
@@ -65,6 +70,18 @@ export default function RenderStudio({ project, onClose }: { project: ProjectSum
     api.getGpuEncodeStatus().then(setGpuEncode, () => setGpuEncode({ available: false, message: "Không kiểm tra được GPU encode." }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
+
+  // Mặc định TICK sẵn "Mã hoá bằng GPU (NVENC)" khi máy dùng được — **mới (2026-08-26)**,
+  // theo yêu cầu người dùng: trước đây `use_gpu` khởi tạo `false` cố định, người dùng
+  // phải tự tick mỗi lần dù máy luôn hỗ trợ GPU. Chỉ tự bật MỘT LẦN khi `gpuEncode` xác
+  // nhận `available` — không đè lên lựa chọn người dùng tự tắt sau đó (không phụ thuộc
+  // lại `gpuEncode` trong deps, chỉ chạy lại khi chính `gpuEncode` đổi giá trị lần đầu).
+  useEffect(() => {
+    if (gpuEncode?.available) {
+      setConfig((c) => (c.codec === "vp9" ? c : { ...c, use_gpu: true }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gpuEncode]);
 
   const isAssembling = state?.assembly_status === "assembling";
 
@@ -112,28 +129,71 @@ export default function RenderStudio({ project, onClose }: { project: ProjectSum
     }
   }
 
+  // "Đặt lại tiến trình bị treo" — **mới (2026-09-02, mục 111)**, theo yêu cầu người
+  // dùng ("giải pháp để xử lý ở tầng UI cho user biết và làm"): bug thật gặp — 1 project
+  // dài bị kẹt "assembling" mãi mãi vì thread ghép chết lặng giữa chừng, phải nhờ sửa
+  // tay render.json mới bấm ghép lại được. Nút này gọi endpoint mới `render/assemble/
+  // reset` — backend tự chối (409) nếu tiến trình vẫn đang chạy THẬT (không phải kẹt),
+  // nên bấm nhầm lúc đang chạy bình thường không phá gì cả, chỉ báo lỗi rõ ràng.
+  async function resetStuck() {
+    setResettingStuck(true);
+    setError(null);
+    try {
+      setState(await api.resetStuckAssembly(project.id));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi đặt lại tiến trình.");
+    } finally {
+      setResettingStuck(false);
+    }
+  }
+
   const shots = state?.shots || [];
   const readyCount = shots.filter((s) => s.visual_status === "ready").length;
-  const approvedCount = shots.filter((s) => s.visual_status === "ready" && s.approved).length;
-  const allApproved = shots.length > 0 && approvedCount === shots.length;
+  // Không còn gate theo `approved` (2026-09-02, theo yêu cầu người dùng — bỏ luồng duyệt
+  // block, chỉ cần visual "ready" là ghép được). Shot KHÔNG có visual riêng vẫn tính là
+  // "sẵn sàng" nếu project có video nền chung (BackgroundVideoCard, Visual Studio) — khớp
+  // đúng điều kiện `assembly.py` Pass 1 đang cho phép.
+  const hasBackgroundVideo = !!state?.background_video?.asset_paths?.length;
+  const notReadyCount = shots.filter((s) => s.visual_status !== "ready" && !(hasBackgroundVideo && !s.visual_asset_path)).length;
+  const canAssemble = shots.length > 0 && notReadyCount === 0;
+
+  // Bug thật người dùng báo (2026-08-23): ảnh hiện ở Visual Studio khác ảnh trong video
+  // đã ghép — nguyên nhân là sinh lại ảnh/giọng đọc SAU lần ghép cuối, video cũ không tự
+  // cập nhật (đúng theo thiết kế — ghép là hành động rõ ràng người dùng tự bấm, không tự
+  // chạy ngầm), nhưng KHÔNG có gì báo cho người dùng biết video đang xem đã lệch so với
+  // asset mới nhất. So `assembly_completed_at` (set lúc ghép xong, §04) với
+  // `visual_updated_at`/`narration_updated_at` từng shot (set lúc sinh/upload xong — 2
+  // field mới cùng đợt) để phát hiện + cảnh báo rõ.
+  const staleShotIds = state?.assembly_completed_at
+    ? shots
+        .filter((s) => {
+          const completedAt = new Date(state.assembly_completed_at as string).getTime();
+          const visualNewer = !!s.visual_updated_at && new Date(s.visual_updated_at).getTime() > completedAt;
+          const narrationNewer = !!s.narration_updated_at && new Date(s.narration_updated_at).getTime() > completedAt;
+          return visualNewer || narrationNewer;
+        })
+        .map((s) => s.shot_id)
+    : [];
 
   const progress = state?.assembly_progress;
   const progressPct = progress && progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
   const elapsedSec = state?.assembly_started_at ? Math.max(0, (nowTick - new Date(state.assembly_started_at).getTime()) / 1000) : 0;
-  const remainingSec = progress && progress.current > 0 && progress.stage === "segments" ? (elapsedSec / progress.current) * (progress.total - progress.current) : null;
+  // Ước lượng "còn lại" PHẢI tính theo thời gian trôi từ khi STAGE HIỆN TẠI bắt đầu
+  // (`stage_started_at`, mới 2026-09-02, mục 108), KHÔNG PHẢI từ lúc cả assembly bắt đầu
+  // (`elapsedSec` ở trên) — project có dùng video nền chung sẽ chạy bước dựng video nền
+  // (stage "background_video", có thể mất vài phút với video dài) TRƯỚC stage "segments";
+  // gộp chung elapsed sẽ làm thời gian trung bình/segment bị thổi phồng sai lệch ngay ở
+  // segment đầu tiên tính xong.
+  const stageElapsedSec = progress?.stage_started_at ? Math.max(0, (nowTick - new Date(progress.stage_started_at).getTime()) / 1000) : elapsedSec;
+  const remainingSec = progress && progress.current > 0 && progress.stage === "segments" ? (stageElapsedSec / progress.current) * (progress.total - progress.current) : null;
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "var(--space-4)" }}>
-        <div>
-          <h3 style={{ marginBottom: 2 }}>Render Studio — Ghép video</h3>
-          <p style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)", fontSize: 13 }}>
-            Ghép asset đã sinh &amp; duyệt ở Visual Studio thành 1 video hoàn chỉnh.
-          </p>
-        </div>
-        <button className="btn btn-secondary" onClick={onClose}>
-          ← Quay lại
-        </button>
+      <div style={{ marginBottom: "var(--space-4)" }}>
+        <h3 style={{ marginBottom: 2 }}>Render Studio — Ghép video</h3>
+        <p style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)", fontSize: 13 }}>
+          Ghép asset đã sinh ở Visual Studio thành 1 video hoàn chỉnh.
+        </p>
       </div>
 
       {error && (
@@ -150,11 +210,22 @@ export default function RenderStudio({ project, onClose }: { project: ProjectSum
         <div className="card elev-sm" style={{ gap: "var(--space-2)", maxWidth: 640, marginBottom: "var(--space-4)" }}>
           <div className="card-kicker">Tình trạng shot</div>
           <div style={{ fontSize: 13 }}>
-            {readyCount}/{shots.length} shot đã sinh xong visual · <strong>{approvedCount}/{shots.length} đã duyệt</strong>
+            <strong>{readyCount}/{shots.length} shot đã sinh xong visual</strong>
           </div>
-          {!allApproved && (
-            <div style={{ fontSize: 11.5, opacity: 0.65 }}>Cần sinh xong + bấm "Duyệt" cho MỌI shot ở Visual Studio trước khi ghép được.</div>
+          {!canAssemble && (
+            <div style={{ fontSize: 11.5, opacity: 0.65 }}>Cần sinh xong visual cho MỌI shot ở Visual Studio trước khi ghép được{hasBackgroundVideo ? " (trừ shot dùng video nền chung)" : ""}.</div>
           )}
+        </div>
+      )}
+
+      {state?.assembly_status === "done" && staleShotIds.length > 0 && (
+        <div
+          style={{
+            fontSize: 12.5, color: "var(--color-warning)", background: "color-mix(in srgb, var(--color-warning) 12%, transparent)",
+            borderRadius: "var(--radius-sm)", padding: "8px 10px", marginBottom: "var(--space-3)", maxWidth: 640,
+          }}
+        >
+          ⚠ Video bên dưới KHÔNG còn khớp — shot {staleShotIds.join(", ")} đã sinh lại ảnh/video/giọng đọc SAU lần ghép gần nhất. Bấm "Ghép lại" để cập nhật video theo đúng asset mới nhất.
         </div>
       )}
 
@@ -188,7 +259,11 @@ export default function RenderStudio({ project, onClose }: { project: ProjectSum
       ) : isAssembling ? (
         <div className="card elev-sm" style={{ gap: "var(--space-2)", maxWidth: 640 }}>
           <div className="card-title">
-            {progress?.stage === "concat" ? "Đang ghép nối các cảnh lại..." : `Đang ghép cảnh ${progress?.current ?? 0}/${progress?.total ?? "?"}...`}
+            {progress?.stage === "background_video"
+              ? `Đang dựng video nền chung (${progress.current}/${progress.total})... — video dài có thể mất vài phút`
+              : progress?.stage === "concat"
+              ? "Đang ghép nối các cảnh lại..."
+              : `Đang ghép cảnh ${progress?.current ?? 0}/${progress?.total ?? "?"}...`}
           </div>
           <div style={{ height: 8, borderRadius: 999, background: "var(--color-neutral-800)", overflow: "hidden" }}>
             <div
@@ -201,6 +276,23 @@ export default function RenderStudio({ project, onClose }: { project: ProjectSum
           <div style={{ fontSize: 12, opacity: 0.75, display: "flex", justifyContent: "space-between" }}>
             <span>Đã chạy: {formatDuration(elapsedSec)}</span>
             <span>{remainingSec !== null ? `Còn khoảng: ${formatDuration(remainingSec)}` : "Đang ước lượng..."}</span>
+          </div>
+          {/* "Đặt lại tiến trình bị treo" — mới (2026-09-02, mục 111). LUÔN hiện (không
+              đợi 1 ngưỡng thời gian cố định) — bước "background_video" với video dài có
+              thể mất rất lâu MÀ VẪN đang chạy bình thường (số 0/N không nhúc nhích SUỐT
+              bước đó là chuyện thật, không phải dấu hiệu treo — xem mục 108), nên không
+              có ngưỡng "bao lâu là treo" đáng tin cậy để tự động cảnh báo mà không báo
+              nhầm. Thay vào đó: LUÔN cho người dùng quyền tự quyết ngay khi họ nghi ngờ,
+              gợi ý rõ SAU 5 phút, backend tự chối (409) nếu tiến trình vẫn đang chạy thật. */}
+          <div style={{ fontSize: 11.5, opacity: 0.65, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+            <span>
+              {elapsedSec > 300
+                ? "Đã chạy khá lâu — nếu nghi ngờ bị treo (không nhúc nhích dù đợi thêm), bạn có thể đặt lại."
+                : "Nghi ngờ bị treo?"}
+            </span>
+            <button className="btn btn-secondary" style={{ fontSize: 11, padding: "3px 8px" }} onClick={resetStuck} disabled={resettingStuck}>
+              {resettingStuck ? "Đang đặt lại..." : "Đặt lại tiến trình bị treo"}
+            </button>
           </div>
         </div>
       ) : (
@@ -265,7 +357,7 @@ export default function RenderStudio({ project, onClose }: { project: ProjectSum
               )}
             </label>
           )}
-          <button className="btn btn-primary" onClick={assemble} disabled={!allApproved || assembling}>
+          <button className="btn btn-primary" onClick={assemble} disabled={!canAssemble || assembling}>
             {assembling ? "Đang bắt đầu..." : "Ghép video"}
           </button>
         </div>

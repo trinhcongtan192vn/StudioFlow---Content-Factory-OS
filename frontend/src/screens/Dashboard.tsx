@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { ProjectSummary } from "../api/types";
 import ChannelDialog from "../components/ChannelDialog";
+import LocalServicesPanel from "../components/LocalServicesPanel";
 import { STATUS_LABEL, STATUS_DOT_COLOR, STEP_LABELS } from "../components/statusMeta";
 import { useApp } from "../store/AppContext";
 
@@ -24,7 +25,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div style={{ flex: 1, overflowY: "auto", padding: "var(--space-8)" }}>
+    <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "var(--space-8)" }}>
       <h2 style={{ marginBottom: 2 }}>Dashboard kênh</h2>
       <p style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)", fontSize: 13, marginBottom: "var(--space-6)" }}>Một cái nhìn biết ngay kênh nào đang tắc.</p>
 
@@ -83,6 +84,7 @@ export default function Dashboard() {
       {selected && (
         <div>
           <h4 style={{ marginBottom: "var(--space-3)" }}>Dự án — {app.channels.find((c) => c.id === selected)?.name}</h4>
+          <div style={{ overflowX: "auto" }}>
           <table className="table">
             <thead>
               <tr>
@@ -140,8 +142,11 @@ export default function Dashboard() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
+
+      <LocalServicesPanel />
 
       {editingChannelId && (
         <ChannelDialog

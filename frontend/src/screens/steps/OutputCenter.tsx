@@ -1,85 +1,291 @@
-import { useEffect, useState } from "react";
-import { api } from "../../api/client";
-import type { RetentionOut } from "../../api/types";
+import { useEffect, useRef, useState } from "react";
+import { api, ApiError } from "../../api/client";
+import type { ProductionPack, ProjectSummary, RetentionOut } from "../../api/types";
+import AddToLibraryButton from "../../components/AddToLibraryButton";
+import Lightbox, { ExpandButton } from "../../components/Lightbox";
+import LibraryPicker from "../../components/LibraryPicker";
+import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 import RenderStudio from "./RenderStudio";
 
-export default function OutputCenter({ project, pack }: StepProps) {
-  const [exporting, setExporting] = useState(false);
-  const [files, setFiles] = useState<{ format: string; filename: string }[]>([]);
-  const [renderOpen, setRenderOpen] = useState(false);
+// **Đổi (2026-08-26), theo yêu cầu người dùng**: bỏ hẳn "Output A" (export spec/prompts
+// dạng markdown/JSON máy đọc — ít dùng thực tế, đã có JSON pack.json sẵn trên đĩa cho ai
+// cần đọc trực tiếp). "Output B" (Render in-app) không còn núp sau nút "Mở Render
+// Studio" nữa — hiển thị THẲNG (xem RenderStudio.tsx). Thêm mới "Xuất Pack": đóng gói
+// TOÀN BỘ nội dung video (transcript SRT, asset ảnh/video từng shot, giọng đọc ghép full,
+// video đã ghép nếu có) ra 1 folder trên máy local người dùng tự chọn — xem
+// app/render/pack_export.py cho phần backend.
+export default function OutputCenter({ project, pack, refresh }: StepProps) {
+  return (
+    <div>
+      {/* Đổi (2026-08-23, theo đề xuất rà soát UX) — trước đây tự viết <h3>/<p> riêng,
+          KHÔNG dùng chung StepHeader như 3 màn kia (Brief/Script Studio/Visual Studio),
+          khiến "phong cách trang" đổi khác không lý do ở đúng màn cuối cùng của luồng. */}
+      <StepHeader title="Output Center" description="Ghép video &amp; xuất toàn bộ nội dung ra máy local." />
 
-  async function doExport(format: "json" | "markdown" | "pdf") {
-    setExporting(true);
+      {/* Thẻ Thumbnail — chuyển từ Visual Studio sang ĐẦU Output Center (2026-09-02, theo
+          yêu cầu người dùng: thumbnail chỉ dùng lúc xuất video lên YouTube, thuộc bước
+          Output hơn là Visual Studio — không đụng gì tới sinh ảnh/video từng shot). */}
+      <div style={{ marginBottom: "var(--space-6)" }}>
+        <ThumbnailCard project={project} pack={pack} refresh={refresh} />
+      </div>
+
+      <div style={{ marginBottom: "var(--space-6)" }}>
+        <PackExportCard projectId={project.id} hasShots={(pack.shots || []).length > 0} />
+      </div>
+
+      <div style={{ marginBottom: "var(--space-6)" }}>
+        <RenderStudio project={project} pack={pack} />
+      </div>
+
+      <RetentionCard projectId={project.id} />
+    </div>
+  );
+}
+
+/** Thẻ Thumbnail — chuyển từ Pack Review sang Visual Studio (2026-08-16), rồi sang ĐẦU
+ * Output Center (2026-09-02, theo yêu cầu người dùng: thumbnail phục vụ lúc XUẤT video
+ * lên YouTube, đúng ngữ cảnh bước Output hơn Visual Studio). Cho phép cả 2 đường: sinh
+ * bằng AI (cần mô tả + provider image) hoặc upload ảnh có sẵn từ máy (không cần provider,
+ * không cần mô tả) — không ảnh hưởng tới việc sinh ảnh/video từng shot. TRƯỚC ĐÂY (mục 18
+ * IMPLEMENTATION_REPORT.md) ảnh này bắt buộc phải duyệt vì đóng vai trò "anchor" img2img
+ * cho mọi shot (Tier 2) — TẮT lại 2026-08-16: verify qua GPU cho thấy khi Thumbnail là
+ * ảnh nhiều chi tiết đồ hoạ (bản đồ minh hoạ, không phải ảnh chụp/nhân vật đơn giản), cơ
+ * chế này đè mất nội dung riêng từng shot ở mọi mức denoise thử qua — xem mục 20. */
+const DEFAULT_YOUTUBE_META = {
+  thumbnail_description: "",
+  thumbnail_status: "pending" as const, thumbnail_asset_path: null, thumbnail_provider: null, thumbnail_error: null, thumbnail_approved: false,
+};
+
+function ThumbnailCard({ project, pack, refresh }: { project: ProjectSummary; pack: ProductionPack; refresh: () => Promise<void> }) {
+  const ym = pack.youtube_meta;
+  const [desc, setDesc] = useState(ym?.thumbnail_description || "");
+  const [generating, setGenerating] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [approving, setApproving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // `api.thumbnailUrl(project.id)` là 1 URL CỐ ĐỊNH (không đổi theo lần sinh/upload) —
+  // React chỉ refetch <img> khi giá trị `src` THẬT SỰ đổi, nên ảnh cũ vẫn hiện nguyên dù
+  // ảnh mới đã ghi đè xong ở backend (bug người dùng báo: "upload/tạo AI xong ảnh không
+  // đổi"). Bump số này sau MỖI lần sinh/upload thành công, gắn vào query string để ép
+  // trình duyệt coi là URL mới.
+  const [cacheBust, setCacheBust] = useState(0);
+  const [lightbox, setLightbox] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const saveTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    setDesc(ym?.thumbnail_description || "");
+  }, [ym?.thumbnail_description]);
+
+  function saveDesc(value: string) {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      api.patchPack(project.id, { youtube_meta: { ...(ym || DEFAULT_YOUTUBE_META), thumbnail_description: value } });
+    }, 500);
+  }
+
+  async function generate() {
+    setGenerating(true);
+    setError(null);
     try {
-      const r = await api.exportPack(project.id, format);
-      setFiles((f) => [...f.filter((x) => x.format !== format), { format, filename: r.filename }]);
+      await api.patchPack(project.id, { youtube_meta: { ...(ym || DEFAULT_YOUTUBE_META), thumbnail_description: desc } });
+      await api.generateThumbnail(project.id);
+      await refresh();
+      setCacheBust((n) => n + 1);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi sinh ảnh thumbnail.");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function upload(file: File) {
+    setUploading(true);
+    setError(null);
+    try {
+      await api.uploadThumbnail(project.id, file);
+      await refresh();
+      setCacheBust((n) => n + 1);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi upload ảnh thumbnail.");
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function toggleApprove() {
+    setApproving(true);
+    setError(null);
+    try {
+      await api.approveThumbnail(project.id, !ym?.thumbnail_approved);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi duyệt thumbnail.");
+    } finally {
+      setApproving(false);
+    }
+  }
+
+  const ready = ym?.thumbnail_status === "ready";
+  const approved = !!ym?.thumbnail_approved;
+  const thumbUrl = `${api.thumbnailUrl(project.id)}?v=${cacheBust}`;
+
+  return (
+    <div className="card elev-sm" style={{ gap: "var(--space-3)", maxWidth: 900 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div className="card-title">
+          Thumbnail {approved && <span className="tag tag-accent" style={{ marginLeft: 6 }}>Đã duyệt</span>}
+        </div>
+        <span style={{ fontSize: 11.5, opacity: 0.6 }}>Dùng khi xuất video lên YouTube — không ảnh hưởng tới ảnh/video từng shot</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: "var(--space-3)", alignItems: "flex-start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ position: "relative", height: 124, borderRadius: "var(--radius-sm)", background: "var(--color-bg)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+            {ready ? (
+              <>
+                <ExpandButton onClick={() => setLightbox(true)} />
+                <img alt="Thumbnail" src={thumbUrl} style={{ width: "100%", height: "100%", objectFit: "cover", cursor: "zoom-in" }} onClick={() => setLightbox(true)} />
+              </>
+            ) : (
+              <span style={{ fontSize: 11, opacity: 0.55, textAlign: "center", padding: 6 }}>{ym?.thumbnail_status === "generating" ? "Đang sinh ảnh…" : "Chưa có ảnh thumbnail"}</span>
+            )}
+          </div>
+          {lightbox && <Lightbox src={thumbUrl} kind="image" onClose={() => setLightbox(false)} />}
+          {ready && <AddToLibraryButton kind="image" sourceUrl={thumbUrl} name="thumbnail" />}
+          <button className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 8px" }} onClick={generate} disabled={generating || uploading || !desc.trim()}>
+            {generating ? "Đang tạo..." : "Tạo bằng AI"}
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) upload(f);
+            }}
+          />
+          <button className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 8px" }} onClick={() => fileRef.current?.click()} disabled={generating || uploading}>
+            {uploading ? "Đang tải lên..." : "Upload ảnh từ máy"}
+          </button>
+          <LibraryPicker kinds={["image"]} disabled={generating || uploading} onPick={upload} />
+          <button className="btn btn-primary" style={{ fontSize: 12, padding: "5px 8px" }} onClick={toggleApprove} disabled={approving || (!ready && !approved)}>
+            {approving ? "Đang lưu..." : approved ? "Bỏ duyệt" : "Duyệt"}
+          </button>
+        </div>
+        <div className="field" style={{ margin: 0 }}>
+          <label>Mô tả thumbnail (prompt tạo ảnh bằng AI — không cần điền nếu chỉ upload tay)</label>
+          <textarea
+            className="input"
+            rows={3}
+            style={{ fontSize: 13 }}
+            value={desc}
+            onChange={(e) => {
+              setDesc(e.target.value);
+              saveDesc(e.target.value);
+            }}
+          />
+          {error && <div style={{ fontSize: 12, color: "var(--color-danger)", marginTop: 4 }}>{error}</div>}
+          {ym?.thumbnail_status === "error" && !error && <div style={{ fontSize: 12, color: "var(--color-danger)", marginTop: 4 }}>{ym.thumbnail_error}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type ExportResult = { dest_dir: string; included: string[]; skipped: { item: string; reason: string }[] };
+
+function PackExportCard({ projectId, hasShots }: { projectId: string; hasShots: boolean }) {
+  const [destDir, setDestDir] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [result, setResult] = useState<ExportResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // `window.studioflowNative` CHỈ có khi chạy trong Electron (xem electron/src/preload.ts)
+  // — chạy dev server thuần trình duyệt fallback về ô nhập đường dẫn tay.
+  const hasNativePicker = typeof window !== "undefined" && !!window.studioflowNative;
+
+  async function chooseFolder() {
+    if (!window.studioflowNative) return;
+    const picked = await window.studioflowNative.chooseFolder();
+    if (picked) setDestDir(picked);
+  }
+
+  async function doExport() {
+    setExporting(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await api.exportPackBundle(projectId, destDir));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi xuất Pack.");
     } finally {
       setExporting(false);
     }
   }
 
-  if (renderOpen) {
-    return <RenderStudio project={project} pack={pack} onClose={() => setRenderOpen(false)} />;
-  }
-
   return (
-    <div>
-      <h3 style={{ marginBottom: 2 }}>Output Center</h3>
-      <p style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)", fontSize: 13, marginBottom: "var(--space-6)" }}>Chọn cách xuất Production Pack.</p>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-4)", maxWidth: 720, marginBottom: "var(--space-6)" }}>
-        <div className="card elev-sm" style={{ gap: "var(--space-2)" }}>
-          <div className="card-kicker">Output A</div>
-          <div className="card-title">Export Pack</div>
-          <div className="card-body">Xuất spec + prompts — bản máy đọc (JSON) và bản người đọc.</div>
-          {files.length === 0 ? (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <button className="btn btn-primary btn-block" onClick={() => doExport("markdown")} disabled={exporting}>
-                {exporting ? "Đang xuất..." : "Xuất Pack"}
-              </button>
-            </div>
-          ) : (
-            <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-              {files.map((f) => (
-                <a
-                  key={f.format}
-                  href="#"
-                  style={{ fontSize: 12 }}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    api.downloadExportFile(project.id, f.filename);
-                  }}
-                >
-                  {f.filename}
-                </a>
-              ))}
-              <a
-                href="#"
-                style={{ fontSize: 12, opacity: 0.7 }}
-                onClick={(e) => {
-                  e.preventDefault();
-                  doExport("json");
-                }}
-              >
-                + xuất JSON
-              </a>
-            </div>
-          )}
-        </div>
-        <div className="card elev-sm" style={{ gap: "var(--space-2)" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div className="card-kicker">Output B</div>
-            <span className="tag tag-outline">Beta · M2</span>
-          </div>
-          <div className="card-title">Render in-app</div>
-          <div className="card-body">Sinh asset qua API, ghép &amp; xuất MP4 "đủ đăng". Tốn phí API thật (ElevenLabs/OpenAI Image/Sora).</div>
-          <button className="btn btn-secondary btn-block" onClick={() => setRenderOpen(true)} disabled={(pack.shots || []).length === 0}>
-            {(pack.shots || []).length === 0 ? "Chưa có shot — hoàn tất Visual Studio trước" : "Mở Render Studio"}
-          </button>
-        </div>
+    <div className="card elev-sm" style={{ gap: "var(--space-2)", maxWidth: 640 }}>
+      <div className="card-kicker">Xuất Pack</div>
+      <div className="card-title">Xuất toàn bộ nội dung ra máy local</div>
+      <div className="card-body">
+        Đóng gói transcript (SRT), bộ ảnh/video từng shot, giọng đọc ghép full (mp3) và video đã ghép (nếu có) ra 1 thư mục bạn chọn.
       </div>
 
-      <RetentionCard projectId={project.id} />
+      {!hasShots ? (
+        <div style={{ fontSize: 12.5, opacity: 0.7 }}>Chưa có shot — hoàn tất Visual Studio trước.</div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 6 }}>
+            {hasNativePicker ? (
+              <>
+                <input className="input" style={{ flex: 1 }} readOnly placeholder="Chưa chọn thư mục đích" value={destDir} />
+                <button className="btn btn-secondary" onClick={chooseFolder}>
+                  Chọn thư mục...
+                </button>
+              </>
+            ) : (
+              <input
+                className="input"
+                style={{ flex: 1 }}
+                placeholder="Nhập đường dẫn thư mục đích (VD: D:\Xuất video)"
+                value={destDir}
+                onChange={(e) => setDestDir(e.target.value)}
+              />
+            )}
+          </div>
+          <button className="btn btn-primary btn-block" onClick={doExport} disabled={!destDir.trim() || exporting}>
+            {exporting ? "Đang xuất..." : "Xuất Pack"}
+          </button>
+        </>
+      )}
+
+      {error && (
+        <div style={{ fontSize: 12.5, color: "var(--color-danger)", background: "var(--color-danger-bg)", borderRadius: "var(--radius-sm)", padding: "6px 8px" }}>
+          {error}
+        </div>
+      )}
+
+      {result && (
+        <div style={{ fontSize: 12.5, marginTop: 4 }}>
+          <div style={{ opacity: 0.8, marginBottom: 4 }}>
+            Đã xuất vào <strong>{result.dest_dir}</strong>:
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {result.included.map((item) => (
+              <li key={item} style={{ color: "var(--color-accent)" }}>
+                ✓ {item}
+              </li>
+            ))}
+            {result.skipped.map((s) => (
+              <li key={s.item} style={{ opacity: 0.65 }}>
+                ⊘ {s.item} — {s.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

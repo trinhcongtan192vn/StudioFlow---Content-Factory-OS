@@ -58,13 +58,17 @@ def test_full_pipeline_happy_path(client, project_with_brief):
     assert updated_shot["visual_fx"] == "prompt sửa tay"
     assert updated_shot["audio_sfx"] == "ấm áp"
 
+    # "Tạo lại Visual/Audio" — 2026-08-25, theo yêu cầu người dùng: KHÔNG còn gọi LLM,
+    # khôi phục NGUYÊN SI về đúng script gốc (bỏ bản sửa tay "prompt sửa tay"/"ấm áp" ở
+    # trên, quay lại đúng "Cảnh mở, tông ấm"/"Nhạc nền nhẹ" — cột Visual/FX + Audio/SFX
+    # gốc của block B01 trong CSV import).
     resp = client.post(f"/projects/{pid}/visual/shots/{shot_id}/regenerate-visual")
     assert resp.status_code == 200
-    assert resp.json()["shots"][0]["visual_fx"]
+    assert resp.json()["shots"][0]["visual_fx"] == "Cảnh mở, tông ấm"
 
     resp = client.post(f"/projects/{pid}/visual/shots/{shot_id}/regenerate-audio")
     assert resp.status_code == 200
-    assert resp.json()["shots"][0]["audio_sfx"]
+    assert resp.json()["shots"][0]["audio_sfx"] == "Nhạc nền nhẹ"
 
     resp = client.post(f"/projects/{pid}/visual/generate-all-visual")
     assert resp.status_code == 200
@@ -104,6 +108,46 @@ def test_full_pipeline_happy_path(client, project_with_brief):
 
     resp = client.post(f"/projects/{pid}/export", json={"format": "invalid-format"})
     assert resp.status_code == 400
+
+
+def test_regenerate_visual_errors_when_script_beat_has_no_visual_description(client, project_with_brief):
+    """2026-08-25, theo yêu cầu người dùng: "Tạo lại Visual" không còn LLM để "bịa" ra
+    mô tả khi script gốc không có gì — phải báo lỗi rõ ràng (400) thay vì rơi về 1 câu
+    fallback vô nghĩa như thiết kế cũ."""
+    pid = project_with_brief["id"]
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    row = ["B01", "0:00–0:05", "Image", "", "", "Xin chào các bạn."]  # Visual/FX + Audio/SFX đều RỖNG
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, row])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_id = client.post(f"/projects/{pid}/visual/generate").json()["shots"][0]["shot_id"]
+
+    resp = client.post(f"/projects/{pid}/visual/shots/{shot_id}/regenerate-visual")
+    assert resp.status_code == 400
+
+    resp = client.post(f"/projects/{pid}/visual/shots/{shot_id}/regenerate-audio")
+    assert resp.status_code == 400
+
+
+def test_generate_all_visual_skips_shots_with_no_script_description_instead_of_erroring(client, project_with_brief):
+    """Bulk "Tạo Visual cho toàn bộ block" KHÁC shot lẻ ở test trên — shot thiếu mô tả
+    BỊ BỎ QUA (giữ nguyên `visual_fx` hiện có), KHÔNG chặn cả batch chỉ vì 1 shot rỗng."""
+    pid = project_with_brief["id"]
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [
+        ["B01", "0:00–0:05", "Image", "Cảnh có mô tả", "Nhạc nhẹ", "Câu một."],
+        ["B02", "0:05–0:10", "Image", "", "", "Câu hai."],
+    ]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    client.post(f"/projects/{pid}/visual/generate")
+
+    resp = client.post(f"/projects/{pid}/visual/generate-all-visual")
+    assert resp.status_code == 200
+    shots = resp.json()["shots"]
+    assert shots[0]["visual_fx"] == "Cảnh có mô tả"
+    assert shots[1]["visual_fx"] == ""  # shot B02 bị bỏ qua, giữ nguyên rỗng — không lỗi cả batch
 
 
 def test_export_blocked_without_script(client, project):

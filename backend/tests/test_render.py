@@ -10,6 +10,7 @@ trực tiếp trên `state.shots` (mọi shot đã sinh xong visual VÀ đã duy
 import base64
 import io
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -432,6 +433,360 @@ def test_upload_shot_visual_rejected_while_in_progress(client, render_ready_proj
         render_engine._mark_done(pid)
 
 
+# ---------------------------------------------------------------------------
+# Xoá ảnh/video của 1 shot (Visual Studio, 2026-09-02, theo yêu cầu người dùng: "Cho
+# phép remove video/image ở từng shot/block sau khi đã add") — trả shot về "pending",
+# xoá file trên đĩa, KHÔNG tự sinh/upload lại cái khác ngay.
+# ---------------------------------------------------------------------------
+@respx.mock
+def test_remove_shot_visual_resets_to_pending_and_deletes_file(client, render_ready_project):
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot = next(s for s in state["shots"] if s["visual_status"] == "ready")
+    shot_id = shot["shot_id"]
+    asset_path = Path(shot["visual_asset_path"])
+    assert asset_path.exists()
+    client.post(f"/projects/{pid}/render/shots/{shot_id}/approve", json={"approved": True})
+
+    resp = client.delete(f"/projects/{pid}/render/shots/{shot_id}/visual")
+    assert resp.status_code == 200, resp.text
+    removed = next(s for s in resp.json()["shots"] if s["shot_id"] == shot_id)
+    assert removed["visual_status"] == "pending"
+    assert removed["visual_asset_path"] is None
+    assert removed["visual_provider"] is None
+    assert removed["approved"] is False
+    assert not asset_path.exists()  # file cũ đã bị xoá trên đĩa, không để rác
+
+
+@respx.mock
+def test_remove_shot_visual_clears_linked_vault_clip(client, render_ready_project):
+    """Gán clip từ Kho tư liệu rồi xoá — `linked_clip_id` phải về None (chỉ hết gán cho
+    shot này, clip vẫn còn nguyên trong Kho, không bị xoá)."""
+    from app.config import project_dir
+    from app.render import engine as render_engine
+
+    pid = render_ready_project
+    channel_id = client.get(f"/projects/{pid}").json()["channel_id"]
+    pdir = project_dir(channel_id, pid)
+    pack = client.get(f"/projects/{pid}/pack").json()
+    video_shot = next(s for s in pack["shots"] if s["visual_type"] == "video")
+    resp = client.post(f"/projects/{pid}/render/shots/{video_shot['shot_id']}/upload-visual", files={"file": ("a.mp4", io.BytesIO(b"\x00\x00\x00\x18ftyp" + b"0" * 10), "video/mp4")})
+    assert resp.status_code == 200, resp.text
+    state = render_engine.load_render_state(pdir, pid)
+    status = next(s for s in state.shots if s.shot_id == video_shot["shot_id"])
+    status.linked_clip_id = "fake-clip-id"
+    render_engine.save_render_state(pdir, state)
+
+    resp = client.delete(f"/projects/{pid}/render/shots/{video_shot['shot_id']}/visual")
+    assert resp.status_code == 200, resp.text
+    removed = next(s for s in resp.json()["shots"] if s["shot_id"] == video_shot["shot_id"])
+    assert removed["linked_clip_id"] is None
+
+
+def test_remove_shot_visual_404_when_no_render_state(client, project_with_brief):
+    pid = _drive_to_visual_studio(client, project_with_brief)
+    pack = client.get(f"/projects/{pid}/pack").json()
+    shot_id = pack["shots"][0]["shot_id"]
+    resp = client.delete(f"/projects/{pid}/render/shots/{shot_id}/visual")
+    assert resp.status_code == 404
+
+
+def test_remove_shot_visual_404_unknown_shot(client, render_ready_project):
+    resp = client.delete(f"/projects/{render_ready_project}/render/shots/does-not-exist/visual")
+    assert resp.status_code == 404
+
+
+@respx.mock
+def test_remove_shot_visual_rejected_while_in_progress(client, render_ready_project):
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot_id = state["shots"][0]["shot_id"]
+
+    from app.render import engine as render_engine
+    render_engine._mark_in_progress(pid)
+    try:
+        resp = client.delete(f"/projects/{pid}/render/shots/{shot_id}/visual")
+        assert resp.status_code == 409
+    finally:
+        render_engine._mark_done(pid)
+
+
+@respx.mock
+def test_assemble_does_not_require_all_shots_to_have_visual_after_removal_when_no_background_video(client, render_ready_project):
+    """Xoá visual của 1 shot mà KHÔNG cấu hình video nền chung — shot đó về "pending",
+    ghép video phải bị chặn lại (400) đúng như shot chưa từng sinh, không phải lỗi 500
+    bất ngờ ở tầng ffmpeg."""
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot_id = state["shots"][0]["shot_id"]
+    client.delete(f"/projects/{pid}/render/shots/{shot_id}/visual")
+
+    resp = client.post(f"/projects/{pid}/render/assemble")
+    assert resp.status_code == 400
+    assert shot_id in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Xoá watermark (Visual Studio, 2026-08-28) — tái dùng app/watermark/, model thật đã
+# verify riêng ở test_watermark.py (chậm, ~90s nạp lần đầu) — mock ở đây, chỉ test đúng
+# luồng điều phối (cập nhật render.json, phân biệt "không tìm thấy" vs lỗi thật, tóm tắt
+# hàng loạt), cùng nguyên tắc test_asset_vault.py's watermark tests.
+# ---------------------------------------------------------------------------
+def _fake_wm_image_ok(image_path, out_path, *, bboxes=None, text_input="watermark"):
+    import shutil as _shutil
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _shutil.copy2(image_path, out_path)
+    return [(0, 0, 10, 10)]
+
+
+def _fake_wm_video_ok(ffmpeg, video_path, out_path, tmp_dir, *, text_input="watermark", on_progress=None):
+    import shutil as _shutil
+
+    if on_progress:
+        on_progress(0, 20, "Đang tách frame từ video")
+        on_progress(10, 20, "Đang xoá watermark 10/20 frame")
+        on_progress(20, 20, "Đang xoá watermark 20/20 frame")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _shutil.copy2(video_path, out_path)
+    return [(0, 0, 10, 10)]
+
+
+def _fake_wm_image_none(image_path, out_path, *, bboxes=None, text_input="watermark"):
+    raise ValueError("Không phát hiện được watermark nào trong ảnh — thử mô tả khác hoặc khoanh vùng tay.")
+
+
+def _fake_wm_video_none(ffmpeg, video_path, out_path, tmp_dir, *, text_input="watermark", on_progress=None):
+    raise ValueError("Không phát hiện được watermark nào trong video — thử mô tả khác.")
+
+
+def _fake_wm_image_fails(image_path, out_path, *, bboxes=None, text_input="watermark"):
+    raise RuntimeError("model lỗi giả lập")
+
+
+def _fake_wm_video_fails(ffmpeg, video_path, out_path, tmp_dir, *, text_input="watermark", on_progress=None):
+    raise RuntimeError("model lỗi giả lập")
+
+
+@respx.mock
+def test_remove_shot_watermark_cleans_asset_and_keeps_ready(client, render_ready_project, monkeypatch):
+    from app.render import engine as render_engine
+
+    monkeypatch.setattr(render_engine, "remove_watermark_from_image", _fake_wm_image_ok)
+    monkeypatch.setattr(render_engine, "remove_watermark_from_video", _fake_wm_video_ok)
+
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot = state["shots"][0]
+    old_path = shot["visual_asset_path"]
+
+    resp = client.post(f"/projects/{pid}/render/shots/{shot['shot_id']}/remove-watermark")
+    assert resp.status_code == 200, resp.text
+    # Response của POST phản ánh trạng thái ĐỒNG BỘ (vừa set "generating" TRƯỚC khi mở
+    # BackgroundTasks, xem router) — phải GET lại /render/status để thấy kết quả SAU khi
+    # background task chạy xong, cùng pattern `test_regenerate_visual_resets_approval`.
+    state2 = client.get(f"/projects/{pid}/render/status").json()
+    updated = next(s for s in state2["shots"] if s["shot_id"] == shot["shot_id"])
+    assert updated["visual_status"] == "ready"
+    assert updated["visual_watermark_note"] is None
+    assert updated["visual_error"] is None
+    assert updated["visual_asset_path"] != old_path
+    assert updated["visual_asset_path"].endswith("_nowm" + Path(old_path).suffix)
+    assert Path(updated["visual_asset_path"]).exists()
+    assert not Path(old_path).exists()  # file cũ đã bị xoá, không để rác
+
+
+@respx.mock
+def test_remove_shot_watermark_reports_progress_then_clears_it(client, render_ready_project, monkeypatch):
+    """Thanh tiến trình (2026-09-02, theo yêu cầu người dùng: "tương tự Kho Tài Nguyên") —
+    xác nhận `on_progress` ghi TỚI render.json (không chỉ giữ trong biến tạm) mỗi lần gọi
+    (spy `save_render_state`, vì TestClient chạy BackgroundTasks đồng bộ nên không polling
+    HTTP giữa chừng được), và progress được DỌN SẠCH (None) ở trạng thái cuối cùng."""
+    from app.render import engine as render_engine
+
+    monkeypatch.setattr(render_engine, "remove_watermark_from_image", _fake_wm_image_ok)
+    monkeypatch.setattr(render_engine, "remove_watermark_from_video", _fake_wm_video_ok)
+
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    pack = client.get(f"/projects/{pid}/pack").json()
+    video_shot_id = next(s["shot_id"] for s in pack["shots"] if s["visual_type"] == "video")
+
+    snapshots = []
+    original_save = render_engine.save_render_state
+
+    def _spy_save(pdir, state):
+        shot = next((s for s in state.shots if s.shot_id == video_shot_id), None)
+        if shot:
+            snapshots.append((shot.visual_watermark_progress_current, shot.visual_watermark_progress_total, shot.visual_watermark_progress_label))
+        original_save(pdir, state)
+
+    monkeypatch.setattr(render_engine, "save_render_state", _spy_save)
+
+    resp = client.post(f"/projects/{pid}/render/shots/{video_shot_id}/remove-watermark")
+    assert resp.status_code == 200, resp.text
+
+    assert (10, 20, "Đang xoá watermark 10/20 frame") in snapshots
+    assert (20, 20, "Đang xoá watermark 20/20 frame") in snapshots
+    assert snapshots[-1] == (None, None, None)  # trạng thái cuối cùng đã dọn sạch progress
+
+    state2 = client.get(f"/projects/{pid}/render/status").json()
+    updated = next(s for s in state2["shots"] if s["shot_id"] == video_shot_id)
+    assert updated["visual_watermark_progress_current"] is None
+    assert updated["visual_watermark_progress_total"] is None
+    assert updated["visual_watermark_progress_label"] is None
+
+
+@respx.mock
+def test_remove_shot_watermark_no_watermark_sets_note_not_error(client, render_ready_project, monkeypatch):
+    """Yêu cầu người dùng: "nếu ảnh nào không phát hiện watermark thì có thông báo rõ
+    ràng" — KHÔNG được coi là lỗi (asset gốc vẫn hợp lệ, không đổi)."""
+    from app.render import engine as render_engine
+
+    monkeypatch.setattr(render_engine, "remove_watermark_from_image", _fake_wm_image_none)
+    monkeypatch.setattr(render_engine, "remove_watermark_from_video", _fake_wm_video_none)
+
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot = state["shots"][0]
+    old_path = shot["visual_asset_path"]
+
+    resp = client.post(f"/projects/{pid}/render/shots/{shot['shot_id']}/remove-watermark")
+    assert resp.status_code == 200, resp.text
+    state2 = client.get(f"/projects/{pid}/render/status").json()
+    updated = next(s for s in state2["shots"] if s["shot_id"] == shot["shot_id"])
+    assert updated["visual_status"] == "ready"  # KHÔNG "error"
+    assert updated["visual_error"] is None
+    assert updated["visual_watermark_note"] and "không phát hiện" in updated["visual_watermark_note"].lower()
+    assert updated["visual_asset_path"] == old_path  # asset gốc GIỮ NGUYÊN
+
+
+@respx.mock
+def test_remove_shot_watermark_real_failure_sets_error(client, render_ready_project, monkeypatch):
+    from app.render import engine as render_engine
+
+    monkeypatch.setattr(render_engine, "remove_watermark_from_image", _fake_wm_image_fails)
+    monkeypatch.setattr(render_engine, "remove_watermark_from_video", _fake_wm_video_fails)
+
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot = state["shots"][0]
+
+    resp = client.post(f"/projects/{pid}/render/shots/{shot['shot_id']}/remove-watermark")
+    assert resp.status_code == 200, resp.text
+    state2 = client.get(f"/projects/{pid}/render/status").json()
+    updated = next(s for s in state2["shots"] if s["shot_id"] == shot["shot_id"])
+    assert updated["visual_status"] == "error"
+    assert "model lỗi giả lập" in updated["visual_error"]
+    assert updated["visual_watermark_note"] is None
+
+
+def test_remove_shot_watermark_rejects_when_no_render_state_yet(client, project_with_brief):
+    """Chưa từng bấm 'Bắt đầu sinh asset' cho shot này — chưa có `ShotRenderStatus` nào
+    trong render.json để xoá watermark trên đó."""
+    pid = _drive_to_visual_studio(client, project_with_brief)
+    pack = client.get(f"/projects/{pid}/pack").json()
+    shot_id = pack["shots"][0]["shot_id"]
+    resp = client.post(f"/projects/{pid}/render/shots/{shot_id}/remove-watermark")
+    assert resp.status_code == 404
+
+
+@respx.mock
+def test_remove_shot_watermark_rejects_when_not_ready_yet(client, project_with_brief):
+    """Có `ShotRenderStatus` nhưng chưa `visual_status=="ready"` (VD lỗi thiếu provider)
+    — 400 rõ ràng, không cho xoá watermark trên asset chưa tồn tại."""
+    _delete_all_asset_providers(client)
+    pid = _drive_to_ready_output(client, project_with_brief)
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot_id = state["shots"][0]["shot_id"]
+    assert state["shots"][0]["visual_status"] == "error"  # thiếu provider — xem test_asset_generation_fails_clearly_without_provider
+
+    resp = client.post(f"/projects/{pid}/render/shots/{shot_id}/remove-watermark")
+    assert resp.status_code == 400
+
+
+@respx.mock
+def test_remove_shot_watermark_rejected_while_in_progress(client, render_ready_project):
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot_id = state["shots"][0]["shot_id"]
+
+    from app.render import engine as render_engine
+    render_engine._mark_in_progress(pid)
+    try:
+        resp = client.post(f"/projects/{pid}/render/shots/{shot_id}/remove-watermark")
+        assert resp.status_code == 409
+    finally:
+        render_engine._mark_done(pid)
+
+
+@respx.mock
+def test_remove_all_shots_watermark_summarizes_mixed_results(client, render_ready_project, monkeypatch):
+    """Hàng loạt — 1 shot xoá thành công, 1 shot không phát hiện watermark, 1 lỗi thật
+    (nếu project có đủ ≥3 shot; nếu ít hơn, phần còn lại vẫn phải cộng đúng vào tổng)."""
+    from app.render import engine as render_engine
+
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    shot_ids = [s["shot_id"] for s in state["shots"]]
+    assert len(shot_ids) >= 1
+
+    outcomes = ["ok", "none", "fail"]
+    fakes_image = {"ok": _fake_wm_image_ok, "none": _fake_wm_image_none, "fail": _fake_wm_image_fails}
+    fakes_video = {"ok": _fake_wm_video_ok, "none": _fake_wm_video_none, "fail": _fake_wm_video_fails}
+    # Gán outcome xoay vòng cho từng shot theo THỨ TỰ — patch 1 hàm DUY NHẤT tự tra theo
+    # shot_id đang xử lý (đơn giản hơn patch lại nhiều lần giữa các lượt gọi tuần tự).
+    plan = {shot_id: outcomes[i % len(outcomes)] for i, shot_id in enumerate(shot_ids)}
+
+    def _dispatch_image(image_path, out_path, *, bboxes=None, text_input="watermark"):
+        shot_id = Path(image_path).stem
+        return fakes_image[plan[shot_id]](image_path, out_path, bboxes=bboxes, text_input=text_input)
+
+    def _dispatch_video(ffmpeg, video_path, out_path, tmp_dir, *, text_input="watermark", on_progress=None):
+        shot_id = Path(video_path).stem
+        return fakes_video[plan[shot_id]](ffmpeg, video_path, out_path, tmp_dir, text_input=text_input, on_progress=on_progress)
+
+    monkeypatch.setattr(render_engine, "remove_watermark_from_image", _dispatch_image)
+    monkeypatch.setattr(render_engine, "remove_watermark_from_video", _dispatch_video)
+
+    resp = client.post(f"/projects/{pid}/render/remove-watermark-all")
+    assert resp.status_code == 200, resp.text
+
+    final_state = client.get(f"/projects/{pid}/render/status").json()
+    summary = final_state["watermark_scan_summary"]
+    assert summary is not None
+    assert summary["scanned"] == len(shot_ids)
+    assert summary["cleaned"] + summary["no_watermark"] + summary["failed"] == len(shot_ids)
+    assert summary["cleaned"] == sum(1 for v in plan.values() if v == "ok")
+    assert summary["no_watermark"] == sum(1 for v in plan.values() if v == "none")
+    assert summary["failed"] == sum(1 for v in plan.values() if v == "fail")
+
+    for s in final_state["shots"]:
+        outcome = plan[s["shot_id"]]
+        if outcome == "fail":
+            assert s["visual_status"] == "error"
+        else:
+            assert s["visual_status"] == "ready"
+
+
 @respx.mock  # an toàn kép: nếu lỡ còn provider sót lại từ test khác, request thật sẽ
 # raise lỗi respx (không route nào được đăng ký) thay vì lọt ra network thật.
 def test_asset_generation_fails_clearly_without_provider(client, project_with_brief):
@@ -455,13 +810,29 @@ def test_asset_generation_fails_clearly_without_provider(client, project_with_br
 
 
 @respx.mock
-def test_assemble_requires_all_shots_ready_and_approved(client, render_ready_project):
+def test_assemble_requires_all_shots_ready(client, render_ready_project):
+    pid = render_ready_project
+    resp = client.post(f"/projects/{pid}/render/assemble")
+    assert resp.status_code == 400  # chưa sinh asset nào (render/start chưa chạy)
+
+
+@respx.mock
+def test_assemble_does_not_require_approval(client, render_ready_project, monkeypatch):
+    """2026-09-02, theo yêu cầu người dùng ("bỏ luồng duyệt block, ko cần phải có thì
+    mới render được video") — ghép video KHÔNG còn yêu cầu `approved=True` cho từng
+    shot, chỉ cần visual đã "ready". Giả lập chưa cài ffmpeg (như
+    `test_assemble_works_without_output_enter`) — chỉ cần xác nhận request ĐƯỢC CHẤP
+    NHẬN dù KHÔNG shot nào được duyệt."""
+    import shutil as _shutil
+
     pid = render_ready_project
     _mock_asset_apis()
     client.post(f"/projects/{pid}/render/start")
 
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
     resp = client.post(f"/projects/{pid}/render/assemble")
-    assert resp.status_code == 400  # chưa duyệt shot nào
+    assert resp.status_code == 200
+    assert resp.json()["assembly_status"] == "assembling"
 
 
 @respx.mock
@@ -504,6 +875,148 @@ def test_assemble_rejects_gpu_with_vp9_immediately(client, render_ready_project)
 
     state = client.get(f"/projects/{pid}/render/status").json()
     assert state["assembly_status"] != "assembling"  # bị chặn trước khi kịp đổi trạng thái
+
+
+# ---------------------------------------------------------------------------
+# Tự phục hồi khi `assembly_status` bị KẸT "assembling" (2026-09-02, mục 111) — bug thật
+# người dùng báo: thread chạy `assemble_video` chết lặng giữa chừng (không rõ nguyên
+# nhân — nghi UnicodeEncodeError lúc log tiếng Việt ra console cp1252, xem `electron/
+# src/backend-launcher.ts::PYTHONIOENCODING`), để lại `assembly_status="assembling"`
+# MÃI MÃI trong render.json — router giờ chỉ tin `engine.is_assembly_in_progress`
+# (cờ TRONG BỘ NHỚ, tự về `False` khi tiến trình backend khởi động lại), không tin mù
+# quáng field đã lưu. Cộng thêm nút "Đặt lại tiến trình bị treo" (`POST .../assemble/
+# reset`) làm giải pháp UI trực tiếp, không cần sửa tay render.json/khởi động lại app.
+# ---------------------------------------------------------------------------
+def _write_stale_assembling_status(pid: str, render_ready_project_channel_id: str) -> None:
+    """Mô phỏng ĐÚNG bug thật: `assembly_status="assembling"` đã lưu trong render.json,
+    nhưng KHÔNG có `_mark_assembly_in_progress` nào đang giữ (thread xử lý nó đã "chết
+    lặng"/tiến trình backend đã khởi động lại) — khác trường hợp đang chạy thật."""
+    from app.config import project_dir
+    from app.render import engine as render_engine
+
+    pdir = project_dir(render_ready_project_channel_id, pid)
+    state = render_engine.load_render_state(pdir, pid)
+    state.assembly_status = "assembling"
+    state.assembly_error = None
+    render_engine.save_render_state(pdir, state)
+
+
+def test_start_assemble_self_heals_stale_assembling_status(client, render_ready_project, monkeypatch):
+    """`assembly_status` kẹt "assembling" nhưng KHÔNG có tiến trình thật đang giữ cờ
+    (`is_assembly_in_progress` == False, VD sau khi backend khởi động lại) — bấm "Ghép
+    video" phải ĐƯỢC PHÉP chạy tiếp (tự phục hồi), KHÔNG còn bị 409 như trước mục 111.
+    Giả lập thiếu ffmpeg (như `test_assemble_works_without_output_enter`) — chỉ cần xác
+    nhận request ĐƯỢC CHẤP NHẬN, không cần assembly thật chạy xong."""
+    import shutil as _shutil
+
+    from app.render import engine as render_engine
+
+    pid = render_ready_project
+    channel_id = client.get(f"/projects/{pid}").json()["channel_id"]
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    for s in state["shots"]:
+        client.post(f"/projects/{pid}/render/shots/{s['shot_id']}/approve", json={"approved": True})
+
+    _write_stale_assembling_status(pid, channel_id)
+    assert not render_engine.is_assembly_in_progress(pid)  # sanity — đúng kịch bản "kẹt", không phải đang chạy thật
+
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    resp = client.post(f"/projects/{pid}/render/assemble")
+    assert resp.status_code != 409, resp.text
+
+
+def test_start_assemble_still_blocks_when_actually_in_progress(client, render_ready_project):
+    """KHÁC bug đã fix — nếu `is_assembly_in_progress` THẬT SỰ `True` (task đang chạy
+    trong CHÍNH tiến trình backend này), vẫn phải chặn 409 như cũ, không được tự phục
+    hồi nhầm 1 tiến trình đang xử lý bình thường."""
+    from app.render import engine as render_engine
+
+    pid = render_ready_project
+    channel_id = client.get(f"/projects/{pid}").json()["channel_id"]
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    for s in state["shots"]:
+        client.post(f"/projects/{pid}/render/shots/{s['shot_id']}/approve", json={"approved": True})
+
+    _write_stale_assembling_status(pid, channel_id)
+    render_engine._mark_assembly_in_progress(pid)
+    try:
+        resp = client.post(f"/projects/{pid}/render/assemble")
+        assert resp.status_code == 409
+    finally:
+        render_engine._mark_assembly_done(pid)
+
+
+def test_reset_stuck_assembly_resets_status_when_not_actually_in_progress(client, render_ready_project):
+    pid = render_ready_project
+    channel_id = client.get(f"/projects/{pid}").json()["channel_id"]
+    _write_stale_assembling_status(pid, channel_id)
+
+    resp = client.post(f"/projects/{pid}/render/assemble/reset")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["assembly_status"] == "error"
+    assert data["assembly_progress"] is None
+    assert data["assembly_started_at"] is None
+    assert "treo" in data["assembly_error"].lower() or "đặt lại" in data["assembly_error"].lower()
+
+
+def test_reset_stuck_assembly_rejects_when_actually_in_progress(client, render_ready_project):
+    from app.render import engine as render_engine
+
+    pid = render_ready_project
+    channel_id = client.get(f"/projects/{pid}").json()["channel_id"]
+    _write_stale_assembling_status(pid, channel_id)
+    render_engine._mark_assembly_in_progress(pid)
+    try:
+        resp = client.post(f"/projects/{pid}/render/assemble/reset")
+        assert resp.status_code == 409
+    finally:
+        render_engine._mark_assembly_done(pid)
+
+
+def test_reset_stuck_assembly_400_when_nothing_to_reset(client, render_ready_project):
+    resp = client.post(f"/projects/{render_ready_project}/render/assemble/reset")
+    assert resp.status_code == 400
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+@respx.mock
+def test_assemble_video_marks_and_clears_in_progress_flag(client, render_ready_project, monkeypatch):
+    """`_mark_assembly_in_progress`/`_mark_assembly_done` (mục 111) phải bọc ĐÚNG toàn
+    bộ vòng đời `assemble_video()` — verify TRỰC TIẾP bằng spy: cờ phải `True` NGAY khi
+    `_build_segment` (Pass 2) đang chạy, và `False` NGAY sau khi hàm trả về, dù thành
+    công hay lỗi (dùng ffmpeg thiếu để ép lỗi — vẫn phải dọn cờ qua `finally`)."""
+    import app.render.assembly as assembly_mod
+    from app.render import engine as render_engine
+
+    pid = render_ready_project
+    _mock_asset_apis()
+    client.post(f"/projects/{pid}/render/start")
+    state = client.get(f"/projects/{pid}/render/status").json()
+    for s in state["shots"]:
+        client.post(f"/projects/{pid}/render/shots/{s['shot_id']}/approve", json={"approved": True})
+
+    # Short-circuit — KHÔNG gọi `real_build_segment` thật (asset ở đây là bytes GIẢ, VD
+    # FAKE_PNG không phải PNG thật — để ffmpeg THẬT xử lý sẽ treo/chậm không đoán trước
+    # được, đúng lớp rủi ro "ffmpeg hang" đã phát hiện lúc viết test này, KHÔNG liên quan
+    # gì tới thứ đang test ở đây). Raise lỗi NGAY sau khi ghi nhận cờ — vừa verify cờ
+    # `True` lúc Pass 2 đang chạy, vừa verify LUÔN nhánh lỗi dọn cờ đúng qua `finally`.
+    observed = {}
+
+    def spy_build_segment(*args, **kwargs):
+        observed["during"] = render_engine.is_assembly_in_progress(pid)
+        raise RuntimeError("giả lập lỗi ngay trong Pass 2 — không cần ffmpeg xử lý thật")
+
+    monkeypatch.setattr(assembly_mod, "_build_segment", spy_build_segment)
+
+    assert not render_engine.is_assembly_in_progress(pid)
+    assembly_mod.assemble_video(pid, resolution="720p", codec="h264", quality="low")
+    assert observed.get("during") is True
+    assert not render_engine.is_assembly_in_progress(pid)  # LUÔN dọn sau khi xong, kể cả lỗi
 
 
 def test_gpu_encode_status_endpoint_returns_bool(client):
@@ -612,6 +1125,73 @@ def test_assemble_uses_real_narration_duration_not_beat_timestamp(client, projec
         f"Video ra dài {total_duration}s — kỳ vọng khớp giọng đọc thật ({real_narration_sec}s), "
         f"không phải timestamp kịch bản (8s) — nghi ngờ vẫn còn dùng _beat_duration thay vì narration_duration_sec"
     )
+    assert final_state["assembly_completed_at"] is not None
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_visual_updated_at_outlives_assembly_completed_at_after_regenerate(client, project_with_brief):
+    """Bug thật người dùng báo (2026-08-23): ảnh hiện ở Visual Studio khác ảnh trong video
+    đã ghép, KHÔNG có cảnh báo gì cho biết video đã lệch. `visual_updated_at` (set lúc
+    sinh/upload THÀNH CÔNG, không bị xoá về None như `visual_started_at`) phải mới hơn
+    `assembly_completed_at` (set lúc ghép xong) sau khi regenerate 1 shot ĐÃ từng nằm
+    trong lần ghép trước — đây là dữ liệu `RenderStudio.tsx` dùng để hiện banner cảnh
+    báo "video không còn khớp".
+
+    Dựng asset thật qua ffmpeg (KHÔNG dùng `_mock_asset_apis`'s FAKE_PNG cho bước ghép —
+    bug thật gặp lúc viết test này: ffmpeg thật xử lý PNG giả bị treo/lỗi không đoán
+    trước được, đúng cảnh báo đã ghi ở `test_assemble_works_without_output_enter`), chỉ
+    mock provider ảnh (respx) cho ĐÚNG bước regenerate (`generate_visual_asset` ghi bytes
+    thẳng ra đĩa, không qua ffmpeg nên FAKE_PNG an toàn ở bước này)."""
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.assembly import assemble_video
+    from app.render.schemas import RenderState, ShotRenderStatus
+
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [["B01", "0:00–0:03", "Image", "Canh test", "Khong tieng", "Loi thoai ngan."]]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_id = client.post(f"/projects/{pid}/visual/generate").json()["shots"][0]["shot_id"]
+
+    pdir = project_dir(channel_id, pid)
+    shot_png = pdir / "assets" / f"{shot_id}.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240", "-frames:v", "1", "-update", "1", str(shot_png)], capture_output=True, check=True, text=True)
+    narration_mp3 = pdir / "assets" / f"{shot_id}.mp3"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "mp3", str(narration_mp3)], capture_output=True, check=True, text=True)
+    real_narration_sec = _ffprobe_duration(narration_mp3)
+
+    state = RenderState(project_id=pid, shots=[ShotRenderStatus(
+        shot_id=shot_id, visual_status="ready", visual_asset_path=str(shot_png), approved=True,
+        narration_status="ready", narration_asset_path=str(narration_mp3), narration_duration_sec=real_narration_sec,
+    )])
+    write_json(pdir / "render.json", state.model_dump())
+
+    assemble_video(pid, resolution="720p", codec="h264", quality="low")
+
+    assembled_state = client.get(f"/projects/{pid}/render/status").json()
+    assert assembled_state["assembly_status"] == "done", assembled_state.get("assembly_error")
+    completed_at = assembled_state["assembly_completed_at"]
+    assert completed_at is not None
+
+    with respx.mock:
+        image = client.post("/providers", json={"task": "image", "provider_name": "openai", "display_name": "OAI", "connection_type": "cloud_api", "api_key": "sk-x"}).json()
+        client.patch(f"/providers/{image['id']}", json={"is_default": True})
+        respx.post("https://api.openai.com/v1/images/generations").mock(return_value=Response(200, json={"data": [{"b64_json": base64.b64encode(FAKE_PNG).decode()}]}))
+        resp = client.post(f"/projects/{pid}/render/shots/{shot_id}/regenerate-visual")
+        assert resp.status_code == 200
+
+    after_state = client.get(f"/projects/{pid}/render/status").json()
+    shot_after = next(s for s in after_state["shots"] if s["shot_id"] == shot_id)
+    assert shot_after["visual_status"] == "ready"
+    assert shot_after["visual_updated_at"] is not None
+    # ISO 8601 (`vn_isoformat`) so sánh được trực tiếp bằng string — cùng múi giờ/độ dài.
+    assert shot_after["visual_updated_at"] > completed_at, "visual_updated_at phải MỚI HƠN assembly_completed_at sau khi regenerate — đây là điều kiện RenderStudio.tsx dùng để hiện banner cảnh báo video đã cũ"
+    assert after_state["assembly_status"] == "done"  # ghép cũ KHÔNG tự đổi trạng thái — chỉ cảnh báo, không tự động ghép lại (specs/01: mỗi bước là hành động người dùng tự bấm)
 
 
 # ---------------------------------------------------------------------------
@@ -694,15 +1274,24 @@ def _ffprobe_duration(path: Path) -> float:
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
-def test_build_segment_loops_short_video_to_fill_target_duration(tmp_path):
+def test_build_segment_freezes_last_frame_of_short_video_to_fill_target_duration(tmp_path):
     """Bug thật (2026-08-17, mục 43): B01 của project thật người dùng có shot video
     (AI sinh "6s loopable" HOẶC upload tay) NGẮN HƠN duration của beat — trước fix,
-    `_build_segment` không loop input video, segment ra ĐÚNG bằng độ dài file gốc (ngắn
-    hơn `duration` yêu cầu). `_xfade_chain` tính offset dựa trên `duration` danh nghĩa
-    (không phải độ dài thật của segment) → lệch, ffmpeg lỗi filter graph ở bước ghép
-    cuối. Verify bằng ffmpeg THẬT: dựng 1 video test 2s, yêu cầu segment 5s, xác nhận
-    file kết quả THẬT SỰ dài ~5s (không phải 2s) — tức video đã được loop để lấp đủ."""
+    `_build_segment` không xử lý gì input video, segment ra ĐÚNG bằng độ dài file gốc
+    (ngắn hơn `duration` yêu cầu). `_xfade_chain` tính offset dựa trên `duration` danh
+    nghĩa (không phải độ dài thật của segment) → lệch, ffmpeg lỗi filter graph ở bước
+    ghép cuối. Fix lúc đó: loop video từ đầu (`-stream_loop -1`) tới đủ `duration`.
+
+    **Đổi lại (2026-08-26)**: loop nhìn giả (chuyển động "giật" quay lại đầu) — đổi sang
+    ĐÓNG BĂNG khung hình CUỐI thay vì lặp lại từ đầu (`tpad=stop_mode=clone`, xem
+    `_build_segment`). Verify bằng ffmpeg THẬT: dựng 1 video test 2s có nội dung ĐỔI DẦN
+    theo thời gian (`testsrc`), yêu cầu segment 5s — xác nhận (1) file kết quả THẬT SỰ
+    dài ~5s (không phải 2s, tức có lấp đủ), VÀ (2) frame ở giây 4.5 (trong vùng lấp thêm)
+    GIỐNG HỆT frame ở giây 1.9 (gần cuối clip gốc) — tức đang ĐÓNG BĂNG khung cuối, KHÔNG
+    lặp lại từ đầu (nếu còn loop, frame ở giây 4.5 sẽ khớp vị trí ~0.5s của lượt lặp thứ
+    3, nội dung testsrc lúc đó khác hẳn frame ở giây 1.9)."""
     ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
     short_video = tmp_path / "short.mp4"
     subprocess.run(
         [ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(short_video)],
@@ -716,7 +1305,30 @@ def test_build_segment_loops_short_video_to_fill_target_duration(tmp_path):
         resolution="320:240", video_codec="libx264", audio_codec="aac", crf=28, ensure_audio_track=True,
     )
     result_duration = _ffprobe_duration(out_path)
-    assert result_duration >= 4.8, f"Segment chỉ dài {result_duration}s dù yêu cầu 5s — video ngắn KHÔNG được loop để lấp đủ (bug cũ)"
+    assert result_duration >= 4.8, f"Segment chỉ dài {result_duration}s dù yêu cầu 5s — video ngắn không được lấp đủ (bug cũ)"
+
+    def _extract_frame(t: float, name: str) -> Path:
+        frame_path = tmp_path / name
+        subprocess.run([ffmpeg, "-y", "-ss", str(t), "-i", str(out_path), "-frames:v", "1", "-update", "1", str(frame_path)], capture_output=True, check=True, text=True)
+        return frame_path
+
+    frame_near_original_end = _extract_frame(1.9, "frame_1_9.png")
+    frame_in_padded_tail = _extract_frame(4.5, "frame_4_5.png")
+
+    # So khớp bằng SSIM (không so BYTE thô) — segment ra là H.264 lossy, 2 lần trích frame
+    # riêng biệt có thể lệch vài byte pixel do nhiễu nén dù nội dung nhìn giống hệt nhau
+    # (đã xác nhận thật: so byte thô của 2 khung ĐÓNG BĂNG thật vẫn lệch ở vài vị trí, SSIM
+    # đo được vẫn ra đúng 1.0). SSIM ~1.0 = ảnh giống hệt (đóng băng đúng); nếu lỡ quay lại
+    # loop từ đầu, khung ở giây 4.5 sẽ rơi vào ~giữa lượt lặp thứ 3 của `testsrc` — nội
+    # dung đổi rõ rệt theo thời gian, SSIM sẽ tụt hẳn xuống thấp, không thể nhầm lẫn.
+    ssim_result = subprocess.run(
+        [ffmpeg, "-i", str(frame_near_original_end), "-i", str(frame_in_padded_tail), "-filter_complex", "ssim", "-f", "null", "-"],
+        capture_output=True, check=True, text=True,
+    )
+    match = re.search(r"All:([\d.]+)", ssim_result.stderr)
+    assert match, f"Không đọc được SSIM từ output ffmpeg: {ssim_result.stderr[-500:]}"
+    ssim_score = float(match.group(1))
+    assert ssim_score > 0.99, f"SSIM giữa khung gần cuối clip gốc và khung trong vùng lấp thêm chỉ {ssim_score} — nghi ngờ vẫn đang loop lại từ đầu thay vì đóng băng"
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
@@ -787,6 +1399,114 @@ def test_build_segment_normalizes_mismatched_narration_sample_rate(tmp_path):
     )
     sr_out, ch_out = _probe_audio_format(out_path)
     assert (sr_out, ch_out) == (44100, 2), f"Segment giữ NGUYÊN định dạng input ({sr_out}Hz/{ch_out}ch) thay vì chuẩn hoá 44100Hz/2ch — sẽ vỡ khi trộn với segment/nguồn khác chuẩn"
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_build_segment_pads_narration_lead_in_and_lead_out_with_silence(tmp_path):
+    """Bug thật người dùng báo (2026-08-23): bật hiệu ứng chuyển cảnh (transition khác
+    "cut") làm giọng đọc bị "nuốt chữ" ở cả đầu lẫn cuối shot — nguyên nhân là
+    `_xfade_chain` cắt/trộn `_XFADE_DURATION_SEC` giây ĐẦU/CUỐI audio, mà audio gốc
+    (TTS) lấp ĐẦY nguyên slot, không có khoảng lặng để "hy sinh". Fix: `_build_segment`
+    nhận thêm `narration_lead_in_sec`/`narration_lead_out_sec` — đệm lặng vào audio bằng
+    `adelay`/`apad` TRƯỚC khi ghép, segment dài thêm đúng bằng phần đệm.
+
+    Verify bằng ffmpeg THẬT: dựng 1 audio "đặc" (tiếng liên tục, không khoảng lặng) dài
+    2s, build segment với lead_in=lead_out=0.6s — xác nhận (1) segment DÀI HƠN đúng 1.2s
+    (2.0 + 0.6 + 0.6), (2) CÓ khoảng lặng thật ở đúng 0.6s đầu và 0.6s cuối (audio gốc
+    "đặc" không hề có khoảng lặng nào — mọi khoảng lặng đo được PHẢI đến từ phần đệm mới
+    thêm, không phải ngẫu nhiên từ nguồn)."""
+    ffmpeg = shutil.which("ffmpeg")
+    image_src = tmp_path / "src.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240", "-frames:v", "1", "-update", "1", str(image_src)], capture_output=True, check=True, text=True)
+    narration = tmp_path / "narration_dac.wav"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(narration)], capture_output=True, check=True, text=True)
+
+    out_path = tmp_path / "segment_padded.mp4"
+    _build_segment(
+        ffmpeg, str(image_src), str(narration), duration=2.0 + 0.6 + 0.6, out_path=out_path,
+        resolution="320:240", video_codec="libx264", audio_codec="aac", crf=28,
+        narration_lead_in_sec=0.6, narration_lead_out_sec=0.6,
+    )
+
+    result_duration = _ffprobe_duration(out_path)
+    assert result_duration == pytest.approx(3.2, abs=0.1)
+
+    proc = subprocess.run(
+        [ffmpeg, "-i", str(out_path), "-af", "silencedetect=noise=-40dB:d=0.3", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    silences = re.findall(r"silence_start: ([\d.]+).*?silence_end: ([\d.]+)", proc.stderr, re.DOTALL)
+    assert silences, f"Không phát hiện khoảng lặng nào — đệm lead-in/lead-out không có tác dụng thật. stderr: {proc.stderr[-800:]}"
+    starts = [float(s) for s, _ in silences]
+    ends = [float(e) for _, e in silences]
+    assert any(s < 0.1 for s in starts), f"Không thấy khoảng lặng bắt đầu ngay từ đầu (đệm lead-in) — starts={starts}"
+    assert any(e > result_duration - 0.1 for e in ends), f"Không thấy khoảng lặng kéo dài tới cuối (đệm lead-out) — ends={ends}"
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_assemble_pads_narration_only_at_shots_touching_a_transition(client, project_with_brief):
+    """Xác nhận `assemble_video` chỉ đệm lặng ĐÚNG những shot thật sự giáp ranh giới
+    transition (khác "cut") — không đệm lãng phí cho shot nối bằng "cut" (không xfade,
+    không cần bảo vệ gì). 3 shot: S0→S1 dùng "fade" (cần đệm), S1→S2 dùng "cut" (không
+    cần đệm) — kỳ vọng: S0 chỉ đệm ĐUÔI (giáp fade phía sau), S1 chỉ đệm ĐẦU (giáp fade
+    phía trước, đuôi giáp cut nên không đệm), S2 không đệm gì (giáp cut, là shot cuối)."""
+    from app.config import project_dir
+    from app.render.assembly import _XFADE_DURATION_SEC as XFADE
+
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [
+        ["B01", "0:00–0:02", "Image", "Canh 1", "", "Loi thoai mot."],
+        ["B02", "0:02–0:04", "Image", "Canh 2", "", "Loi thoai hai."],
+        ["B03", "0:04–0:06", "Image", "Canh 3", "", "Loi thoai ba."],
+    ]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_ids = [s["shot_id"] for s in client.post(f"/projects/{pid}/visual/generate").json()["shots"]]
+    assert len(shot_ids) == 3
+
+    resp = client.patch(f"/projects/{pid}/visual/shots/{shot_ids[0]}", json={"transition_to_next": "fade"})
+    assert resp.status_code == 200, resp.text
+    resp = client.patch(f"/projects/{pid}/visual/shots/{shot_ids[1]}", json={"transition_to_next": "cut"})
+    assert resp.status_code == 200, resp.text
+
+    pdir = project_dir(channel_id, pid)
+    base_durations = [1.5, 1.8, 1.2]
+    for shot_id, dur in zip(shot_ids, base_durations):
+        png = pdir / "assets" / f"{shot_id}.png"
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+        wav = pdir / "assets" / f"{shot_id}.wav"
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={dur}", str(wav)], capture_output=True, check=True, text=True)
+
+    from app.filestore import write_json
+    from app.render.assembly import assemble_video
+    from app.render.schemas import RenderState, ShotRenderStatus
+
+    shot_statuses = [
+        ShotRenderStatus(
+            shot_id=shot_id, visual_status="ready", visual_asset_path=str(pdir / "assets" / f"{shot_id}.png"), approved=True,
+            narration_status="ready", narration_asset_path=str(pdir / "assets" / f"{shot_id}.wav"), narration_duration_sec=_ffprobe_duration(pdir / "assets" / f"{shot_id}.wav"),
+        )
+        for shot_id in shot_ids
+    ]
+    write_json(pdir / "render.json", RenderState(project_id=pid, shots=shot_statuses).model_dump())
+
+    assemble_video(pid, resolution="720p", codec="h264", quality="low")
+
+    final_state = client.get(f"/projects/{pid}/render/status").json()
+    assert final_state["assembly_status"] == "done", final_state.get("assembly_error")
+
+    seg_dir = pdir / "renders" / "segments"
+    seg_durations = [_ffprobe_duration(seg_dir / f"segment_{i:03d}.mp4") for i in range(3)]
+    real_base = [_ffprobe_duration(pdir / "assets" / f"{shot_id}.wav") for shot_id in shot_ids]
+
+    assert seg_durations[0] == pytest.approx(real_base[0] + XFADE, abs=0.1), "S0 giáp fade PHÍA SAU — phải đệm ĐUÔI"
+    assert seg_durations[1] == pytest.approx(real_base[1] + XFADE, abs=0.1), "S1 giáp fade PHÍA TRƯỚC (đuôi giáp cut, không đệm) — chỉ đệm ĐẦU"
+    assert seg_durations[2] == pytest.approx(real_base[2], abs=0.1), "S2 giáp cut cả 2 phía (shot cuối) — KHÔNG đệm gì"
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
@@ -921,6 +1641,170 @@ def test_xfade_chain_bounds_cost_by_trimming_accumulator_not_reprocessing_whole_
     )
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_assemble_with_intro_and_all_transitions_does_not_drop_last_shot(client, project_with_brief):
+    """Bug thật người dùng báo (2026-08-23): shot CUỐI (ảnh + giọng đọc) "biến mất" khỏi
+    video ghép khi project vừa CÓ intro riêng VỪA dùng transition (khác "cut") ở MỌI ranh
+    giới shot. Xác nhận nguyên nhân gốc bằng ffmpeg/ffprobe THẬT (không suy đoán, xem
+    IMPLEMENTATION_REPORT.md mục 76): `_xfade_chain` (ghép shot-to-shot qua transition)
+    ra `body_path` với video track TẦN SỐ KHUNG HÌNH KHÔNG ỔN ĐỊNH — mỗi bước là 1
+    `_concat_fast` (concat DEMUXER, `-c copy`) nối "head" (stream-copy cắt dở
+    `current_path`) với "blend" (re-encode xfade/acrossfade riêng, timestamp bắt đầu từ 0
+    ĐỘC LẬP) — 2 nguồn timestamp khác nhau ghép bằng stream-copy tích luỹ lệch qua từng
+    bước. Khi `_concat_intro_and_body` (filter `concat`) ghép tiếp `body_path` này với
+    intro (CFR sạch), ffmpeg gặp audio DTS không tăng đơn điệu và tự ý DROP hẳn ~2.3s
+    frame video CUỐI (đúng bằng độ dài shot cuối) — KHÔNG raise exception, KHÔNG ghi gì
+    vào `assembly_error` (ffmpeg exit code 0, "drop" chỉ in ở stdout summary). Fix
+    (`assemble_video`): chuẩn hoá `body_path` về CFR sạch (`-vsync cfr` + `aresample=
+    async=1:first_pts=0`) trước khi đưa vào `_concat_intro_and_body`, CHỈ khi có CẢ intro
+    LẪN transition (2 điều kiện cùng lúc mới lộ bug này).
+
+    Verify bằng ffmpeg THẬT: cố ý đặt shot CUỐI NGẮN NHẤT (đúng đặc điểm dễ "biến mất"
+    nhất của bug thật) — tổng duration video ra phải gần đúng lý thuyết (intro + tổng
+    slot shot - overlap xfade), KHÔNG được ngắn hơn hẳn (dấu hiệu 1 shot bị drop hoàn
+    toàn)."""
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.assembly import _XFADE_DURATION_SEC, assemble_video
+    from app.render.schemas import IntroAssetStatus, RenderState, ShotRenderStatus
+
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [
+        ["B01", "0:00–0:03", "Image", "Canh 1", "", "Loi thoai block mot."],
+        ["B02", "0:03–0:06", "Image", "Canh 2", "", "Loi thoai block hai."],
+        ["B03", "0:06–0:09", "Image", "Canh 3", "", "Loi thoai block ba, la shot cuoi cung."],
+    ]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_ids = [s["shot_id"] for s in client.post(f"/projects/{pid}/visual/generate").json()["shots"]]
+    assert len(shot_ids) == 3
+
+    # MỌI ranh giới shot dùng transition khác "cut" — đúng kịch bản lỗi thật.
+    for shot_id, transition in zip(shot_ids[:-1], ["fade", "fadeblack"]):
+        resp = client.patch(f"/projects/{pid}/visual/shots/{shot_id}", json={"transition_to_next": transition})
+        assert resp.status_code == 200, resp.text
+
+    pdir = project_dir(channel_id, pid)
+    shot_statuses = []
+    shot_durations = [2.5, 3.0, 2.0]  # shot CUỐI ngắn nhất — đúng đặc điểm bug thật
+    for shot_id, dur in zip(shot_ids, shot_durations):
+        png = pdir / "assets" / f"{shot_id}.png"
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+        wav = pdir / "assets" / f"{shot_id}.wav"
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={dur}", str(wav)], capture_output=True, check=True, text=True)
+        shot_statuses.append(ShotRenderStatus(
+            shot_id=shot_id, visual_status="ready", visual_asset_path=str(png), approved=True,
+            narration_status="ready", narration_asset_path=str(wav), narration_duration_sec=_ffprobe_duration(wav),
+        ))
+
+    intro_src = pdir / "assets" / "intro_src.mp4"
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=red:s=320x240:d=2", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+         "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(intro_src)],
+        capture_output=True, check=True, text=True,
+    )
+    intro_dur = _ffprobe_duration(intro_src)
+
+    state = RenderState(
+        project_id=pid, shots=shot_statuses,
+        intro=IntroAssetStatus(kind="video", visual_asset_path=str(intro_src), transition_to_next="cut"),
+    )
+    write_json(pdir / "render.json", state.model_dump())
+
+    assemble_video(pid, resolution="720p", codec="h264", quality="low")
+
+    final_state = client.get(f"/projects/{pid}/render/status").json()
+    assert final_state["assembly_status"] == "done", final_state.get("assembly_error")
+    result_duration = _ffprobe_duration(Path(final_state["final_video_path"]))
+
+    expected_total = intro_dur + sum(s.narration_duration_sec for s in shot_statuses) - 2 * _XFADE_DURATION_SEC
+    assert result_duration > expected_total - 1.0, (
+        f"Video ra dài {result_duration}s — ngắn hơn hẳn kỳ vọng ({expected_total}s), "
+        "nghi ngờ shot cuối bị ffmpeg concat filter drop mất — đúng bug thật đã sửa (mục 76)"
+    )
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_assemble_with_intro_and_no_transitions_does_not_drop_last_shot(client, project_with_brief):
+    """Bug thật người dùng báo lại (2026-08-26, project short-form thật "Đính chính lầm
+    tưởng..."): shot CUỐI vẫn "biến mất" dù project KHÔNG dùng transition nào (mọi ranh
+    giới "cut" mặc định) — CHỈ có intro riêng. Test `test_assemble_with_intro_and_all_
+    transitions_does_not_drop_last_shot` ở trên (mục 76) chỉ phủ nhánh CÓ transition; fix
+    lúc đó cố tình CHỈ chuẩn hoá CFR cho nhánh đó, với lý do (SAI, xem sửa lại mục 78 mới)
+    "nhánh không-transition dùng concat DEMUXER, cùng nguồn `_build_segment` nên không gặp
+    lệch". Tái hiện THẬT trên chính project người dùng báo lỗi (`prj_1787673042428`, xem
+    IMPLEMENTATION_REPORT.md mục mới): concat DEMUXER `-c copy` VẪN có thể giữ nguyên
+    timebase/DTS không đều tuỳ input gốc, KHÔNG chỉ riêng đường `_xfade_chain` — khi
+    `_concat_intro_and_body` ghép `body_path` (từ concat demuxer) với intro, ffmpeg vẫn
+    silently drop shot cuối y hệt bug mục 76. Fix: chuyển bước CFR-normalize ra áp dụng
+    MỌI khi có intro, bất kể `has_transitions`."""
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.assembly import assemble_video
+    from app.render.schemas import IntroAssetStatus, RenderState, ShotRenderStatus
+
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [
+        ["B01", "0:00–0:03", "Image", "Canh 1", "", "Loi thoai block mot."],
+        ["B02", "0:03–0:06", "Image", "Canh 2", "", "Loi thoai block hai."],
+        ["B03", "0:06–0:09", "Image", "Canh 3", "", "Loi thoai block ba, la shot cuoi cung."],
+    ]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_ids = [s["shot_id"] for s in client.post(f"/projects/{pid}/visual/generate").json()["shots"]]
+    assert len(shot_ids) == 3
+    # KHÔNG patch transition_to_next của bất kỳ shot nào — giữ mặc định "cut" (has_transitions=False).
+
+    pdir = project_dir(channel_id, pid)
+    shot_statuses = []
+    shot_durations = [2.5, 3.0, 2.0]  # shot CUỐI ngắn nhất — đúng đặc điểm bug thật
+    for shot_id, dur in zip(shot_ids, shot_durations):
+        png = pdir / "assets" / f"{shot_id}.png"
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+        wav = pdir / "assets" / f"{shot_id}.wav"
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={dur}", str(wav)], capture_output=True, check=True, text=True)
+        shot_statuses.append(ShotRenderStatus(
+            shot_id=shot_id, visual_status="ready", visual_asset_path=str(png), approved=True,
+            narration_status="ready", narration_asset_path=str(wav), narration_duration_sec=_ffprobe_duration(wav),
+        ))
+
+    intro_src = pdir / "assets" / "intro_src.mp4"
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=red:s=320x240:d=2", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+         "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(intro_src)],
+        capture_output=True, check=True, text=True,
+    )
+    intro_dur = _ffprobe_duration(intro_src)
+
+    state = RenderState(
+        project_id=pid, shots=shot_statuses,
+        intro=IntroAssetStatus(kind="video", visual_asset_path=str(intro_src), transition_to_next="cut"),
+    )
+    write_json(pdir / "render.json", state.model_dump())
+
+    assemble_video(pid, resolution="720p", codec="h264", quality="low")
+
+    final_state = client.get(f"/projects/{pid}/render/status").json()
+    assert final_state["assembly_status"] == "done", final_state.get("assembly_error")
+    result_duration = _ffprobe_duration(Path(final_state["final_video_path"]))
+
+    expected_total = intro_dur + sum(s.narration_duration_sec for s in shot_statuses)
+    assert result_duration > expected_total - 1.0, (
+        f"Video ra dài {result_duration}s — ngắn hơn hẳn kỳ vọng ({expected_total}s), "
+        "nghi ngờ shot cuối bị ffmpeg concat filter drop mất dù KHÔNG dùng transition nào"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Duration reflow (2026-08-17) — theo yêu cầu người dùng: video upload/AI sinh lệch độ
 # dài thật so với slot quy định (thường gặp nhất khi upload tay) không còn bị loop/cắt
@@ -1047,6 +1931,220 @@ def test_reflow_skips_when_only_one_shot_no_donor_available(tmp_path):
     assert durations[0] == 5.0
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_reflow_does_not_shrink_video_shot_below_its_own_ready_narration(tmp_path):
+    """Bug thật người dùng báo (2026-08-26): shot VIDEO ngắn hơn giọng đọc CỦA CHÍNH NÓ
+    (VD video AI ~2s nhưng giọng đọc dài 6s) bị CẮT CỤT giọng đọc khi chuyển sang shot kế
+    — vòng lặp reflow trước đây LUÔN co `durations[i]` về đúng độ dài video thật (2s), bất
+    kể `durations[i]` đang dài hơn (6s) vì CHÍNH giọng đọc shot đó, không phải vì lý do gì
+    khác. Fix: sàn `_narration_floor` — không bao giờ co xuống dưới giọng đọc của chính
+    shot khi giọng đọc đã sẵn sàng (`narration_status=="ready"`)."""
+    from app.render.assembly import _reflow_video_durations
+    from app.render.schemas import ShotRenderStatus
+
+    ffmpeg = shutil.which("ffmpeg")
+    short_video = tmp_path / "short.mp4"
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(short_video)],
+        capture_output=True, check=True, text=True,
+    )
+    assert round(_ffprobe_duration(short_video)) == 2  # video thật NGẮN HƠN giọng đọc bên dưới (6s)
+
+    statuses = [
+        ShotRenderStatus(shot_id="s1", visual_asset_path=str(short_video), narration_status="ready", narration_duration_sec=6.0),
+        ShotRenderStatus(shot_id="s2", visual_asset_path=None),
+    ]
+    durations = [6.0, 3.0]  # durations[0] khởi tạo = narration_duration_sec, đúng theo _shot_base_duration thật
+    _reflow_video_durations(statuses, durations)
+
+    assert durations[0] == 6.0, f"Shot video bị co xuống {durations[0]}s dù giọng đọc CỦA CHÍNH NÓ dài 6s — sẽ bị _build_segment cắt cụt audio"
+    assert durations[1] == 3.0  # không vay/trả gì — video "ngắn hơn" chỉ vì lý do giọng đọc của chính nó, không phải lệch thật cần bù
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_assemble_video_shot_shorter_than_narration_does_not_truncate_audio(client, project_with_brief):
+    """Verify END-TO-END qua đúng `assemble_video()` thật (không chỉ unit-test hàm
+    reflow riêng): 1 shot VIDEO 2s + giọng đọc 6s — segment ra phải dài ĐỦ ~6s (đóng băng
+    khung cuối lấp phần thiếu, xem `_build_segment`), KHÔNG bị cắt còn ~2s theo độ dài
+    video gốc — đúng bug thật người dùng báo khi chuyển shot làm giọng đọc bị cắt cụt."""
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [["B01", "0:00–0:06", "Video", "Canh video ngan", "", "Loi thoai dai hon video that nhieu."]]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_id = client.post(f"/projects/{pid}/visual/generate").json()["shots"][0]["shot_id"]
+
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.schemas import RenderState, ShotRenderStatus
+
+    pdir = project_dir(channel_id, pid)
+    video_path = pdir / "assets" / f"{shot_id}.mp4"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video_path)], capture_output=True, check=True, text=True)
+    wav_path = pdir / "assets" / f"{shot_id}.wav"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=6", str(wav_path)], capture_output=True, check=True, text=True)
+    narration_dur = _ffprobe_duration(wav_path)
+    assert round(narration_dur) == 6
+
+    write_json(pdir / "render.json", RenderState(project_id=pid, shots=[
+        ShotRenderStatus(shot_id=shot_id, visual_status="ready", visual_asset_path=str(video_path), approved=True,
+                          narration_status="ready", narration_asset_path=str(wav_path), narration_duration_sec=narration_dur),
+    ]).model_dump())
+
+    resp = client.post(f"/projects/{pid}/render/assemble", json={"resolution": "720p", "codec": "h264", "quality": "low"})
+    assert resp.status_code == 200, resp.text
+    final_state = client.get(f"/projects/{pid}/render/status").json()
+    assert final_state["assembly_status"] == "done", final_state.get("assembly_error")
+
+    result_duration = _ffprobe_duration(Path(final_state["final_video_path"]))
+    assert result_duration >= 5.7, f"Video ra chỉ dài {result_duration}s — giọng đọc 6s có vẻ đã bị cắt cụt theo độ dài video gốc (2s)"
+
+
+def _silence_ranges(ffmpeg: str, path) -> list[tuple[float, float]]:
+    """Chạy `silencedetect` thật lên audio đã ghép — trả list (start, end) các khoảng lặng
+    thật sự (không tiếng, kể cả silence do `apad` đệm cho transition) — dùng để xác nhận
+    KHÔNG có khoảng lặng bất thường nào lọt VÀO GIỮA nội dung giọng đọc thật (sine tone),
+    ngoài đúng 1 khoảng ở ranh giới transition đã biết trước."""
+    result = subprocess.run(
+        [ffmpeg, "-i", str(path), "-af", "silencedetect=noise=-30dB:d=0.1", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    starts = [float(m) for m in re.findall(r"silence_start:\s*([\d.]+)", result.stderr)]
+    ends = [float(m) for m in re.findall(r"silence_end:\s*([\d.]+)", result.stderr)]
+    return list(zip(starts, ends))
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_freeze_video_shot_lead_out_before_transition_does_not_truncate_narration(client, project_with_brief):
+    """Kết hợp 2 tính năng: shot VIDEO ngắn hơn giọng đọc (đóng băng khung cuối, mục 81)
+    NẰM NGAY TRƯỚC 1 ranh giới transition (cần đệm lặng `narration_lead_out_sec`, mục 57)
+    — người dùng yêu cầu xác nhận đệm lặng transition vẫn hoạt động đúng cho shot video
+    bị đóng băng, không chỉ ảnh tĩnh. Verify bằng `silencedetect` thật: CHỈ 1 khoảng lặng
+    (đúng vùng đệm transition) xuất hiện SAU khi giọng đọc 6s đã phát HẾT — không có
+    khoảng lặng nào lọt vào giữa 6s giọng đọc (tức không bị cắt cụt bởi khung hình đóng
+    băng ngắn hơn giọng đọc)."""
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [
+        ["B01", "0:00–0:06", "Video", "Canh video ngan", "", "Loi thoai dai hon video that nhieu, can nghe het khong bi cat."],
+        ["B02", "0:06–0:09", "Image", "Canh anh", "", "Loi thoai shot hai."],
+    ]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shots = client.post(f"/projects/{pid}/visual/generate").json()["shots"]
+    shot_a, shot_b = shots[0]["shot_id"], shots[1]["shot_id"]
+    resp = client.patch(f"/projects/{pid}/visual/shots/{shot_a}", json={"transition_to_next": "fade"})
+    assert resp.status_code == 200, resp.text
+
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.schemas import RenderState, ShotRenderStatus
+
+    pdir = project_dir(channel_id, pid)
+    video_a = pdir / "assets" / f"{shot_a}.mp4"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video_a)], capture_output=True, check=True, text=True)
+    wav_a = pdir / "assets" / f"{shot_a}.wav"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=6", str(wav_a)], capture_output=True, check=True, text=True)
+    narr_a_dur = _ffprobe_duration(wav_a)
+
+    png_b = pdir / "assets" / f"{shot_b}.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=green:s=320x240", "-frames:v", "1", "-update", "1", str(png_b)], capture_output=True, check=True, text=True)
+    wav_b = pdir / "assets" / f"{shot_b}.wav"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=880:duration=3", str(wav_b)], capture_output=True, check=True, text=True)
+    narr_b_dur = _ffprobe_duration(wav_b)
+
+    write_json(pdir / "render.json", RenderState(project_id=pid, shots=[
+        ShotRenderStatus(shot_id=shot_a, visual_status="ready", visual_asset_path=str(video_a), approved=True,
+                          narration_status="ready", narration_asset_path=str(wav_a), narration_duration_sec=narr_a_dur),
+        ShotRenderStatus(shot_id=shot_b, visual_status="ready", visual_asset_path=str(png_b), approved=True,
+                          narration_status="ready", narration_asset_path=str(wav_b), narration_duration_sec=narr_b_dur),
+    ]).model_dump())
+
+    resp = client.post(f"/projects/{pid}/render/assemble", json={"resolution": "720p", "codec": "h264", "quality": "low"})
+    assert resp.status_code == 200, resp.text
+    final_state = client.get(f"/projects/{pid}/render/status").json()
+    assert final_state["assembly_status"] == "done", final_state.get("assembly_error")
+
+    ranges = _silence_ranges(ffmpeg, final_state["final_video_path"])
+    assert len(ranges) == 1, f"Kỳ vọng đúng 1 khoảng lặng (vùng đệm transition), thấy {len(ranges)}: {ranges}"
+    silence_start, _silence_end = ranges[0]
+    assert silence_start >= narr_a_dur - 0.2, (
+        f"Khoảng lặng bắt đầu ở {silence_start}s, TRƯỚC khi giọng đọc {narr_a_dur}s phát xong — "
+        "nghi ngờ đóng băng khung hình video ngắn làm giọng đọc bị cắt cụt sớm"
+    )
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_freeze_video_shot_lead_in_after_transition_does_not_truncate_narration(client, project_with_brief):
+    """Chiều NGƯỢC lại của test trên: shot VIDEO ngắn hơn giọng đọc nằm NGAY SAU 1 ranh
+    giới transition (cần đệm lặng `narration_lead_in_sec`) — verify giọng đọc CỦA SHOT
+    VIDEO (6s) phát đủ, không bị cắt cụt vì khung hình đóng băng."""
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [
+        ["B01", "0:00–0:03", "Image", "Canh anh", "", "Loi thoai shot mot."],
+        ["B02", "0:03–0:09", "Video", "Canh video ngan", "", "Loi thoai dai hon video that nhieu, can nghe het khong bi cat dau."],
+    ]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shots = client.post(f"/projects/{pid}/visual/generate").json()["shots"]
+    shot_a, shot_b = shots[0]["shot_id"], shots[1]["shot_id"]
+    resp = client.patch(f"/projects/{pid}/visual/shots/{shot_a}", json={"transition_to_next": "fade"})
+    assert resp.status_code == 200, resp.text
+
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.schemas import RenderState, ShotRenderStatus
+
+    pdir = project_dir(channel_id, pid)
+    png_a = pdir / "assets" / f"{shot_a}.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240", "-frames:v", "1", "-update", "1", str(png_a)], capture_output=True, check=True, text=True)
+    wav_a = pdir / "assets" / f"{shot_a}.wav"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=880:duration=3", str(wav_a)], capture_output=True, check=True, text=True)
+    narr_a_dur = _ffprobe_duration(wav_a)
+
+    video_b = pdir / "assets" / f"{shot_b}.mp4"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video_b)], capture_output=True, check=True, text=True)
+    wav_b = pdir / "assets" / f"{shot_b}.wav"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=6", str(wav_b)], capture_output=True, check=True, text=True)
+    narr_b_dur = _ffprobe_duration(wav_b)
+
+    write_json(pdir / "render.json", RenderState(project_id=pid, shots=[
+        ShotRenderStatus(shot_id=shot_a, visual_status="ready", visual_asset_path=str(png_a), approved=True,
+                          narration_status="ready", narration_asset_path=str(wav_a), narration_duration_sec=narr_a_dur),
+        ShotRenderStatus(shot_id=shot_b, visual_status="ready", visual_asset_path=str(video_b), approved=True,
+                          narration_status="ready", narration_asset_path=str(wav_b), narration_duration_sec=narr_b_dur),
+    ]).model_dump())
+
+    resp = client.post(f"/projects/{pid}/render/assemble", json={"resolution": "720p", "codec": "h264", "quality": "low"})
+    assert resp.status_code == 200, resp.text
+    final_state = client.get(f"/projects/{pid}/render/status").json()
+    assert final_state["assembly_status"] == "done", final_state.get("assembly_error")
+
+    total_dur = _ffprobe_duration(Path(final_state["final_video_path"]))
+    ranges = _silence_ranges(ffmpeg, final_state["final_video_path"])
+    assert len(ranges) == 1, f"Kỳ vọng đúng 1 khoảng lặng (vùng đệm transition), thấy {len(ranges)}: {ranges}"
+    _silence_start, silence_end = ranges[0]
+    # Sau khoảng lặng transition, giọng đọc shot B (6s) phải phát ĐỦ tới cuối video — không
+    # còn khoảng lặng nào khác nghĩa là không có gì cắt cụt nó giữa chừng.
+    assert total_dur - silence_end >= narr_b_dur - 0.3, (
+        f"Chỉ còn {total_dur - silence_end}s sau vùng đệm transition, KHÔNG đủ cho giọng đọc "
+        f"{narr_b_dur}s của shot video — nghi ngờ bị cắt cụt"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Camera motion (Ken Burns) cho ảnh tĩnh — 2026-08-19, theo yêu cầu người dùng.
 # ---------------------------------------------------------------------------
@@ -1059,8 +2157,8 @@ def test_build_camera_motion_filter_none_and_invalid_return_none():
 
 def test_build_camera_motion_filter_covers_every_real_motion():
     """Mỗi key trong CAMERA_MOTIONS (trừ "none") phải build được filter string hợp lệ —
-    bắt lỗi gõ sai biến/cú pháp trong biểu thức ffmpeg ở TỪNG nhánh, không cần chạy
-    ffmpeg thật (nhanh, chạy mọi lần commit)."""
+    bắt lỗi gõ sai biến/cú pháp trong biểu thức ffmpeg ở TỪNG nhánh, không cần chạy ffmpeg
+    thật (nhanh, chạy mọi lần commit)."""
     from app.render.camera_motion import CAMERA_MOTIONS, build_camera_motion_filter
 
     for motion in CAMERA_MOTIONS:
@@ -1309,17 +2407,17 @@ def test_image_fallback_used_when_default_fails(client, project_with_brief):
 
 
 @respx.mock
-def test_local_sdxl_generation_uses_style_lora_from_brand_profile(client, project_with_brief):
-    """Đợt 2 (style checkpoint painterly) end-to-end: BrandProfile.style_lora_path PHẢI
-    tới được đúng request ComfyUI thật cho `local_sdxl` — không chỉ đúng ở tầng
-    ComfySDXLImageProvider đơn lẻ (đã test riêng ở test_image_comfy_sdxl.py) mà còn đúng
-    ở tầng engine.py::generate_visual_asset đọc brand + truyền qua provider.generate()."""
+def test_local_sdxl_generation_uses_style_loras_from_brand_profile(client, project_with_brief):
+    """Đợt 2 (style checkpoint painterly) + STACK nhiều LoRA (2026-08-23) end-to-end:
+    BrandProfile.style_loras PHẢI tới được đúng request ComfyUI thật cho `local_sdxl` —
+    không chỉ đúng ở tầng ComfySDXLImageProvider đơn lẻ (đã test riêng ở
+    test_image_comfy_sdxl.py) mà còn đúng ở tầng engine.py::generate_visual_asset đọc
+    brand + truyền qua provider.generate()."""
     pid = _drive_to_visual_studio(client, project_with_brief)
     channel_id = project_with_brief["channel_id"]
 
     profile = client.get(f"/channels/{channel_id}/brandprofile").json()
-    profile["style_lora_path"] = "InkArtXL_1.2.safetensors"
-    profile["style_lora_strength"] = 0.9
+    profile["style_loras"] = [{"name": "InkArtXL_1.2.safetensors", "strength": 0.9}, {"name": "GuohuaSDXL.safetensors", "strength": 0.6}]
     client.put(f"/channels/{channel_id}/brandprofile", json=profile)
 
     image = client.post("/providers", json={"task": "image", "provider_name": "local_sdxl", "display_name": "SDXL local", "connection_type": "local_endpoint", "endpoint_url": "http://127.0.0.1:8188"}).json()
@@ -1341,8 +2439,10 @@ def test_local_sdxl_generation_uses_style_lora_from_brand_profile(client, projec
     assert sent_bodies, "phải có ít nhất 1 request sinh ảnh gửi tới ComfyUI"
     for body in sent_bodies:
         workflow = body["prompt"]
-        assert workflow["13"]["inputs"]["lora_name"] == "InkArtXL_1.2.safetensors"
-        assert workflow["13"]["inputs"]["strength_model"] == 0.9
+        assert workflow["130"]["inputs"]["lora_name"] == "InkArtXL_1.2.safetensors"
+        assert workflow["130"]["inputs"]["strength_model"] == 0.9
+        assert workflow["131"]["inputs"]["lora_name"] == "GuohuaSDXL.safetensors"
+        assert workflow["131"]["inputs"]["strength_model"] == 0.6
 
 
 # ---------------------------------------------------------------------------
@@ -1553,6 +2653,282 @@ def test_build_visual_prompt_local_sdxl_ignores_audio_sfx_for_image():
     assert "nhạc căng thẳng" not in result
 
 
+# ---------------------------------------------------------------------------
+# cultural_lock_positive — mới (2026-08-23), theo yêu cầu người dùng chống thiên lệch
+# văn hoá Nhật/Hàn của checkpoint/LoRA "Á Đông" (đa số train từ dữ liệu Nhật/Trung/Hàn).
+# ---------------------------------------------------------------------------
+def test_build_visual_prompt_appends_cultural_lock_after_content_local():
+    from app.render.engine import _build_visual_prompt
+
+    shot = {"visual_fx": "Cảnh vua Nguyễn thiết triều."}
+    brand = {"cultural_lock_positive": "áo tứ thân, khăn đóng, mái đình làng Bắc Bộ"}
+    result = _build_visual_prompt(shot, brand, is_video=False, for_local_sdxl=True)
+    assert result.startswith("Cảnh vua Nguyễn thiết triều.")
+    assert "áo tứ thân, khăn đóng, mái đình làng Bắc Bộ" in result
+
+
+def test_build_visual_prompt_appends_cultural_lock_for_cloud_too():
+    """Áp dụng cho MỌI provider (cloud lẫn local) — khác `for_local_sdxl`-only knobs
+    (đây là vấn đề ĐÚNG/SAI nội dung văn hoá, không phải tối ưu riêng model local)."""
+    from app.render.engine import _build_visual_prompt
+
+    shot = {"visual_fx": "Cảnh vua Nguyễn thiết triều."}
+    brand = {"cultural_lock_positive": "áo tứ thân, khăn đóng"}
+    result = _build_visual_prompt(shot, brand, is_video=False, for_local_sdxl=False)
+    assert "áo tứ thân, khăn đóng" in result
+
+
+def test_build_visual_prompt_omits_cultural_lock_when_empty():
+    from app.render.engine import _build_visual_prompt
+
+    shot = {"visual_fx": "Cảnh sông đêm."}
+    result = _build_visual_prompt(shot, {"cultural_lock_positive": ""}, is_video=False, for_local_sdxl=True)
+    assert result.startswith("Cảnh sông đêm.")
+    assert "áo" not in result  # sanity: không có gì rò rỉ từ default nào
+
+
+def test_local_sdxl_kwargs_reads_style_loras_and_cultural_lock_negative():
+    from app.render.engine import _local_sdxl_kwargs
+
+    brand = {
+        "style_loras": [{"name": "InkArtXL_1.2.safetensors", "strength": 0.75}, {"name": "GuohuaSDXL.safetensors"}],
+        "cultural_lock_negative": "japanese kimono, korean hanbok",
+    }
+    kwargs = _local_sdxl_kwargs(brand)
+    assert kwargs["loras"] == [{"name": "InkArtXL_1.2.safetensors", "strength": 0.75}, {"name": "GuohuaSDXL.safetensors", "strength": 0.8}]
+    assert kwargs["extra_negative"] == "japanese kimono, korean hanbok"
+
+
+def test_local_sdxl_kwargs_empty_brand_gives_empty_loras_and_negative():
+    from app.render.engine import _local_sdxl_kwargs
+
+    assert _local_sdxl_kwargs({}) == {"loras": [], "extra_negative": "", "reference_images": [], "style_reference_weight": 0.6}
+
+
+def test_local_sdxl_kwargs_reads_style_reference_images(tmp_path):
+    from app.render.engine import _local_sdxl_kwargs
+
+    ref1 = tmp_path / "ref1.png"
+    ref1.write_bytes(b"fake-png-1")
+    brand = {"style_reference_paths": [str(ref1), str(tmp_path / "missing.png")], "style_reference_weight": 0.7}
+    kwargs = _local_sdxl_kwargs(brand)
+    assert kwargs["reference_images"] == [b"fake-png-1"]  # ảnh thiếu bị bỏ qua, không raise
+    assert kwargs["style_reference_weight"] == 0.7
+
+
+# ---------------------------------------------------------------------------
+# _build_video_motion_prompt / _try_generate_wan_anchor_image — mới (2026-08-23), theo
+# StudioFlow_Video_Improvement_Plan.md (Image-to-Video cho local_wan) — xem
+# IMPLEMENTATION_REPORT.md.
+# ---------------------------------------------------------------------------
+def test_build_video_motion_prompt_content_leads_motion_tone_follows():
+    from app.render.engine import _build_video_motion_prompt
+
+    shot = {"visual_fx": "Khói bốc lên từ đống lửa trại."}
+    brand = {"motion_tone": "chuyển động chậm, tinh tế"}
+    result = _build_video_motion_prompt(shot, brand)
+    assert result.startswith("Khói bốc lên từ đống lửa trại.")
+    assert result.endswith("chuyển động chậm, tinh tế")
+
+
+def test_build_video_motion_prompt_strips_text_overlay_tags():
+    """Wan cũng là model local, render chữ kém — cùng lý do `for_local_sdxl`."""
+    from app.render.engine import _build_video_motion_prompt
+
+    shot = {"visual_fx": 'Cảnh khói lửa. [Graphic]: Dòng chữ "2 vạn quân."'}
+    result = _build_video_motion_prompt(shot, {})
+    assert "[Graphic]" not in result
+    assert "2 vạn quân" not in result
+    assert "Cảnh khói lửa" in result
+
+
+def test_build_video_motion_prompt_omits_motion_tone_when_brand_empty():
+    from app.render.engine import _build_video_motion_prompt
+
+    shot = {"visual_fx": "Cảnh khói lửa."}
+    result = _build_video_motion_prompt(shot, {"motion_tone": ""})
+    assert result == "Cảnh khói lửa."
+
+
+def test_build_video_motion_prompt_cultural_lock_between_content_and_motion_tone():
+    from app.render.engine import _build_video_motion_prompt
+
+    shot = {"visual_fx": "Cảnh khói lửa."}
+    brand = {"cultural_lock_positive": "kiến trúc đình làng Bắc Bộ", "motion_tone": "chuyển động chậm"}
+    result = _build_video_motion_prompt(shot, brand)
+    assert result == "Cảnh khói lửa.. kiến trúc đình làng Bắc Bộ. chuyển động chậm"
+
+
+def test_try_generate_wan_anchor_image_returns_none_when_no_image_provider_configured(tmp_path, monkeypatch):
+    from app.providers.factory import NoProviderConfiguredError
+    from app.render.engine import _try_generate_wan_anchor_image
+
+    def fake_get_image_chain(db):
+        raise NoProviderConfiguredError("chưa cấu hình")
+
+    monkeypatch.setattr("app.render.engine.get_image_chain", fake_get_image_chain)
+    result = _try_generate_wan_anchor_image(None, tmp_path, {"shot_id": "B01", "visual_fx": "cảnh sông"}, {}, seed=1, aspect_ratio="16:9")
+    assert result is None
+
+
+def test_try_generate_wan_anchor_image_returns_none_when_chain_has_no_local_sdxl(tmp_path, monkeypatch):
+    from app.render.engine import _try_generate_wan_anchor_image
+
+    class FakeCloudProvider:
+        provider_name = "openai"
+
+    monkeypatch.setattr("app.render.engine.get_image_chain", lambda db: [FakeCloudProvider()])
+    result = _try_generate_wan_anchor_image(None, tmp_path, {"shot_id": "B01", "visual_fx": "cảnh sông"}, {}, seed=1, aspect_ratio="16:9")
+    assert result is None
+
+
+def test_try_generate_wan_anchor_image_finds_localai_image_provider_too(tmp_path, monkeypatch):
+    """Migrate LocalAI (2026-08-25) — `_LOCAL_IMAGE_PROVIDER_NAMES` giờ gồm CẢ
+    `local_sdxl` (ComfyUI) LẪN `localai_image` (LocalAI, mới) — anchor image cho video
+    phải tìm được provider dù đang dùng provider nào trong 2 cái đó, không hardcode
+    riêng `local_sdxl` như trước migrate."""
+    from app.render.engine import _try_generate_wan_anchor_image
+
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"0" * 20
+
+    class FakeLocalAiProvider:
+        provider_name = "localai_image"
+
+        def generate(self, *a, **k):
+            return fake_png
+
+    monkeypatch.setattr("app.render.engine.get_image_chain", lambda db: [FakeLocalAiProvider()])
+    result = _try_generate_wan_anchor_image(None, tmp_path, {"shot_id": "B01", "visual_fx": "cảnh sông"}, {}, seed=1, aspect_ratio="16:9")
+    assert result == fake_png
+
+
+def test_try_generate_wan_anchor_image_returns_none_when_sdxl_generate_raises(tmp_path, monkeypatch):
+    """1 lỗi ở bước tối ưu (anchor) KHÔNG được chặn việc sinh video — rơi về T2V thuần."""
+    from app.render.engine import _try_generate_wan_anchor_image
+
+    class FakeSdxlProvider:
+        provider_name = "local_sdxl"
+
+        def generate(self, *a, **k):
+            raise RuntimeError("ComfyUI timeout")
+
+    monkeypatch.setattr("app.render.engine.get_image_chain", lambda db: [FakeSdxlProvider()])
+    result = _try_generate_wan_anchor_image(None, tmp_path, {"shot_id": "B01", "visual_fx": "cảnh sông"}, {}, seed=1, aspect_ratio="16:9")
+    assert result is None
+
+
+def test_try_generate_wan_anchor_image_saves_png_and_passes_style_loras(tmp_path, monkeypatch):
+    from app.render.engine import _try_generate_wan_anchor_image
+
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"0" * 20
+    calls = {}
+
+    class FakeSdxlProvider:
+        provider_name = "local_sdxl"
+
+        def generate(self, prompt, *, seed=None, aspect_ratio="16:9", loras=None, extra_negative="", reference_images=None, style_reference_weight=0.6):
+            calls["loras"] = loras
+            calls["extra_negative"] = extra_negative
+            calls["aspect_ratio"] = aspect_ratio
+            calls["reference_images"] = reference_images
+            calls["style_reference_weight"] = style_reference_weight
+            return fake_png
+
+    monkeypatch.setattr("app.render.engine.get_image_chain", lambda db: [FakeSdxlProvider()])
+    brand = {"style_loras": [{"name": "InkArtXL_1.2.safetensors", "strength": 0.9}], "cultural_lock_negative": "japanese kimono"}
+    result = _try_generate_wan_anchor_image(None, tmp_path, {"shot_id": "B01", "visual_fx": "cảnh sông"}, brand, seed=1, aspect_ratio="9:16")
+
+    assert result == fake_png
+    assert (tmp_path / "assets" / "B01_anchor.png").read_bytes() == fake_png
+    assert calls == {
+        "loras": [{"name": "InkArtXL_1.2.safetensors", "strength": 0.9}],
+        "extra_negative": "japanese kimono",
+        "aspect_ratio": "9:16",
+        "reference_images": [],
+        "style_reference_weight": 0.6,
+    }
+
+
+@respx.mock
+def test_video_local_wan_uses_sdxl_anchor_image_when_configured(client, project_with_brief):
+    """Phase B end-to-end (2026-08-23): shot video qua `local_wan` PHẢI dùng ảnh anchor
+    sinh bằng `local_sdxl` (đã cấu hình) làm `start_image`, thay vì T2V thuần — xác nhận
+    qua `generate_visual_asset` thật (không chỉ đơn vị `_try_generate_wan_anchor_image`
+    riêng lẻ). 2 endpoint ComfyUI KHÁC PORT (8188 ảnh / 8199 video) để tách bạch mock,
+    khớp cách factory.py truyền `endpoint_url` riêng cho từng provider."""
+    pid = _drive_to_visual_studio(client, project_with_brief)
+
+    image = client.post("/providers", json={"task": "image", "provider_name": "local_sdxl", "display_name": "SDXL local", "connection_type": "local_endpoint", "endpoint_url": "http://127.0.0.1:8188"}).json()
+    client.patch(f"/providers/{image['id']}", json={"is_default": True})
+    video = client.post("/providers", json={"task": "video", "provider_name": "local_wan", "display_name": "Wan local", "connection_type": "local_endpoint", "endpoint_url": "http://127.0.0.1:8199"}).json()
+    client.patch(f"/providers/{video['id']}", json={"is_default": True})
+    tts = client.post("/providers", json={"task": "tts", "provider_name": "elevenlabs", "display_name": "EL", "connection_type": "cloud_api", "api_key": "sk-el"}).json()
+    client.patch(f"/providers/{tts['id']}", json={"is_default": True})
+
+    respx.post("https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM").mock(return_value=Response(200, content=FAKE_MP3))
+
+    # ComfyUI ảnh (SDXL, anchor) — port 8188.
+    respx.post("http://127.0.0.1:8188/prompt").mock(return_value=Response(200, json={"prompt_id": "img-job-1"}))
+    respx.get("http://127.0.0.1:8188/history/img-job-1").mock(
+        return_value=Response(200, json={"img-job-1": {"outputs": {"9": {"images": [{"filename": "anchor.png", "subfolder": "", "type": "output"}]}}}})
+    )
+    respx.get("http://127.0.0.1:8188/view").mock(return_value=Response(200, content=FAKE_PNG))
+
+    # ComfyUI video (Wan) — port 8199, RIÊNG BIỆT để đối chiếu đúng request nào có anchor.
+    upload_route = respx.post("http://127.0.0.1:8199/upload/image").mock(return_value=Response(200, json={"name": "anchor.png", "subfolder": ""}))
+    video_submit_route = respx.post("http://127.0.0.1:8199/prompt").mock(return_value=Response(200, json={"prompt_id": "vid-job-1"}))
+    respx.get("http://127.0.0.1:8199/history/vid-job-1").mock(
+        return_value=Response(200, json={"vid-job-1": {"outputs": {"58": {"images": [{"filename": "out.mp4", "subfolder": "", "type": "output"}]}}}})
+    )
+    respx.get("http://127.0.0.1:8199/view").mock(return_value=Response(200, content=FAKE_MP4))
+
+    resp = client.post(f"/projects/{pid}/render/start")
+    assert resp.status_code == 200
+
+    assert upload_route.called, "phải upload ảnh anchor lên ComfyUI Wan trước khi sinh video"
+    video_bodies = [json.loads(c.request.content) for c in video_submit_route.calls]
+    assert video_bodies, "phải có ít nhất 1 request sinh video gửi tới ComfyUI Wan"
+    for body in video_bodies:
+        assert "start_image" in body["prompt"]["55"]["inputs"], "workflow video PHẢI có start_image khi đã sinh được ảnh anchor"
+
+
+@respx.mock
+def test_video_localai_uses_localai_image_anchor_when_configured(client, project_with_brief):
+    """Cùng kịch bản `test_video_local_wan_uses_sdxl_anchor_image_when_configured` ở
+    trên nhưng cho provider LocalAI (kế hoạch migrate) — xác nhận
+    `_LOCAL_IMAGE_PROVIDER_NAMES`/`_LOCAL_VIDEO_PROVIDER_NAMES` (engine.py) nhận diện
+    ĐÚNG `localai_image`/`localai_video` qua toàn bộ luồng thật (`/render/start`), không
+    chỉ ở tầng unit `_try_generate_wan_anchor_image`. Endpoint `/video` (KHÔNG `/v1`,
+    xác nhận thật đợt 2 — xem video_localai.py) trả response ĐỒNG BỘ ngay."""
+    pid = _drive_to_visual_studio(client, project_with_brief)
+
+    image = client.post("/providers", json={"task": "image", "provider_name": "localai_image", "display_name": "LocalAI ảnh", "connection_type": "local_endpoint", "endpoint_url": "http://127.0.0.1:8080"}).json()
+    client.patch(f"/providers/{image['id']}", json={"is_default": True})
+    video = client.post("/providers", json={"task": "video", "provider_name": "localai_video", "display_name": "LocalAI video", "connection_type": "local_endpoint", "endpoint_url": "http://127.0.0.1:8080"}).json()
+    client.patch(f"/providers/{video['id']}", json={"is_default": True})
+    tts = client.post("/providers", json={"task": "tts", "provider_name": "elevenlabs", "display_name": "EL", "connection_type": "cloud_api", "api_key": "sk-el"}).json()
+    client.patch(f"/providers/{tts['id']}", json={"is_default": True})
+
+    respx.post("https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM").mock(return_value=Response(200, content=FAKE_MP3))
+    respx.post("http://127.0.0.1:8080/models/apply").mock(return_value=Response(200, json={"status": "ok"}))
+    respx.post("http://127.0.0.1:8080/v1/images/generations").mock(return_value=Response(200, json={"data": [{"b64_json": base64.b64encode(FAKE_PNG).decode()}]}))
+    video_submit_route = respx.post("http://127.0.0.1:8080/video").mock(return_value=Response(200, json={"id": "vid-1", "data": [{"b64_json": base64.b64encode(FAKE_MP4).decode()}]}))
+
+    resp = client.post(f"/projects/{pid}/render/start")
+    assert resp.status_code == 200
+
+    video_bodies = [json.loads(c.request.content) for c in video_submit_route.calls]
+    assert video_bodies, "phải có ít nhất 1 request sinh video gửi tới LocalAI"
+    for body in video_bodies:
+        assert "start_image" in body, "phải kèm ảnh anchor (sinh bằng localai_image) làm start_image khi có"
+
+    state = client.get(f"/projects/{pid}/render/status").json()
+    video_shots = [s for s in state["shots"] if s["visual_provider"] == "localai_video"]
+    assert video_shots, "phải có ít nhất 1 shot video dùng đúng provider localai_video"
+    for s in video_shots:
+        assert s["visual_status"] == "ready"
+
+
 @respx.mock
 def test_gemini_and_veo_test_connection_via_api(client):
     """Test connection thật qua endpoint /providers/{id}/test cho 3 provider mới —
@@ -1567,3 +2943,332 @@ def test_gemini_and_veo_test_connection_via_api(client):
         assert body["ok"] is True, body
         assert "thành công" in body["message"]
         client.delete(f"/providers/{pv['id']}")
+
+
+# ---------------------------------------------------------------------------
+# "Xuất Pack" (2026-08-26) — thay "Output A" cũ (export markdown/JSON spec-only) bằng 1
+# bundle THỰC DÙNG ĐƯỢC NGAY: transcript SRT, asset ảnh/video từng shot đặt tên theo
+# shot_id, giọng đọc ghép full mp3, video đã ghép (nếu có). Xem app/render/pack_export.py.
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_export_pack_bundle_writes_srt_assets_and_narration_but_skips_missing_video(client, project_with_brief, tmp_path):
+    """Chưa ghép video (`render/assemble` chưa gọi) — bundle vẫn xuất ĐỦ 3 phần còn lại
+    (SRT + assets + narration mp3), chỉ `video_final` bị `skipped` kèm lý do rõ ràng
+    (KHÔNG lỗi cả request — đúng nguyên tắc "lỗi 1 phần không chặn cả export")."""
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [
+        ["B01", "0:00–0:03", "Image", "Canh 1", "", "Loi thoai block mot."],
+        ["B02", "0:03–0:06", "Image", "Canh 2", "", "Loi thoai block hai, la shot cuoi."],
+    ]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_ids = [s["shot_id"] for s in client.post(f"/projects/{pid}/visual/generate").json()["shots"]]
+    assert len(shot_ids) == 2
+
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.schemas import RenderState, ShotRenderStatus
+
+    pdir = project_dir(channel_id, pid)
+    shot_statuses = []
+    for shot_id, dur in zip(shot_ids, [1.5, 2.0]):
+        png = pdir / "assets" / f"{shot_id}.png"
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=green:s=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+        wav = pdir / "assets" / f"{shot_id}.wav"
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={dur}", str(wav)], capture_output=True, check=True, text=True)
+        shot_statuses.append(ShotRenderStatus(
+            shot_id=shot_id, visual_status="ready", visual_asset_path=str(png), approved=True,
+            narration_status="ready", narration_asset_path=str(wav), narration_duration_sec=_ffprobe_duration(wav),
+        ))
+    write_json(pdir / "render.json", RenderState(project_id=pid, shots=shot_statuses).model_dump())
+
+    dest = tmp_path / "pack_export"
+    resp = client.post(f"/projects/{pid}/export/pack-bundle", json={"dest_dir": str(dest)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["included"] == ["transcript.srt", "assets/", "narration_full.mp3"]
+    assert len(body["skipped"]) == 1 and body["skipped"][0]["item"] == "video_final"
+
+    srt_text = (dest / "transcript.srt").read_text(encoding="utf-8")
+    assert "Loi thoai block mot." in srt_text
+    assert "Loi thoai block hai, la shot cuoi." in srt_text
+    assert "-->" in srt_text
+
+    for shot_id in shot_ids:
+        assert (dest / "assets" / f"{shot_id}.png").exists()
+
+    narration_out = dest / "narration_full.mp3"
+    assert narration_out.exists()
+    assert _ffprobe_duration(narration_out) > 3.0  # ~1.5+2.0s, khớp 2 shot ghép liền
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_export_pack_bundle_includes_final_video_after_assemble(client, project_with_brief, tmp_path):
+    """Sau khi `render/assemble` xong — bundle phải kèm `video_final.*`, không còn nằm
+    trong `skipped`."""
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [["B01", "0:00–0:03", "Image", "Canh 1", "", "Loi thoai."]]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_ids = [s["shot_id"] for s in client.post(f"/projects/{pid}/visual/generate").json()["shots"]]
+
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.schemas import RenderState, ShotRenderStatus
+
+    pdir = project_dir(channel_id, pid)
+    shot_id = shot_ids[0]
+    png = pdir / "assets" / f"{shot_id}.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=green:s=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+    wav = pdir / "assets" / f"{shot_id}.wav"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1.5", str(wav)], capture_output=True, check=True, text=True)
+    write_json(pdir / "render.json", RenderState(project_id=pid, shots=[
+        ShotRenderStatus(shot_id=shot_id, visual_status="ready", visual_asset_path=str(png), approved=True,
+                          narration_status="ready", narration_asset_path=str(wav), narration_duration_sec=_ffprobe_duration(wav)),
+    ]).model_dump())
+
+    resp = client.post(f"/projects/{pid}/render/assemble", json={"resolution": "720p", "codec": "h264", "quality": "low"})
+    assert resp.status_code == 200, resp.text
+
+    dest = tmp_path / "pack_export_2"
+    resp = client.post(f"/projects/{pid}/export/pack-bundle", json={"dest_dir": str(dest)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "video_final.mp4" in body["included"]
+    assert body["skipped"] == []
+    assert (dest / "video_final.mp4").exists()
+
+
+def test_export_pack_bundle_requires_dest_dir(client, project_with_brief):
+    resp = client.post(f"/projects/{project_with_brief['id']}/export/pack-bundle", json={"dest_dir": ""})
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Mở rộng render engine theo BrandProfile — CHANGE_Semantic_BRoll_Asset_Vault.md §9b.
+# Mặc định (brand=None/rỗng) PHẢI giữ NGUYÊN hành vi cũ — mọi test dưới đây verify CẢ
+# "không cấu hình = không đổi gì" LẪN "có cấu hình = hiệu ứng thật sự áp dụng".
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_color_grade_preset_changes_pixels_vs_default(tmp_path):
+    from app.render.assembly import _build_segment
+
+    ffmpeg = shutil.which("ffmpeg")
+    png = tmp_path / "src.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=size=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+
+    default_out = tmp_path / "default.mp4"
+    _build_segment(ffmpeg, str(png), None, 1.0, default_out, resolution="320:240", video_codec="libx264", audio_codec="aac", crf=23, brand=None)
+    graded_out = tmp_path / "graded.mp4"
+    _build_segment(ffmpeg, str(png), None, 1.0, graded_out, resolution="320:240", video_codec="libx264", audio_codec="aac", crf=23, brand={"visual_grade": "moody_dark"})
+
+    ssim_result = subprocess.run(
+        [ffmpeg, "-i", str(default_out), "-i", str(graded_out), "-filter_complex", "ssim", "-f", "null", "-"],
+        capture_output=True, check=True, text=True,
+    )
+    match = re.search(r"All:([\d.]+)", ssim_result.stderr)
+    assert match
+    ssim = float(match.group(1))
+    assert ssim < 0.999, f"SSIM {ssim} — preset màu 'moody_dark' phải cho pixel KHÁC bản mặc định"
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_color_grade_unset_matches_old_default_behavior(tmp_path):
+    """`brand=None` (chưa truyền) và `brand={}` (BrandProfile chưa cấu hình `visual_grade`)
+    PHẢI ra pixel GIỐNG HỆT nhau — không đổi hành vi cho kênh chưa cấu hình."""
+    from app.render.assembly import _build_segment
+
+    ffmpeg = shutil.which("ffmpeg")
+    png = tmp_path / "src.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=size=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+
+    none_out = tmp_path / "none.mp4"
+    _build_segment(ffmpeg, str(png), None, 1.0, none_out, resolution="320:240", video_codec="libx264", audio_codec="aac", crf=23, brand=None)
+    empty_out = tmp_path / "empty.mp4"
+    _build_segment(ffmpeg, str(png), None, 1.0, empty_out, resolution="320:240", video_codec="libx264", audio_codec="aac", crf=23, brand={})
+
+    ssim_result = subprocess.run(
+        [ffmpeg, "-i", str(none_out), "-i", str(empty_out), "-filter_complex", "ssim", "-f", "null", "-"],
+        capture_output=True, check=True, text=True,
+    )
+    match = re.search(r"All:([\d.]+)", ssim_result.stderr)
+    assert match
+    assert float(match.group(1)) == pytest.approx(1.0, abs=0.0001)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_grain_enabled_adds_visible_noise(tmp_path):
+    from app.render.assembly import _build_segment
+
+    ffmpeg = shutil.which("ffmpeg")
+    png = tmp_path / "src.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=gray", "-s", "320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+
+    plain_out = tmp_path / "plain.mp4"
+    _build_segment(ffmpeg, str(png), None, 1.0, plain_out, resolution="320:240", video_codec="libx264", audio_codec="aac", crf=23, brand={"grain_enabled": False})
+    grainy_out = tmp_path / "grainy.mp4"
+    _build_segment(ffmpeg, str(png), None, 1.0, grainy_out, resolution="320:240", video_codec="libx264", audio_codec="aac", crf=23, brand={"grain_enabled": True})
+
+    ssim_result = subprocess.run(
+        [ffmpeg, "-i", str(plain_out), "-i", str(grainy_out), "-filter_complex", "ssim", "-f", "null", "-"],
+        capture_output=True, check=True, text=True,
+    )
+    match = re.search(r"All:([\d.]+)", ssim_result.stderr)
+    assert match
+    ssim = float(match.group(1))
+    assert ssim < 0.999, f"SSIM {ssim} — bật grain phải cho pixel KHÁC bản không grain (bằng phẳng, không noise)"
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_blurfill_aspect_mode_letterboxes_without_cropping(tmp_path):
+    """`aspect_fill_mode="blur"` — nội dung gốc (ngang) ghép vào khung DỌC phải giữ
+    NGUYÊN VẸN ở giữa (không crop mất rìa) — verify bằng cách so khung giữa (content) và
+    khung rìa trên/dưới (phải là nền mờ, KHÁC màu/kết cấu content thật)."""
+    from app.render.assembly import _build_segment
+
+    ffmpeg = shutil.which("ffmpeg")
+    png = tmp_path / "src.png"
+    # Nội dung test: chữ nhật đỏ đặc chiếm HẾT khung ngang 320x240 — nếu crop-fill (mặc
+    # định) thì khung dọc ra vẫn TOÀN ĐỎ (crop chỉ cắt bớt, không đổi màu); nếu blur-fill
+    # đúng thì viền trên/dưới phải là ĐỎ MỜ (từ chính nội dung phóng to+blur), giữa vẫn đỏ
+    # sắc nét — cả 2 TRƯỜNG HỢP đều ra đỏ nên test này đổi sang dùng testsrc (có hoạ tiết)
+    # để phân biệt được "sắc nét" vs "mờ" bằng biến thiên pixel cục bộ.
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=size=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+
+    out_path = tmp_path / "blurfill.mp4"
+    _build_segment(
+        ffmpeg, str(png), None, 1.0, out_path, resolution="1080:1920", video_codec="libx264", audio_codec="aac", crf=23,
+        brand={"aspect_fill_mode": "blur"},
+    )
+    frame = tmp_path / "frame.png"
+    subprocess.run([ffmpeg, "-y", "-i", str(out_path), "-frames:v", "1", str(frame)], capture_output=True, check=True, text=True)
+
+    # Crop 1 dải mỏng NGANG ở rìa trên (phải là nền mờ) và 1 dải ở giữa (nội dung sắc nét
+    # thật) — đo độ SẮC NÉT thô bằng filter `edgedetect` rồi tính độ sáng trung bình
+    # (nhiều cạnh phát hiện = sáng hơn = sắc nét hơn; vùng mờ gblur gần như không có cạnh).
+    def _edge_brightness(y: int, h: int) -> float:
+        result = subprocess.run(
+            [ffmpeg, "-y", "-i", str(frame), "-vf", f"crop=1080:{h}:0:{y},edgedetect,format=gray", "-f", "rawvideo", "-"],
+            capture_output=True, check=True,
+        )
+        data = result.stdout
+        return sum(data) / len(data) if data else 0.0
+
+    top_edge_brightness = _edge_brightness(0, 100)  # rìa trên — vùng nền mờ (blur-fill)
+    middle_edge_brightness = _edge_brightness(860, 100)  # giữa khung 1920 cao — vùng nội dung gốc
+
+    assert middle_edge_brightness > top_edge_brightness, (
+        f"Vùng giữa (nội dung gốc, kỳ vọng SẮC NÉT, edge brightness={middle_edge_brightness}) "
+        f"phải có nhiều cạnh hơn hẳn vùng rìa (nền mờ blur-fill, edge brightness={top_edge_brightness})"
+    )
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_bg_music_ducking_reduces_volume_during_narration(tmp_path):
+    """Verify thật bằng `volumedetect` CÔ LẬP đúng tần số nhạc nền (`bandpass=f=880`,
+    tách khỏi giọng đọc `220Hz`) trong CHÍNH output `_mix_bg_music(ducking_enabled=True)`
+    — đo trực tiếp trên bản mix TỔNG (không so với bản `ducking_enabled=False` khác cấu
+    hình `amix.normalize`, tránh nhầm lẫn đã gặp lúc verify tay: `amix.normalize=True`
+    MẶC ĐỊNH tự động rescale, làm sai lệch so sánh chéo giữa 2 lần mix có `normalize`
+    khác nhau — CÔ LẬP tần số trên CÙNG 1 output là cách đo đúng, không phải so 2 output
+    khác cấu hình `amix`). Kỳ vọng: năng lượng dải tần nhạc nền THẤP HƠN rõ rệt tại đoạn
+    có giọng đọc so với đoạn giọng đọc im lặng."""
+    from app.render.assembly import _mix_bg_music
+
+    ffmpeg = shutil.which("ffmpeg")
+    # Giọng đọc giả: lặng 2s, tiếng 220Hz 2s, lặng 2s (tổng 6s) — mô phỏng 1 câu thoại giữa video.
+    voice = tmp_path / "voice.wav"
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "aevalsrc=0:duration=2", "-f", "lavfi", "-i", "sine=frequency=220:duration=2",
+         "-f", "lavfi", "-i", "aevalsrc=0:duration=2", "-filter_complex", "[0][1][2]concat=n=3:v=0:a=1[voice]", "-map", "[voice]", str(voice)],
+        capture_output=True, check=True, text=True,
+    )
+    video = tmp_path / "video.mp4"
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=6", "-i", str(voice), "-map", "0:v", "-map", "1:a",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(video)],
+        capture_output=True, check=True, text=True,
+    )
+    bg_music = tmp_path / "bg.wav"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=880:duration=6", str(bg_music)], capture_output=True, check=True, text=True)
+
+    ducked_out = tmp_path / "ducked.mp4"
+    _mix_bg_music(ffmpeg, video, str(bg_music), 1.0, ducked_out, audio_codec="aac", ducking_enabled=True)
+
+    def _bg_band_volume(start: float, end: float) -> float:
+        result = subprocess.run(
+            [ffmpeg, "-i", str(ducked_out), "-af", f"atrim={start}:{end},bandpass=f=880:width_type=h:w=50,volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+        match = re.search(r"mean_volume:\s*(-?[\d.]+)\s*dB", result.stderr)
+        assert match, result.stderr[-500:]
+        return float(match.group(1))
+
+    bg_no_narration = _bg_band_volume(4.5, 5.5)
+    bg_during_narration = _bg_band_volume(2.5, 3.5)
+    assert bg_during_narration < bg_no_narration - 1.5, (
+        f"Dải tần nhạc nền (880Hz) lúc có giọng đọc ({bg_during_narration}dB) phải THẤP HƠN rõ rệt "
+        f"lúc im lặng ({bg_no_narration}dB) — ducking chưa thực sự giảm nhạc nền"
+    )
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_assemble_video_applies_loudnorm_to_final_output(client, project_with_brief):
+    """Verify END-TO-END qua `assemble_video()` thật: audio cuối cùng phải đạt loudness
+    gần `-14 LUFS` (EBU R128) — dùng chính giọng đọc test (sine, không phải câm) ở mức
+    xa mục tiêu (rất nhỏ) để thấy rõ loudnorm THẬT SỰ chỉnh, không phải tình cờ đã đúng."""
+    ffmpeg = shutil.which("ffmpeg")
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+
+    header = ["Mã block", "Thời lượng", "Loại Visual", "Hình ảnh & Hiệu ứng (Visual/FX)", "Âm thanh & Nhạc nền (Audio/SFX)", "Kịch bản Giọng đọc (VO Content)"]
+    rows = [["B01", "0:00–0:03", "Image", "Canh 1", "", "Loi thoai."]]
+    csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, *rows])).encode("utf-8")
+    preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
+    client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
+    shot_id = client.post(f"/projects/{pid}/visual/generate").json()["shots"][0]["shot_id"]
+
+    from app.config import project_dir
+    from app.filestore import write_json
+    from app.render.schemas import RenderState, ShotRenderStatus
+
+    pdir = project_dir(channel_id, pid)
+    png = pdir / "assets" / f"{shot_id}.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240", "-frames:v", "1", "-update", "1", str(png)], capture_output=True, check=True, text=True)
+    wav = pdir / "assets" / f"{shot_id}.wav"
+    # Mức RẤT NHỎ (volume=0.02, xa hẳn -14 LUFS) — nếu loudnorm KHÔNG chạy, output vẫn
+    # sẽ rất nhỏ; nếu CÓ chạy đúng, output phải được kéo LÊN gần -14 LUFS.
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-af", "volume=0.02", str(wav)], capture_output=True, check=True, text=True)
+    narration_dur = _ffprobe_duration(wav)
+
+    write_json(pdir / "render.json", RenderState(project_id=pid, shots=[
+        ShotRenderStatus(shot_id=shot_id, visual_status="ready", visual_asset_path=str(png), approved=True,
+                          narration_status="ready", narration_asset_path=str(wav), narration_duration_sec=narration_dur),
+    ]).model_dump())
+
+    resp = client.post(f"/projects/{pid}/render/assemble", json={"resolution": "720p", "codec": "h264", "quality": "low"})
+    assert resp.status_code == 200, resp.text
+    final_state = client.get(f"/projects/{pid}/render/status").json()
+    assert final_state["assembly_status"] == "done", final_state.get("assembly_error")
+
+    result = subprocess.run(
+        [ffmpeg, "-i", final_state["final_video_path"], "-af", "loudnorm=I=-14:TP=-1.0:LRA=11:print_format=json", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    match = re.search(r'"input_i"\s*:\s*"(-?[\d.]+)"', result.stderr)
+    assert match, result.stderr[-800:]
+    measured_input_lufs = float(match.group(1))
+    assert measured_input_lufs > -20, (
+        f"Audio cuối cùng đo được {measured_input_lufs} LUFS — quá nhỏ so với mục tiêu -14 LUFS, "
+        "loudnorm có vẻ CHƯA áp dụng (input gốc cố tình rất nhỏ, ~volume=0.02)"
+    )

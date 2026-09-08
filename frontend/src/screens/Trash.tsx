@@ -67,7 +67,7 @@ export default function Trash() {
   const empty = trash.channels.length === 0 && trash.projects.length === 0;
 
   return (
-    <div style={{ flex: 1, overflowY: "auto", padding: "var(--space-8)" }}>
+    <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "var(--space-8)" }}>
       <h2 style={{ marginBottom: 2 }}>Thùng rác</h2>
       <p style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)", fontSize: 13, marginBottom: "var(--space-6)" }}>
         Kênh/project đã xoá — khôi phục lại hoặc xoá vĩnh viễn (mất hẳn dữ liệu trên đĩa, không thể hoàn tác).
@@ -78,6 +78,7 @@ export default function Trash() {
       {trash.channels.length > 0 && (
         <div style={{ marginBottom: "var(--space-8)" }}>
           <h4 style={{ marginBottom: "var(--space-3)" }}>Kênh đã xoá ({trash.channels.length})</h4>
+          <div style={{ overflowX: "auto" }}>
           <table className="table">
             <thead>
               <tr>
@@ -103,12 +104,14 @@ export default function Trash() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {trash.projects.length > 0 && (
         <div>
           <h4 style={{ marginBottom: "var(--space-3)" }}>Project đã xoá ({trash.projects.length})</h4>
+          <div style={{ overflowX: "auto" }}>
           <table className="table">
             <thead>
               <tr>
@@ -134,6 +137,7 @@ export default function Trash() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

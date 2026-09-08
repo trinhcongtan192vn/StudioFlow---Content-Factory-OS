@@ -147,14 +147,18 @@ def test_resolve_bg_music_source_falls_back_to_brand():
     assert result == ("/tmp/brand_music.mp3", 0.4)
 
 
-def test_resolve_bg_music_source_ignores_override_without_asset_path():
+def test_resolve_bg_music_source_uses_project_volume_with_brand_asset_when_no_project_asset():
+    """Đổi hành vi (2026-08-23): override CHƯA có `asset_path` (chỉ chỉnh volume, chưa
+    upload nhạc riêng) vẫn phải áp dụng ĐƯỢC phần volume — dùng file nhạc của BRAND
+    nhưng với volume RIÊNG của project (cho phép "dùng nhạc brand, chỉnh âm lượng
+    riêng" không cần upload lại file)."""
     from app.render.bg_music import resolve_bg_music_source
     from app.render.schemas import BgMusicOverride
 
     project_bg = BgMusicOverride(asset_path=None, volume=0.7)  # chỉ chỉnh volume, chưa upload
     brand = {"bg_music_path": "/tmp/brand_music.mp3", "bg_music_volume": 0.3}
     result = resolve_bg_music_source(project_bg, brand)
-    assert result == ("/tmp/brand_music.mp3", 0.3)
+    assert result == ("/tmp/brand_music.mp3", 0.7)
 
 
 def test_resolve_bg_music_source_none_when_nothing_configured():

@@ -20,7 +20,6 @@ from app.guardrail.check import annotate_body_with_warnings, run_guardrail_check
 from app.models import AuditLog, Budget, Channel, Project
 from app.pipeline import generation as gen
 from app.pipeline.script_import import ScriptImportError, build_template_workbook, parse_script_file
-from app.providers.factory import get_llm
 from app.render.camera_motion import CAMERA_MOTIONS
 from app.render.intro import intro_duration_sec, resolve_intro_source
 from app.render.schemas import RenderState
@@ -446,70 +445,78 @@ def _find_shot_and_beat(pack: dict, shot_id: str):
 
 @router.post("/projects/{project_id}/visual/shots/{shot_id}/regenerate-visual")
 def regenerate_shot_visual(project_id: str, shot_id: str, db: Session = Depends(get_db)):
-    """Sinh lại RIÊNG Visual/FX (đã build vòng 4 — tách khỏi Audio/SFX, khớp 2 nút
-    "Tạo lại Visual" / "Tạo lại giọng đọc" riêng biệt trong design)."""
+    """Khôi phục Visual/FX về ĐÚNG script gốc (`beat.visual`) — **đổi 2026-08-25, theo
+    yêu cầu người dùng**: trước đây gọi LLM diễn giải lại, giờ lấy nguyên si (xem
+    docstring `app/pipeline/generation.py`). 400 nếu script gốc không có mô tả cho shot
+    này — không còn rơi về 1 câu fallback vô nghĩa như trước."""
     p = _get_project_or_404(db, project_id)
     pdir, brand, brief, pack = _load(db, p)
     target, beat = _find_shot_and_beat(pack, shot_id)
-    llm = get_llm(db, task_role="shots")
-    usage: list[dict] = []
-    target["visual_fx"] = gen.regenerate_shot_visual_fx(llm, db, brand, beat, visual_type=target.get("visual_type", "image"), usage=usage)
+    try:
+        target["visual_fx"] = gen.restore_shot_visual_fx(beat)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     write_json(pdir / "pack.json", pack)
-    record_usage(db, p.channel_id, p.title, usage)
     db.commit()
     return pack
 
 
 @router.post("/projects/{project_id}/visual/shots/{shot_id}/regenerate-audio")
 def regenerate_shot_audio(project_id: str, shot_id: str, db: Session = Depends(get_db)):
+    """Khôi phục Audio/SFX về ĐÚNG script gốc (`beat.direction`) — cùng lý do
+    `regenerate_shot_visual` ở trên."""
     p = _get_project_or_404(db, project_id)
     pdir, brand, brief, pack = _load(db, p)
     target, beat = _find_shot_and_beat(pack, shot_id)
-    llm = get_llm(db, task_role="shots")
-    usage: list[dict] = []
-    target["audio_sfx"] = gen.regenerate_shot_audio_sfx(llm, db, brand, beat, usage=usage)
+    try:
+        target["audio_sfx"] = gen.restore_shot_audio_sfx(beat)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     write_json(pdir / "pack.json", pack)
-    record_usage(db, p.channel_id, p.title, usage)
     db.commit()
     return pack
 
 
 @router.post("/projects/{project_id}/visual/generate-all-visual")
 def generate_all_visual(project_id: str, db: Session = Depends(get_db)):
-    """Header Visual Studio — "Tạo Visual cho toàn bộ block" (đã build vòng 4)."""
+    """Header Visual Studio — "Tạo Visual cho toàn bộ block". **Đổi 2026-08-25**: khôi
+    phục nguyên si từ script gốc (không LLM) — shot nào script gốc không có mô tả Visual
+    thì BỎ QUA (khác 1 shot lẻ ở endpoint trên — raise lỗi ngay), không chặn cả batch."""
     p = _get_project_or_404(db, project_id)
     pdir, brand, brief, pack = _load(db, p)
     shots = pack.get("shots", [])
     body = (pack.get("script") or {}).get("body", [])
     if not shots:
         raise HTTPException(400, "Chưa có shot nào — vào Visual Studio trước")
-    llm = get_llm(db, task_role="shots")
-    usage: list[dict] = []
     for s in shots:
         beat = next((b for b in body if b.get("timestamp_sec") == s.get("linked_timestamp_sec")), body[0] if body else {})
-        s["visual_fx"] = gen.regenerate_shot_visual_fx(llm, db, brand, beat, visual_type=s.get("visual_type", "image"), usage=usage)
+        try:
+            s["visual_fx"] = gen.restore_shot_visual_fx(beat)
+        except ValueError:
+            continue
     write_json(pdir / "pack.json", pack)
-    record_usage(db, p.channel_id, p.title, usage)
     db.commit()
     return pack
 
 
 @router.post("/projects/{project_id}/visual/generate-all-tts")
 def generate_all_tts(project_id: str, db: Session = Depends(get_db)):
-    """Header Visual Studio — "Tạo giọng đọc (TTS) cho toàn bộ block" (đã build vòng 4)."""
+    """Header Visual Studio — "Tạo giọng đọc (TTS) cho toàn bộ block". Cùng lý do
+    `generate_all_visual` ở trên — bỏ qua (không chặn batch) shot script gốc không có
+    mô tả Audio/SFX."""
     p = _get_project_or_404(db, project_id)
     pdir, brand, brief, pack = _load(db, p)
     shots = pack.get("shots", [])
     body = (pack.get("script") or {}).get("body", [])
     if not shots:
         raise HTTPException(400, "Chưa có shot nào — vào Visual Studio trước")
-    llm = get_llm(db, task_role="shots")
-    usage: list[dict] = []
     for s in shots:
         beat = next((b for b in body if b.get("timestamp_sec") == s.get("linked_timestamp_sec")), body[0] if body else {})
-        s["audio_sfx"] = gen.regenerate_shot_audio_sfx(llm, db, brand, beat, usage=usage)
+        try:
+            s["audio_sfx"] = gen.restore_shot_audio_sfx(beat)
+        except ValueError:
+            continue
     write_json(pdir / "pack.json", pack)
-    record_usage(db, p.channel_id, p.title, usage)
     db.commit()
     return pack
 

@@ -22,7 +22,7 @@ export default function SettingsShell() {
   const [tab, setTab] = useState<Tab>("provider");
 
   return (
-    <div style={{ flex: 1, display: "flex", overflow: "hidden", background: "var(--color-neutral-900)" }}>
+    <div style={{ flex: 1, minWidth: 0, display: "flex", overflow: "hidden", background: "var(--color-neutral-900)" }}>
       <div style={{ width: 210, flex: "none", borderRight: "1px solid var(--color-divider)", padding: "var(--space-4) var(--space-3)", display: "flex", flexDirection: "column", gap: 2 }}>
         <div style={{ fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "0 var(--space-2)", marginBottom: "var(--space-2)" }}>Phòng máy</div>
         {NAV.map((n) => (
@@ -46,7 +46,7 @@ export default function SettingsShell() {
           </div>
         ))}
       </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: "var(--space-6)" }}>
+      <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "var(--space-6)" }}>
         {tab === "general" && <GeneralSettings />}
         {tab === "provider" && <ProviderSettings />}
         {tab === "billing" && <BillingSettings />}

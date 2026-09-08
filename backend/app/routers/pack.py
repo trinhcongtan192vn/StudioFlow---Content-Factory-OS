@@ -120,7 +120,10 @@ def get_thumbnail_asset(project_id: str, db: Session = Depends(get_db)):
     path = (pack.get("youtube_meta") or {}).get("thumbnail_asset_path")
     if not path:
         raise HTTPException(404, "Chưa sinh thumbnail")
-    return FileResponse(path)
+    # `Cache-Control: no-cache` — cùng lý do đã thêm ở `range_file_response`
+    # (app/rangefile.py, 2026-08-23): file bị ĐÈ TẠI CHỖ mỗi lần sinh lại, không có header
+    # này trình duyệt có thể trả bytes cũ từ cache mà không revalidate.
+    return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
 
 _UPLOAD_EXT_BY_CONTENT_TYPE = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}

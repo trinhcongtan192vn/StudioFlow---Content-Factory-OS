@@ -39,7 +39,18 @@ export function startBackend(port: number, workspaceDir: string, appRoot: string
   const python = pythonExecutable(backend);
   const child = spawn(python, ["-m", "uvicorn", "app.main:app", "--port", String(port), "--host", "127.0.0.1"], {
     cwd: backend,
-    env: { ...process.env, STUDIOFLOW_WORKSPACE: workspaceDir },
+    // `PYTHONIOENCODING`/`PYTHONUTF8` — mới (2026-09-02, mục 111): toàn bộ app dùng
+    // tiếng Việt (thông điệp lỗi, log...) — không set 2 biến này, `sys.stdout`/`stderr`
+    // của Python thừa hưởng codepage console mặc định của máy Windows (thường cp1252,
+    // KHÔNG mã hoá được ký tự có dấu tiếng Việt). Nghi ngờ đây là nguyên nhân 1 bug thật
+    // đã gặp: 1 luồng nền (`assemble_video`) "chết lặng" giữa chừng không rõ lý do trên
+    // máy người dùng — nếu bất kỳ đâu trong quá trình xử lý có in/log ra console 1 chuỗi
+    // tiếng Việt (VD nội dung lỗi ffmpeg, tiêu đề project...), `UnicodeEncodeError` có
+    // thể xảy ra NGOÀI try/except Python bình thường đang bọc (VD trong chính cơ chế in
+    // traceback của interpreter) và làm chết hẳn thread đó. Ép UTF-8 loại bỏ hẳn khả
+    // năng này — an toàn tuyệt đối kể cả nếu đây KHÔNG phải nguyên nhân thật (không đổi
+    // hành vi gì khác của app).
+    env: { ...process.env, STUDIOFLOW_WORKSPACE: workspaceDir, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
   });
   child.stdout.on("data", (d) => console.log(`[backend] ${d}`));
   child.stderr.on("data", (d) => console.error(`[backend] ${d}`));

@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import { api } from "../api/client";
 import type { ChannelSummary } from "../api/types";
 
-type View = "dashboard" | "project" | "settings" | "trash" | "library";
+type View = "dashboard" | "project" | "settings" | "trash" | "library" | "asset_vault";
 
 interface AppState {
   view: View;
@@ -21,6 +21,7 @@ interface AppState {
   goSettings: () => void;
   goTrash: () => void;
   goLibrary: () => void;
+  goAssetVault: () => void;
   openProject: (channelId: string, projectId: string) => void;
   toggleChannel: (channelId: string) => void;
   toggleProject: (projectId: string) => void;
@@ -68,6 +69,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const goSettings = () => setView("settings");
   const goTrash = () => setView("trash");
   const goLibrary = () => setView("library");
+  const goAssetVault = () => setView("asset_vault");
   const openProject = (channelId: string, projectId: string) => {
     setActiveChannelId(channelId);
     setActiveProjectId(projectId);
@@ -96,6 +98,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     goSettings,
     goTrash,
     goLibrary,
+    goAssetVault,
     openProject,
     toggleChannel,
     toggleProject,

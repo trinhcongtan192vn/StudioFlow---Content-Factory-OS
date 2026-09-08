@@ -143,16 +143,40 @@ def test_budget_detail_empty_when_no_expense(client, channel):
     assert data["rows"] == []
 
 
-def test_budget_detail_groups_after_pipeline_usage(client, project_with_brief):
+def test_budget_detail_groups_after_pipeline_usage(client, project_with_brief, monkeypatch):
     """Chạy 1 bước pipeline thật (provider Mock, cost=0 nhưng vẫn ghi log request) rồi
     kiểm tra budget detail group đúng theo project/provider (bug đã sửa: record_usage
     + endpoint /budget/{id}/detail).
 
     2026-08-17 (mục 44): đường cũ dùng /research + /gate1 để có usage LLM — cả 2 đã bỏ
-    cùng AI Research/Outline/Hook. Đổi sang: import script (không gọi AI) + "Tạo lại
-    Visual" cho 1 shot (`regenerate-visual`, VẪN gọi LLM thật để sinh prompt ảnh) — cùng
-    mục đích tạo 1 lượt usage LLM thật qua provider Mock."""
+    cùng AI Research/Outline/Hook. **Đổi lại 2026-08-25**: "Tạo lại Visual"
+    (`regenerate-visual`) từng dùng để tạo 1 lượt usage LLM thật, nhưng theo yêu cầu
+    người dùng endpoint đó giờ CHỈ khôi phục nguyên si từ script gốc, KHÔNG còn gọi LLM
+    (xem `app/pipeline/generation.py`) — LLM giờ chỉ còn được gọi ở nhánh Hook Strength
+    của `run_guardrail_check` (`app/guardrail/check.py`), CHỈ chạy khi `pack.script.
+    hook.spoken` khác rỗng (script import không tự điền field này — AI Hook Variants đã
+    bỏ) — set trực tiếp field đó lên đĩa rồi gọi `POST /guardrail/check` (chạy lại thủ
+    công), đúng con đường THẬT duy nhất còn lại trong app hiện gọi tới LLM.
+
+    `score_hook_strength()` (`app/guardrail/check.py`) CHỈ record usage khi response
+    parse được thành JSON `{"hook_strength": ...}` — `MockLLMProvider` (seed mặc định
+    của test client) LUÔN trả văn xuôi placeholder, KHÔNG BAO GIỜ ra JSON hợp lệ (xác
+    nhận đúng hành vi đã ghi ở `test_guardrail.py::
+    test_score_hook_strength_mock_provider_uses_fallback` — rơi vào fallback heuristic,
+    không phải bug) — phải monkeypatch `MockLLMProvider.complete` trả JSON hợp lệ để
+    exercise được đúng nhánh ghi usage qua HTTP thật (khác `test_guardrail.py`, nơi gọi
+    thẳng hàm Python với provider giả `_JsonLLM`, không qua router/DB)."""
     import io
+
+    from app.config import project_dir
+    from app.filestore import read_json, write_json
+    from app.providers.base import LLMResult
+    from app.providers.mock import MockLLMProvider
+
+    def _fake_complete(self, system, messages, *, temperature=0.7, max_tokens=4000):
+        return LLMResult(text='{"hook_strength": 0.6, "reasons": ["test"]}', input_tokens=10, output_tokens=10, estimated_cost_usd=0.0, model=self.model_name)
+
+    monkeypatch.setattr(MockLLMProvider, "complete", _fake_complete)
 
     pid = project_with_brief["id"]
     channel_id = project_with_brief["channel_id"]
@@ -162,11 +186,16 @@ def test_budget_detail_groups_after_pipeline_usage(client, project_with_brief):
     csv_bytes = ("\n".join(",".join(f'"{c}"' for c in r) for r in [header, row])).encode("utf-8")
     preview = client.post(f"/projects/{pid}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")}).json()
     client.post(f"/projects/{pid}/script/import/confirm", json={"beats": preview["beats"], "full_text": preview["full_text"]})
-    shots = client.post(f"/projects/{pid}/visual/generate").json()["shots"]
-    shot_id = shots[0]["shot_id"]
+    client.post(f"/projects/{pid}/visual/generate")
 
-    r1 = client.post(f"/projects/{pid}/visual/shots/{shot_id}/regenerate-visual")
+    pdir = project_dir(channel_id, pid)
+    pack = read_json(pdir / "pack.json")
+    pack["script"]["hook"]["spoken"] = "Bạn có biết điều này chưa?"
+    write_json(pdir / "pack.json", pack)
+
+    r1 = client.post(f"/projects/{pid}/guardrail/check")
     assert r1.status_code == 200, r1.text
+    assert r1.json()["hook_strength"] == 0.6
 
     resp = client.get(f"/budget/{channel_id}/detail")
     assert resp.status_code == 200

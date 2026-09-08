@@ -33,18 +33,38 @@ import uuid
 
 import httpx
 
-from app.providers.base import ProviderStatus, VideoProvider
+from app.providers.base import ProviderStatus, VideoProvider, raise_if_interrupted
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8188"
 _MODEL_NAME = "wan2.2_ti2v_5B_fp16.safetensors"
 _CLIP_NAME = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 _VAE_NAME = "wan2.2_vae.safetensors"
-_NEGATIVE_PROMPT = "blurry, low quality, distorted, static, watermark, text, worst quality, deformed"
+# Thêm cụm chống lỗi ĐẶC THÙ video diffusion — **mới (2026-08-23)**, theo đề xuất
+# StudioFlow_Video_Improvement_Plan.md: nhấp nháy/méo khuôn mặt GIỮA CÁC FRAME là lỗi
+# phổ biến nhất của video diffusion, khác hẳn lỗi ảnh tĩnh (vốn đã chặn ở
+# `image_comfy_sdxl.py::_NEGATIVE_PROMPT`).
+_NEGATIVE_PROMPT = (
+    "blurry, low quality, distorted, static, watermark, text, worst quality, deformed, "
+    "flickering, morphing, warping face, identity drift between frames, jittery motion, plastic, 3d render"
+)
 _FPS = 24
-_WIDTH, _HEIGHT = 1280, 704  # đúng mặc định template chính thức
-# Hoán đổi W/H (cùng chia hết 16, an toàn cho Wan) — mới (2026-08-21), cho project
-# short-form (9:16).
-_WIDTH_VERTICAL, _HEIGHT_VERTICAL = 704, 1280
+# Độ phân giải — **đổi (2026-08-23)**, theo đề xuất StudioFlow_Video_Improvement_Plan.md
+# §6: căn khớp CHÍNH XÁC bucket SDXL đang dùng (`image_comfy_sdxl.py::_WIDTH/_HEIGHT` =
+# 1344×768, cũng chia hết 16) thay vì mặc định template gốc (1280×704) — để ảnh anchor
+# (Phase B, T2I→I2V) không cần `ImageScale` co/crop trước khi nạp làm `start_image`,
+# tránh méo/mất khung hình đã tune kỹ ở lớp ảnh. Tăng ~14.5% số pixel so với cũ (1344×
+# 768=1,032,192 so với 1280×704=901,120) — CHƯA verify tốc độ/VRAM thật trên GPU người
+# dùng, cần kiểm tra lại khi chạy thật.
+_WIDTH, _HEIGHT = 1344, 768
+_WIDTH_VERTICAL, _HEIGHT_VERTICAL = 768, 1344
+# Trần độ dài THẬT SỰ sinh bằng Wan — **mới (2026-08-23)**, theo đề xuất: model 5B kém
+# ổn định với clip dài, ưu tiên sinh đoạn NGẮN chất lượng cao rồi để `assembly.py`
+# LẶP LẠI lấp đầy thời lượng thật của shot (`_build_segment` đã `-stream_loop -1` cho
+# video ngắn hơn slot; `_reflow_video_durations` tự hấp thụ nếu video ngắn/dài hơn —
+# xem app/render/assembly.py — KHÔNG vỡ đồng bộ audio/giọng đọc). `seconds` gốc (từ
+# `_video_duration_sec(beat)`) vẫn giữ nguyên cho mục đích khác (VD provider cloud
+# Sora/Veo không giới hạn này) — chỉ giới hạn số khung THỰC SỰ gửi cho Wan.
+_MAX_GENERATE_SECONDS = 4
 
 
 def _frames_for_seconds(seconds: int) -> int:
@@ -54,15 +74,18 @@ def _frames_for_seconds(seconds: int) -> int:
     return max(5, ((raw - 1) // 4) * 4 + 1)
 
 
-def _build_txt2vid_workflow(*, prompt: str, seed: int, num_frames: int, ref_filename: str | None = None, width: int = _WIDTH, height: int = _HEIGHT) -> dict:
+def _build_txt2vid_workflow(*, prompt: str, seed: int, num_frames: int, ref_filename: str | None = None, width: int = _WIDTH, height: int = _HEIGHT, extra_negative: str = "") -> dict:
     latent_node: dict = {"class_type": "Wan22ImageToVideoLatent", "inputs": {"vae": ["39", 0], "width": width, "height": height, "length": num_frames, "batch_size": 1}}
+    # `extra_negative` (cultural_lock_negative — mới 2026-08-23) nối vào negative prompt
+    # THẬT gửi Wan — cùng lý do/cơ chế đã thêm cho image_comfy_sdxl.py.
+    negative_text = f"{_NEGATIVE_PROMPT}, {extra_negative}" if extra_negative else _NEGATIVE_PROMPT
     workflow = {
         "37": {"class_type": "UNETLoader", "inputs": {"unet_name": _MODEL_NAME, "weight_dtype": "default"}},
         "38": {"class_type": "CLIPLoader", "inputs": {"clip_name": _CLIP_NAME, "type": "wan", "device": "default"}},
         "39": {"class_type": "VAELoader", "inputs": {"vae_name": _VAE_NAME}},
         "48": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["37", 0], "shift": 8}},
         "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["38", 0], "text": prompt}},
-        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["38", 0], "text": _NEGATIVE_PROMPT}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["38", 0], "text": negative_text}},
         "55": latent_node,
         "3": {
             "class_type": "KSampler",
@@ -77,9 +100,12 @@ def _build_txt2vid_workflow(*, prompt: str, seed: int, num_frames: int, ref_file
     }
     if ref_filename:
         # Nối `start_image` (optional, để trống ở nhánh T2V thuần — xem docstring) khi
-        # có ảnh anchor — Tier 2: hoạt ảnh video mở đầu bám theo đúng ảnh shot IMAGE đầu
-        # tiên của project thay vì khởi tạo latent từ noise thuần, giữ nhất quán phong
-        # cách/nhân vật giữa shot ảnh và shot video trong cùng project.
+        # có ảnh anchor — **đổi ý nghĩa (2026-08-23)**: KHÔNG còn là "ảnh shot đầu tiên
+        # dùng chung cho mọi video" (Tier 2 cũ, mục ~18, đã tắt vì 1 anchor dùng chung
+        # gây lệch nội dung riêng từng shot) — giờ là ảnh anchor SINH RIÊNG cho ĐÚNG
+        # shot này (cùng prompt/seed/LoRA phong cách với shot đó nếu nó là ảnh — xem
+        # `app/render/engine.py::generate_visual_asset`), animate ĐÚNG nội dung + phong
+        # cách đã khoá ở lớp ảnh, không dùng chung 1 anchor cho toàn project nữa.
         workflow["60"] = {"class_type": "LoadImage", "inputs": {"image": ref_filename}}
         workflow["61"] = {"class_type": "ImageScale", "inputs": {"image": ["60", 0], "width": width, "height": height, "upscale_method": "lanczos", "crop": "disabled"}}
         latent_node["inputs"]["start_image"] = ["61", 0]
@@ -98,14 +124,24 @@ class ComfyWanVideoProvider(VideoProvider):
             "Wan2.2 (qua ComfyUI) là provider bất đồng bộ — dùng start_generation()/poll_generation() qua app/render/engine.py, không gọi generate() đồng bộ."
         )
 
-    def start_generation(self, prompt: str, *, seconds: int = 8, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9") -> str:
-        num_frames = _frames_for_seconds(seconds)
+    def start_generation(
+        self, prompt: str, *, seconds: int = 8, seed: int | None = None, reference_image: bytes | None = None, aspect_ratio: str = "16:9",
+        extra_negative: str = "",
+    ) -> str:
+        # `extra_negative` — **mới (2026-08-23)** — KHÔNG khai báo trên
+        # `VideoProvider.start_generation()` (base.py, cùng chữ ký với Sora/Veo/Flux) vì
+        # chỉ local_wan có negative-prompt THẬT — cùng nguyên tắc `loras`/`extra_negative`
+        # ở `ComfySDXLImageProvider.generate()`.
+        # `_MAX_GENERATE_SECONDS` — chỉ giới hạn số khung THỰC SỰ sinh, KHÔNG đổi
+        # `seconds` gốc — assembly.py tự lặp video ngắn hơn slot để lấp đầy đúng thời
+        # lượng shot thật (xem docstring hằng số).
+        num_frames = _frames_for_seconds(min(seconds, _MAX_GENERATE_SECONDS))
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
         width, height = (_WIDTH_VERTICAL, _HEIGHT_VERTICAL) if aspect_ratio == "9:16" else (_WIDTH, _HEIGHT)
         with httpx.Client(timeout=30) as client:
             ref_filename = self._upload_image(client, reference_image) if reference_image is not None else None
-            workflow = _build_txt2vid_workflow(prompt=prompt, seed=seed, num_frames=num_frames, ref_filename=ref_filename, width=width, height=height)
+            workflow = _build_txt2vid_workflow(prompt=prompt, seed=seed, num_frames=num_frames, ref_filename=ref_filename, width=width, height=height, extra_negative=extra_negative)
             resp = client.post(f"{self.base_url}/prompt", json={"prompt": workflow, "client_id": str(uuid.uuid4())})
             if resp.status_code >= 400:
                 raise RuntimeError(f"ComfyUI từ chối job video: HTTP {resp.status_code}: {resp.text[:500]}")
@@ -133,6 +169,7 @@ class ComfyWanVideoProvider(VideoProvider):
                 return "processing", None
             status_str = entry.get("status", {}).get("status_str")
             if status_str == "error":
+                raise_if_interrupted(entry["status"], job_id)
                 raise RuntimeError(f"ComfyUI báo lỗi khi chạy workflow video (job {job_id}): {entry['status']}")
             outputs = entry.get("outputs")
             if not outputs:

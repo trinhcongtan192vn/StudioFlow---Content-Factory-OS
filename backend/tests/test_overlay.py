@@ -98,6 +98,11 @@ def test_patch_project_overlay_opacity_creates_override_if_missing(client, proje
 
 
 def test_delete_project_overlay_clears_state_and_file(client, project):
+    """Đổi hành vi (2026-09-02, theo yêu cầu người dùng: cần cách tắt hẳn overlay kể cả
+    khi đang KẾ THỪA từ kênh) — DELETE giờ set `disabled=True` (tắt hẳn, không fallback
+    về brand nữa) thay vì `overlay=None` (trước đây `None` vẫn ngầm fallback brand, không
+    có lối tắt hẳn) — cùng đổi hành vi đã áp dụng cho intro (`test_delete_intro_clears_
+    state_and_files`)."""
     pid = project["id"]
     client.post(f"/projects/{pid}/render/overlay/upload", files={"file": ("overlay.mp4", io.BytesIO(FAKE_MP4), "video/mp4")})
     status_before = client.get(f"/projects/{pid}/render/status").json()
@@ -106,8 +111,44 @@ def test_delete_project_overlay_clears_state_and_file(client, project):
 
     resp = client.delete(f"/projects/{pid}/render/overlay")
     assert resp.status_code == 200
-    assert resp.json()["overlay"] is None
+    overlay = resp.json()["overlay"]
+    assert overlay["disabled"] is True
+    assert overlay["asset_path"] is None
     assert not asset_path.exists()
+
+
+def test_delete_project_overlay_opts_out_even_with_no_prior_upload(client, project):
+    """"Bỏ hiệu ứng lớp phủ" khi project CHƯA từng upload gì (đang ngầm kế thừa brand)
+    vẫn phải tắt hẳn được — không chỉ có tác dụng khi đã có asset riêng."""
+    pid = project["id"]
+    resp = client.delete(f"/projects/{pid}/render/overlay")
+    assert resp.status_code == 200
+    assert resp.json()["overlay"]["disabled"] is True
+
+
+def test_upload_project_overlay_after_delete_re_enables(client, project):
+    pid = project["id"]
+    client.delete(f"/projects/{pid}/render/overlay")
+    resp = client.post(f"/projects/{pid}/render/overlay/upload", files={"file": ("overlay.mp4", io.BytesIO(FAKE_MP4), "video/mp4")})
+    assert resp.status_code == 200
+    assert resp.json()["overlay"]["disabled"] is False
+
+
+def test_enable_overlay_inherit_clears_disabled_flag(client, project):
+    pid = project["id"]
+    client.delete(f"/projects/{pid}/render/overlay")
+    resp = client.patch(f"/projects/{pid}/render/overlay/inherit")
+    assert resp.status_code == 200
+    assert resp.json()["overlay"]["disabled"] is False
+
+
+def test_enable_overlay_inherit_auto_creates_overlay_if_missing(client, project):
+    pid = project["id"]
+    status_before = client.get(f"/projects/{pid}/render/status").json()
+    assert status_before["overlay"] is None
+    resp = client.patch(f"/projects/{pid}/render/overlay/inherit")
+    assert resp.status_code == 200
+    assert resp.json()["overlay"]["disabled"] is False
 
 
 def test_get_project_overlay_asset_serves_file(client, project):
@@ -139,6 +180,17 @@ def test_resolve_overlay_source_prefers_project_override():
     brand = {"overlay_effect_path": "/tmp/brand_overlay.mp4", "overlay_effect_opacity": 0.5}
     result = resolve_overlay_source(project_overlay, brand)
     assert result == ("/tmp/project_overlay.mp4", 0.7)
+
+
+def test_resolve_overlay_source_disabled_ignores_brand_default():
+    """`disabled=True` (mới 2026-09-02) — KHÔNG dùng overlay nào cả, kể cả brand đã cấu
+    hình — khác `None`/asset_path rỗng (vẫn ngầm fallback brand)."""
+    from app.render.overlay import resolve_overlay_source
+    from app.render.schemas import OverlayEffectOverride
+
+    project_overlay = OverlayEffectOverride(disabled=True)
+    brand = {"overlay_effect_path": "/tmp/brand_overlay.mp4", "overlay_effect_opacity": 0.5}
+    assert resolve_overlay_source(project_overlay, brand) is None
 
 
 def test_resolve_overlay_source_falls_back_to_brand():
@@ -188,6 +240,53 @@ def _sample_pixel_gray(ffmpeg: str, path: Path, *, ss: float | None = None) -> i
     result = subprocess.run(cmd, capture_output=True, check=True)
     assert len(result.stdout) >= 1, f"Không lấy được pixel — stderr: {result.stderr[-500:]}"
     return result.stdout[0]
+
+
+def _sample_pixel_rgb(ffmpeg: str, path: Path, *, ss: float | None = None) -> tuple[int, int, int]:
+    """Lấy màu RGB TRUNG BÌNH (0-255 mỗi kênh) của 1 frame — dùng để phát hiện lệch màu
+    (color cast) mà `_sample_pixel_gray` (chỉ đo độ sáng) không thấy được."""
+    cmd = [ffmpeg, "-y"]
+    if ss is not None:
+        cmd += ["-ss", str(ss)]
+    cmd += ["-i", str(path), "-frames:v", "1", "-vf", "scale=1:1,format=rgb24", "-f", "rawvideo", "-"]
+    result = subprocess.run(cmd, capture_output=True, check=True)
+    assert len(result.stdout) >= 3, f"Không lấy được pixel — stderr: {result.stderr[-500:]}"
+    return result.stdout[0], result.stdout[1], result.stdout[2]
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_mix_overlay_effect_preserves_hue_no_color_cast(tmp_path):
+    """Bug thật (2026-08-23, người dùng báo "video sau khi thêm layer bị đổi màu toàn bộ
+    sang tím"): `blend=all_mode=screen` áp thẳng lên `yuv420p` — hoặc thậm chí ép
+    `format=rgb24` trước khi blend — tính "screen" SAI trên ffmpeg build đang dùng, làm
+    lệch kênh U/V và ra màu tím/hồng thay vì giữ đúng hue gốc (fix: `format=gbrp` thay vì
+    `rgb24`, xem docstring `_mix_overlay_effect`). Verify: nền ĐỎ THUẦN + overlay XÁM
+    (đã giảm sáng qua colorchannelmixer) qua `blend=screen` PHẢI ra màu HỒNG NHẠT
+    (R cao, G và B xấp xỉ BẰNG NHAU) — nếu lệch màu (bug cũ), G và B tách xa nhau rõ rệt
+    (VD G thấp bất thường, B cao bất thường → ngả tím)."""
+    from app.render.assembly import _mix_overlay_effect
+
+    ffmpeg = shutil.which("ffmpeg")
+    video_path = tmp_path / "video_red.mp4"
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=red:s=320x240:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video_path)],
+        capture_output=True, check=True, text=True,
+    )
+    # Overlay TRẮNG, opacity=0.5 -> colorchannelmixer giảm còn XÁM (128,128,128) trước blend.
+    overlay_path = tmp_path / "overlay_white.mp4"
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=white:s=320x240:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(overlay_path)],
+        capture_output=True, check=True, text=True,
+    )
+
+    out_path = tmp_path / "overlaid_red.mp4"
+    _mix_overlay_effect(ffmpeg, video_path, str(overlay_path), 0.5, out_path, resolution="320:240", video_codec="libx264", crf=23)
+
+    r, g, b = _sample_pixel_rgb(ffmpeg, out_path, ss=0.1)
+    # screen(đỏ=254,0,0 ; xám=128,128,128) đúng phải ≈ (255,128,128) — hồng nhạt, G≈B.
+    assert r > 230, f"Kênh đỏ phải vẫn cao (nền đỏ + overlay sáng, screen chỉ tăng) — đo được R={r}"
+    assert abs(g - b) < 20, f"G và B phải xấp xỉ bằng nhau (đúng hue hồng nhạt) — đo được G={g} B={b} (lệch {abs(g-b)}) — nghi ngờ lệch màu (bug tím cũ)"
+    assert 90 < g < 165, f"G/B phải quanh ~128 (nền đỏ có G=B=0, screen(0,128)=128 đúng công thức) — đo được G={g}"
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")

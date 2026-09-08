@@ -15,7 +15,13 @@ from app.render.schemas import OverlayEffectOverride
 
 def resolve_overlay_source(project_overlay: OverlayEffectOverride | None, brand: dict) -> tuple[str, float] | None:
     """Ưu tiên overlay RIÊNG của project (override, nếu có `asset_path`) hơn overlay mặc
-    định cấp kênh — trả `(asset_path, opacity)` hoặc `None` nếu không có nguồn nào."""
+    định cấp kênh — trả `(asset_path, opacity)` hoặc `None` nếu không có nguồn nào.
+
+    `project_overlay.disabled == True` (mới 2026-09-02) — người dùng CHỦ ĐỘNG tắt hẳn
+    overlay cho project này, KHÔNG dùng overlay nào cả kể cả brand có cấu hình — cùng
+    nguyên tắc bước (0) của `intro.py::resolve_intro_source`."""
+    if project_overlay and project_overlay.disabled:
+        return None
     if project_overlay and project_overlay.asset_path:
         return (project_overlay.asset_path, project_overlay.opacity)
     if brand.get("overlay_effect_path"):

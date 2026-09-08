@@ -48,6 +48,34 @@ def library_kind_dir(kind: str) -> Path:
     return d
 
 
+# Kho Tài Nguyên / Asset Vault (CHANGE_Semantic_BRoll_Asset_Vault.md) — **đổi thành kho
+# TOÀN CỤC 2026-08-27** (theo yêu cầu người dùng: 1 màn riêng hiện clip từ MỌI kênh, 1
+# video gắn được NHIỀU kênh dạng tag) — không còn nằm trong channel_dir(id) nữa, cùng cấp
+# LIBRARY_DIR (tiền lệ "kho toàn cục, ngoài channels/" đã có sẵn cho CreativeAsset).
+ASSET_VAULT_DIR = WORKSPACE_DIR / "asset_vault"
+
+
+def asset_vault_raw_dir() -> Path:
+    d = ASSET_VAULT_DIR / "raw"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def asset_vault_clips_dir() -> Path:
+    d = ASSET_VAULT_DIR / "clips"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def asset_vault_chroma_dir() -> Path:
+    """Thư mục Chroma PersistentClient TOÀN CỤC (1 collection duy nhất, không còn tách
+    theo kênh — lọc theo kênh giờ làm ở tầng SQL qua bảng m2m `raw_video_channel`, xem
+    app/asset_vault/matching.py)."""
+    d = ASSET_VAULT_DIR / "vault.chroma"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def project_dir(channel_id: str, project_id: str) -> Path:
     d = channel_dir(channel_id) / "projects" / project_id
     d.mkdir(parents=True, exist_ok=True)

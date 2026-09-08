@@ -57,9 +57,15 @@ export default function ProjectView() {
     setProject(updated);
   }
 
+  // Bỏ `window.confirm()` (2026-08-23, theo đề xuất rà soát UX) — TRƯỚC ĐÂY là nơi DUY
+  // NHẤT trong app dùng dialog xác nhận trình duyệt, trong khi mọi hành động khác (kể cả
+  // sinh lại đè asset tốn phí, bỏ overlay/nhạc nền) đều chỉ dựa vào nhãn nút + tooltip rõ
+  // ràng — 2 quy ước khác nhau cho cùng 1 loại rủi ro. Hành động này CHỈ chuyển vào Thùng
+  // rác (khôi phục được, xem `archiveProject`/Trash), KHÔNG xoá vĩnh viễn — nên hợp lý
+  // hơn khi theo ĐÚNG quy ước "label rõ đủ" của phần còn lại app, để dành dialog xác nhận
+  // thật cho đúng chỗ cần (xoá VĨNH VIỄN ở màn Thùng rác, không hoàn tác được).
   async function deleteProject() {
     if (!project) return;
-    if (!confirm(`Xoá dự án "${project.title}"? Sẽ chuyển vào Thùng rác — có thể khôi phục lại sau.`)) return;
     await api.archiveProject(project.id);
     app.bumpProjectsVersion(project.channel_id);
     app.goDashboard();
@@ -170,7 +176,7 @@ export default function ProjectView() {
           {project.step === 2 && <VisualStudio {...stepProps} />}
           {project.step === 3 && <OutputCenter {...stepProps} />}
         </div>
-        <RightPanel project={project} />
+        <RightPanel project={project} pack={pack} />
       </div>
     </div>
   );

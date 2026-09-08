@@ -11,7 +11,7 @@ const SECTIONS: { kind: CreativeAssetKind; label: string; accept: string }[] = [
 
 export default function Library() {
   return (
-    <div style={{ flex: 1, overflowY: "auto", padding: "var(--space-8)" }}>
+    <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "var(--space-8)" }}>
       <h2 style={{ marginBottom: 2 }}>Thư viện</h2>
       <p style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)", fontSize: 13, marginBottom: "var(--space-6)" }}>
         Nhạc nền/video/ảnh/giọng đọc dùng lại được ở nhiều nơi trong app — upload 1 lần, chọn lại nhanh thay vì tìm lại file trên máy mỗi lần (xem nút "Chọn từ thư viện" ở các màn upload).

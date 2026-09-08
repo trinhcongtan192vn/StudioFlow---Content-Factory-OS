@@ -17,6 +17,10 @@ workspace/channels/*/
 # upload), không phải source code.
 workspace/library/*/
 !workspace/library/*/.gitkeep
+
+# Kho Tài Nguyên / Asset Vault — data thật của người dùng (video gốc/clip đã cắt đã upload
+# + Chroma vector DB embedding), không phải source code, cùng nguyên tắc workspace/library.
+workspace/asset_vault/
 *.log
 .env
 .DS_Store
@@ -34,3 +38,5 @@ backend/mismatch_test.txt
 backend/narration_test_pid.txt
 omnivoice_context.txt
 omnivoice_generate_doc.txt
+proj_list.txt
+scratch_out.json

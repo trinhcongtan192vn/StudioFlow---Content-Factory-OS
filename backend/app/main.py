@@ -2,12 +2,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.asset_vault.migration import migrate_asset_vault_to_global
 from app.db import Base, engine
 from app.providers.factory import NoProviderConfiguredError
-from app.routers import channels, export, guardrail, library, pack, pipeline, projects, providers, render, settings, system, trash
+from app.routers import asset_vault, channels, export, guardrail, library, pack, pipeline, projects, providers, render, settings, system, trash
 from app.seed import run_seed
 
 Base.metadata.create_all(bind=engine)
+migrate_asset_vault_to_global(engine)  # Kho Tài Nguyên toàn cục (2026-08-27) — xem docstring module
 run_seed()
 
 app = FastAPI(title="StudioFlow API", version="0.1.0")
@@ -29,5 +31,5 @@ async def no_provider_configured_handler(request: Request, exc: NoProviderConfig
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
-for r in (system, channels, projects, pipeline, pack, guardrail, providers, settings, export, render, trash, library):
+for r in (system, channels, projects, pipeline, pack, guardrail, providers, settings, export, render, trash, library, asset_vault):
     app.include_router(r.router)

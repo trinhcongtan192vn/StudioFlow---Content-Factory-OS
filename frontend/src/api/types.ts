@@ -40,6 +40,28 @@ export interface BrandProfile {
   content_pillars: ContentPillar[];
   forbidden: string[];
   visual_style_prompt: string;
+  // Cultural lock — mới (2026-08-23), theo yêu cầu người dùng chống thiên lệch văn hoá
+  // Nhật/Hàn của checkpoint/LoRA "Á Đông" (đa số train từ dữ liệu Nhật/Trung/Hàn).
+  // `cultural_lock_positive` — từ khoá Việt Nam cụ thể (trang phục theo triều đại, kiến
+  // trúc, hoạ tiết) — áp dụng cho MỌI provider (cloud lẫn local). Rỗng mặc định — đặc thù
+  // theo từng kênh/thời kỳ lịch sử.
+  cultural_lock_positive: string;
+  // `cultural_lock_negative` — loại trừ văn hoá ngoại lai, default không rỗng (phổ quát
+  // cho mọi kênh). CHỈ áp dụng đầy đủ cho local_sdxl/local_wan (negative-prompt thật) —
+  // cloud (OpenAI/Gemini/Flux) không có tham số negative prompt.
+  cultural_lock_negative: string;
+  // Ảnh tham chiếu phong cách — **mới (2026-08-23), làm lại đợt 2 (2026-08-25)**: đợt
+  // đầu dùng IPAdapter qua ComfyUI (nhiều ảnh, chưa từng verify thật). Đợt 2 chuyển
+  // sang img2img qua LocalAI (`localai_image`, xem backend `image_localai.py`) — CHỈ
+  // dùng ảnh ĐẦU TIÊN trong list dù field vẫn là mảng (tương thích ngược dữ liệu cũ) —
+  // UI giờ chỉ cho upload 1 ảnh. `style_reference_weight` (0-1, cao = giữ phong cách
+  // NHIỀU) — provider tự quy đổi sang `strength` (diffusers img2img, hướng ngược).
+  style_reference_paths: string[];
+  style_reference_weight: number;
+  // Tông chuyển động cho video AI local (Wan2.2) — mới (2026-08-23) — khác
+  // visual_style_prompt (phong cách thị giác TĨNH) — nói về tốc độ/kiểu chuyển động.
+  // Chỉ áp dụng cho provider local_wan, provider video cloud (Sora/Veo/Flux) bỏ qua.
+  motion_tone: string;
   hook_formats_preferred: string[];
   retention_benchmark: RetentionBenchmark;
   // Logo kênh — mới (2026-08-22) — thuần hiển thị nhận diện thương hiệu, không dùng
@@ -55,16 +77,24 @@ export interface BrandProfile {
   // (kể cả intro) khi ghép MP4, trừ khi project tự override riêng (RenderState.bg_music).
   bg_music_path: string;
   bg_music_volume: number;
-  // Style LoRA khoá "chữ ký hình ảnh" cho ảnh local SDXL — mới (2026-08-22). Tên file
-  // THẬT trong thư mục ComfyUI/models/loras/ (không phải đường dẫn tuyệt đối) — rỗng =
-  // không dùng LoRA. Chỉ áp dụng cho provider local_sdxl, provider khác bỏ qua.
-  style_lora_path: string;
-  style_lora_strength: number;
+  // Style LoRA khoá "chữ ký hình ảnh" cho ảnh local SDXL — mới (2026-08-22), đổi sang
+  // STACK nhiều LoRA (2026-08-23, theo đề xuất người dùng — 1 LoRA "chất liệu" + 1 LoRA
+  // "hướng văn hoá"). Mỗi `name` là tên file THẬT trong ComfyUI/models/loras/ — rỗng =
+  // không dùng LoRA nào. Chỉ áp dụng cho provider local_sdxl, provider khác bỏ qua.
+  style_loras: { name: string; strength: number }[];
   // Hiệu ứng lớp phủ (overlay, VD mưa/tuyết rơi) MẶC ĐỊNH của kênh — mới (2026-08-22) —
   // blend đè liên tục lên toàn bộ video (kể cả intro) khi ghép MP4, trừ khi project tự
   // override riêng (RenderState.overlay). LUÔN video (mp4/webm/mov).
   overlay_effect_path: string;
   overlay_effect_opacity: number;
+  // Style normalization hậu kỳ (CHANGE_Semantic_BRoll_Asset_Vault.md §9b.2/§9b.3) — preset
+  // màu CỐ ĐỊNH theo kênh (rỗng = mặc định cũ), film grain tuỳ chọn, cách xử lý khung hình
+  // lệch tỷ lệ (crop = cũ, blur = nền mờ từ chính nội dung, không mất chi tiết rìa).
+  visual_grade: string;
+  grain_enabled: boolean;
+  aspect_fill_mode: "crop" | "blur";
+  // Auto-ducking nhạc nền (§9b.5) — tự giảm nhạc nền khi có giọng đọc, mặc định tắt.
+  bg_music_ducking_enabled: boolean;
   version: number;
 }
 // Chỉ trả về từ POST voice-sample/upload — báo 1 lần mẫu có bị cắt ngắn không (mục 24
@@ -271,13 +301,30 @@ export interface ShotRenderStatus {
   visual_provider: string | null;
   visual_error: string | null;
   visual_started_at: string | null;
+  // Set lúc sinh/upload THÀNH CÔNG (không bị xoá về null sau đó) — dùng làm cache-bust
+  // bền cho URL ảnh/video cố định theo shot_id (xem VisualStudio.tsx::ShotPreview) và để
+  // phát hiện video đã ghép có cũ hơn shot này không (OutputCenter.tsx).
+  visual_updated_at: string | null;
   approved: boolean;
+  // Channel Asset Vault (CHANGE_Semantic_BRoll_Asset_Vault.md) — set khi
+  // `visual_provider === "asset_vault"`, trỏ tới ProcessedClip.clip_id đã gán.
+  linked_clip_id: string | null;
+  // Xoá watermark (2026-08-28) — "quét xong, không tìm thấy" KHÔNG phải lỗi (asset gốc
+  // giữ nguyên), nên tách khỏi visual_error — hiện thông báo trung tính riêng.
+  visual_watermark_note: string | null;
+  // Tiến trình THẬT (2026-09-02) — chỉ có giá trị khi đang xoá watermark cho shot VIDEO
+  // (ảnh vá 1 lượt duy nhất, quá nhanh để cần %) — dùng cho ProgressBar dùng chung với
+  // Kho Tài Nguyên.
+  visual_watermark_progress_current: number | null;
+  visual_watermark_progress_total: number | null;
+  visual_watermark_progress_label: string | null;
   narration_status: AssetStatus;
   narration_asset_path: string | null;
   narration_provider: string | null;
   narration_error: string | null;
   narration_duration_sec: number | null;
   narration_started_at: string | null;
+  narration_updated_at: string | null;
 }
 export interface GpuStatus {
   reachable: boolean;
@@ -285,10 +332,32 @@ export interface GpuStatus {
   queue_pending: number;
   gpu_name: string | null;
 }
+// Dashboard "Local Services & GPU Monitor" (2026-08-27) — KHÁC GpuStatus ở trên (đó là
+// trạng thái hàng đợi ComfyUI riêng cho Visual Studio); đây là tổng quan phần cứng GPU +
+// bật/tắt Ollama/OmniVoice/ComfyUI cấp toàn app. Xem app/local_services.py.
+export interface LocalServiceStatus {
+  name: string;
+  display_name: string;
+  running: boolean;
+}
+export interface GpuHardwareStats {
+  available: boolean;
+  name?: string;
+  memory_used_mb?: number;
+  memory_total_mb?: number;
+  utilization_pct?: number;
+  temperature_c?: number;
+  services_using_gpu?: string[];
+}
+export interface LocalServicesResponse {
+  services: LocalServiceStatus[];
+  gpu: GpuHardwareStats;
+}
 export interface AssemblyProgress {
-  stage: "segments" | "concat";
+  stage: "background_video" | "segments" | "concat";
   current: number;
   total: number;
+  stage_started_at: string | null;
 }
 // Shot mở đầu RIÊNG của project — mới (2026-08-20) — override video/audio thương hiệu
 // cấp kênh khi "đủ" (video, HOẶC ảnh + audio đi kèm bắt buộc).
@@ -314,18 +383,77 @@ export interface BgMusicOverride {
 export interface OverlayEffectOverride {
   asset_path: string | null;
   opacity: number;
+  // Tắt hẳn overlay cho project này (2026-09-02) — không dùng overlay nào cả, kể cả brand
+  // đã cấu hình. Cùng khái niệm IntroAssetStatus.disabled.
+  disabled: boolean;
+}
+// Tóm tắt 1 lượt "Xoá watermark toàn bộ slot" (2026-08-28) — banner hiện SAU khi bulk
+// chạy xong, gộp thay vì rải thông báo riêng từng shot (dễ bỏ sót với nhiều shot).
+export interface WatermarkScanSummary {
+  scanned: number;
+  cleaned: number;
+  no_watermark: number;
+  failed: number;
+  finished_at: string;
+}
+// Video nền CHUNG cho toàn bộ block (2026-09-02) — KHÁC bg_music/overlay: KHÔNG có cấp
+// kênh mặc định để kế thừa (thuần override project), KHÔNG có volume/opacity (chỉ hình).
+// Nhiều video (mới 2026-09-02, mục 110) — asset_paths (list, thứ tự upload), nối thành 1
+// "playlist" lúc ghép (xáo trộn 1 lần/lượt ghép nếu random_order, blend bằng `transition`
+// giữa các video liên tiếp — cùng danh sách TRANSITIONS dùng cho shot-to-shot).
+export interface BackgroundVideoOverride {
+  asset_paths: string[];
+  random_order: boolean;
+  transition: string;
+}
+// Layer video ĐỊNH VỊ theo lưới 3x3 (VD voice wave, logo) — mới (2026-09-02, mục 112).
+// `blend_mode` (mới, mục 113): "alpha" (mặc định) — nguồn CÓ SẴN kênh alpha (WebM VP9 /
+// MOV ProRes4444 trong suốt), composite thẳng bằng filter overlay. "screen" — nguồn NỀN
+// ĐEN ĐẶC (không alpha), screen-blend CỤC BỘ đúng vùng layer — KHÁC overlay hiệu ứng lớp
+// phủ (screen-blend TOÀN khung hình). Nhiều layer cùng lúc — RenderState.layers là 1
+// DANH SÁCH, mỗi layer có thể dùng blend_mode khác nhau.
+export type LayerPosition = "top-left" | "top-center" | "top-right" | "middle-left" | "center" | "middle-right" | "bottom-left" | "bottom-center" | "bottom-right";
+export type LayerBlendMode = "alpha" | "screen";
+export interface VideoLayer {
+  id: string;
+  asset_path: string;
+  position: LayerPosition;
+  width_pct: number; // % chiều rộng khung hình xuất, mặc định 0.3
+  opacity: number;
+  blend_mode: LayerBlendMode;
+}
+// Layer ẢNH định vị — mới (2026-09-02, mục 115). Song song VideoLayer, chỉ khác: nguồn
+// LUÔN ảnh tĩnh (PNG/JPEG/WEBP), và `position` có thêm "full" (phủ toàn khung hình, bỏ
+// qua width_pct) — KHÔNG có ở VideoLayer.
+export type ImageLayerPosition = LayerPosition | "full";
+export interface ImageLayer {
+  id: string;
+  asset_path: string;
+  position: ImageLayerPosition;
+  width_pct: number; // bỏ qua khi position === "full"
+  opacity: number;
+  blend_mode: LayerBlendMode;
 }
 export interface RenderState {
   project_id: string;
   shots: ShotRenderStatus[];
+  layers: VideoLayer[]; // mới (2026-09-02, mục 112)
+  image_layers: ImageLayer[]; // mới (2026-09-02, mục 115)
+  narration_speed: number; // 1.0 = tốc độ gốc — mới (2026-09-02, mục 109), chỉnh ở Script Studio
   intro: IntroAssetStatus | null;
   bg_music: BgMusicOverride | null;
   overlay: OverlayEffectOverride | null;
+  background_video: BackgroundVideoOverride | null;
   assembly_status: AssemblyStatus;
   assembly_error: string | null;
   assembly_progress: AssemblyProgress | null;
   assembly_started_at: string | null;
+  // Set lúc ghép THÀNH CÔNG lần gần nhất — so sánh với `visual_updated_at`/
+  // `narration_updated_at` của từng shot để cảnh báo "đã sinh lại asset SAU lần ghép
+  // này" (xem OutputCenter.tsx).
+  assembly_completed_at: string | null;
   final_video_path: string | null;
+  watermark_scan_summary: WatermarkScanSummary | null;
 }
 
 // Thư viện Creative Asset — mới (2026-08-20) — nhạc nền/video/ảnh/giọng đọc dùng lại
@@ -336,6 +464,59 @@ export interface CreativeAsset {
   kind: CreativeAssetKind;
   name: string;
   created_at: string;
+}
+
+// Kho Tài Nguyên / Asset Vault (CHANGE_Semantic_BRoll_Asset_Vault.md) — kho tư liệu video
+// TOÀN CỤC (2026-08-27), 1 video gốc gắn được NHIỀU kênh dạng tag (`channels`), khác
+// CreativeAsset (dùng lại nguyên vẹn, không gắn kênh nào).
+export type RawVideoStatus = "detecting" | "tagging" | "indexed" | "error";
+export interface VaultChannelTag {
+  id: string;
+  name: string;
+}
+export interface RawVideo {
+  id: string;
+  channels: VaultChannelTag[];
+  source_url: string | null;
+  original_filename: string | null;
+  import_note: string;
+  status: RawVideoStatus;
+  error_message: string | null;
+  progress_current: number | null;
+  progress_total: number | null;
+  progress_label: string | null;
+  created_at: string;
+}
+export type ClipRightsStatus = "unverified" | "licensed_verified" | "public_domain";
+export interface ProcessedClip {
+  clip_id: string;
+  channels: VaultChannelTag[];
+  raw_video_id: string;
+  raw_video_name: string;
+  raw_video_status: RawVideoStatus | null;
+  duration_sec: number;
+  resolution: string;
+  caption: string;
+  tags: string[];
+  mood_tone: string;
+  usage_count: number;
+  last_used_at: string | null;
+  active: boolean;
+  rights_status: ClipRightsStatus;
+  rights_note: string;
+  created_at: string;
+  caption_error: string | null;
+}
+export interface VaultCandidate {
+  clip_id: string;
+  caption: string;
+  duration_sec: number;
+  match_score: number | null;
+  rights_status: ClipRightsStatus;
+}
+export interface VaultCandidatesResult {
+  used_semantic: boolean;
+  candidates: VaultCandidate[];
 }
 export type ExportResolution = "720p" | "1080p" | "4k";
 export type ExportCodec = "h264" | "h265" | "vp9";

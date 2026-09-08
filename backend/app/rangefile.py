@@ -34,7 +34,17 @@ def range_file_response(
         # Không có Range (VD tải file qua fetch/anchor, không phải <video>/<audio> đang
         # seek) — trả nguyên file như FileResponse vẫn làm, chỉ thêm quảng cáo
         # `Accept-Ranges` để trình duyệt biết CÓ THỂ gửi Range ở lần gọi sau (lúc seek).
-        return FileResponse(path, media_type=media_type, filename=filename, headers={"Accept-Ranges": "bytes"})
+        #
+        # `Cache-Control: no-cache` — **mới (2026-08-23)**, root cause thật của bug người
+        # dùng báo: file được ĐÈ TẠI CHỖ (cùng path) mỗi lần sinh lại/upload, nhưng
+        # `FileResponse` mặc định KHÔNG gửi Cache-Control — trình duyệt áp "heuristic
+        # freshness" (dựa % tuổi `Last-Modified`) và có thể trả thẳng bytes CŨ từ cache mà
+        # KHÔNG gửi request lên server nữa, dù URL giống hệt. `no-cache` (KHÁC `no-store`)
+        # vẫn cho cache giữ bản sao nhưng BẮT BUỘC revalidate (If-Modified-Since) mỗi lần
+        # — rẻ (304 khi file thật sự chưa đổi), nhưng đảm bảo LUÔN thấy đúng file mới nhất
+        # trên đĩa. Cache-bust query param riêng ở frontend (`?v=...`) vẫn giữ để tránh
+        # cả round-trip revalidate khi biết chắc vừa đổi — 2 lớp bổ trợ nhau.
+        return FileResponse(path, media_type=media_type, filename=filename, headers={"Accept-Ranges": "bytes", "Cache-Control": "no-cache"})
 
     try:
         unit, _, range_spec = range_header.partition("=")
@@ -65,6 +75,7 @@ def range_file_response(
         "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Accept-Ranges": "bytes",
         "Content-Length": str(chunk_length),
+        "Cache-Control": "no-cache",  # cùng lý do ở nhánh không-Range phía trên
     }
     if filename:
         headers["Content-Disposition"] = f'attachment; filename="{filename}"'  # khớp mặc định của FileResponse

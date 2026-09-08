@@ -7,8 +7,9 @@ from sqlalchemy.orm import Session
 from app.crypto import decrypt_secret, encrypt_secret, mask_secret
 from app.db import get_db
 from app.models import AuditLog, ProviderConfig
-from app.providers.factory import _IMAGE_ADAPTERS, _TTS_ADAPTERS, _VIDEO_ADAPTERS, _build_asset_provider, build_llm_provider
+from app.providers.factory import _EMBEDDING_ADAPTERS, _IMAGE_ADAPTERS, _TTS_ADAPTERS, _VIDEO_ADAPTERS, _VISION_ADAPTERS, _build_asset_provider, build_llm_provider
 from app.providers.image_comfy_sdxl import list_comfyui_models
+from app.providers.image_localai import list_localai_models
 
 router = APIRouter(tags=["providers"])
 
@@ -43,6 +44,7 @@ CLOUD_MODELS_BY_TASK = {
     ("image", "gemini"): ["gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"],
     ("video", "veo"): ["veo-3.1-generate-preview", "veo-3.1-fast-generate-preview"],
     ("video", "flux"): ["flux-3-video-hd", "flux-3-video-fhd"],
+    ("vision", "gemini_vision"): ["gemini-3.1-flash", "gemini-2.5-flash-lite"],
 }
 
 
@@ -173,7 +175,7 @@ def test_provider(provider_id: int, db: Session = Depends(get_db)):
             # nên provider local (piper/local_sdxl/local_wan, không nhận api_key) lỗi
             # TypeError khi bấm Test (phát hiện lúc verify thật local AI provider, xem
             # IMPLEMENTATION_REPORT.md).
-            registry = {"tts": _TTS_ADAPTERS, "image": _IMAGE_ADAPTERS, "video": _VIDEO_ADAPTERS}[pv.task]
+            registry = {"tts": _TTS_ADAPTERS, "image": _IMAGE_ADAPTERS, "video": _VIDEO_ADAPTERS, "vision": _VISION_ADAPTERS, "embedding": _EMBEDDING_ADAPTERS}[pv.task]
             adapter = _build_asset_provider(pv, registry)
         status = adapter.test_connection()
     except Exception as e:  # noqa: BLE001
@@ -203,5 +205,18 @@ def get_local_sdxl_models(kind: str, base_url: str = ""):
         raise HTTPException(400, "kind phải là checkpoints hoặc loras")
     try:
         return {"models": list_comfyui_models(kind, base_url=base_url)}
+    except RuntimeError as e:
+        raise HTTPException(502, str(e)) from e
+
+
+@router.get("/providers/localai/models")
+def get_localai_models(base_url: str = ""):
+    """Liệt kê model ĐÃ ĐĂNG KÝ trong LocalAI — **mới (2026-08-25)**, tương đương
+    `get_local_sdxl_models` ở trên nhưng cho provider `localai_image`/`localai_video`
+    (xem `app/providers/image_localai.py::list_localai_models` — khác ComfyUI, đây là
+    model LOGIC đã đăng ký, không phải file checkpoint thô trên đĩa). 502 nếu LocalAI
+    chưa chạy được, cùng convention endpoint ComfyUI ở trên."""
+    try:
+        return {"models": list_localai_models(base_url=base_url)}
     except RuntimeError as e:
         raise HTTPException(502, str(e)) from e

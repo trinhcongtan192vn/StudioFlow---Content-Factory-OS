@@ -28,6 +28,7 @@ export default function AuditLogSettings() {
           </label>
         ))}
       </div>
+      <div style={{ overflowX: "auto" }}>
       <table className="table">
         <thead>
           <tr>
@@ -57,6 +58,7 @@ export default function AuditLogSettings() {
           )}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

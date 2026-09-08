@@ -30,6 +30,9 @@ Thùng rác — trừ path `.../permanent`, xoá cứng thật, xem mục Thùng
 | POST | `/channels/{id}/brandprofile/clone-from/{src_channel_id}` | Clone từ kênh khác. |
 | POST | `/channels/{id}/brandprofile/logo/upload` | **Mới (2026-08-22, mục 62)**: upload logo kênh (multipart PNG/JPEG/WEBP) — set `logo_path`, thay TẠI CHỖ (xoá file cũ khác đuôi nếu có), bump version. Thuần hiển thị, không dùng trong pipeline sinh asset/ghép video. |
 | GET | `/channels/{id}/brandprofile/logo` | **Mới (2026-08-22, mục 62)**: tải/xem logo đã upload. |
+| POST | `/channels/{id}/brandprofile/style-references/upload` | **Mới (2026-08-23, mục 75)**: THÊM 1 ảnh tham chiếu phong cách (IPAdapter, multipart PNG/JPEG/WEBP) vào `style_reference_paths` — KHÁC MỌI endpoint asset khác (thay TẠI CHỖ, 1 file), đây là DANH SÁCH nhiều ảnh, tên file tự sinh duy nhất, không ghi đè ảnh cũ. |
+| DELETE | `/channels/{id}/brandprofile/style-references/{filename}` | **Mới (2026-08-23, mục 75)**: bỏ ĐÚNG 1 ảnh khỏi danh sách + xoá file trên đĩa. |
+| GET | `/channels/{id}/brandprofile/style-references/{filename}` | **Mới (2026-08-23, mục 75)**: xem 1 ảnh tham chiếu trong danh sách. |
 | POST | `/channels/{id}/brandprofile/voice-sample/upload` | **Đã build (2026-08-16)**: upload mẫu giọng thương hiệu (multipart WAV/MP3) — set `voice_clone_ref_path`, bump version. Xem `05_ai_providers.md` §8e. |
 | GET | `/channels/{id}/brandprofile/voice-sample` | **Đã build (2026-08-16)**: tải/nghe lại mẫu giọng đã upload. |
 | POST | `/channels/{id}/brandprofile/intro/upload` | **Mới (2026-08-20)**: upload video/audio thương hiệu (multipart, tự nhận diện loại) — set `intro_video_path` HOẶC `intro_audio_path`, xoá field còn lại + file cũ (chỉ 1 trong 2). Bump version. Xem `04_data_schemas.md` §1, mục 51 IMPLEMENTATION_REPORT.md. |
@@ -110,6 +113,9 @@ bytes qua `GET .../file` rồi gọi thẳng API upload sẵn có ở nơi gọi
 | POST | `/projects/{id}/visual/generate-all-visual` | Sinh lại `visual_fx` cho TOÀN BỘ shot (nút header "Tạo Visual cho toàn bộ block"). |
 | POST | `/projects/{id}/visual/generate-all-tts` | Sinh lại `audio_sfx` cho TOÀN BỘ shot (nút header "Tạo giọng đọc (TTS) cho toàn bộ block"). |
 | POST | `/projects/{id}/render/shots/{shot_id}/upload-visual` | **Mới (2026-08-17)** — module Render Studio (`render.py`, KHÁC 3 dòng `/visual/shots/...` phía trên vốn thuộc `pipeline.py` và chỉ sửa PROMPT text). Multipart `file` — upload ảnh/video có sẵn từ máy THAY CHO sinh bằng AI cho 1 shot, ghi thẳng vào `assets/{shot_id}.<ext>` (thay thế TẠI CHỖ, xoá file cũ nếu khác đuôi), cập nhật `ShotRenderStatus` (`visual_provider: "upload"`, `visual_status: "ready"`, `approved` reset về `false`). Loại file (ảnh PNG/JPEG/WEBP hay video MP4/WEBM/MOV) PHẢI khớp `shot.visual_type` hiện có — đổi kiểu qua `PATCH /visual/shots/{id}` trước nếu cần, endpoint này không tự đổi `visual_type` (giữ ranh giới render.py chỉ đọc pack.json, không ghi lại). Dùng được ngay cả khi chưa từng bấm "Bắt đầu sinh asset" (tự tạo entry `render.json`). Nút "↑ Upload ảnh/video" cạnh nút "Tạo ảnh/video" ở mỗi ShotCard, Visual Studio. |
+| DELETE | `/projects/{id}/render/shots/{shot_id}/visual` | **Mới (2026-09-02, mục 107)** — xoá ảnh/video đã sinh/upload/gán (từ Kho tư liệu) cho 1 shot, theo yêu cầu người dùng ("cho phép remove video/image ở từng shot sau khi đã add"). Xoá file trên đĩa (`unlink_retrying`), reset `ShotRenderStatus` về `visual_status="pending"` (`visual_asset_path`/`visual_provider`/`linked_clip_id`/`visual_watermark_note` = `null`, `approved=false`) — KHÔNG tự sinh/upload lại cái khác, chỉ trả shot về trạng thái chưa có visual. 404 nếu chưa từng có `render.json` entry cho shot này (khác `upload-visual` — endpoint đó tự tạo entry, endpoint này không có gì để xoá nên báo lỗi thẳng). Nút "Xoá ảnh/video" (màu cảnh báo) ở mỗi ShotCard, Visual Studio — chỉ hiện khi shot đang có asset. |
+| POST | `/projects/{id}/render/shots/{shot_id}/remove-watermark` | **Mới (2026-08-28, mục 99)** — xoá watermark khỏi ảnh/video ĐÃ SINH/upload cho 1 shot, tái dùng `app/watermark/` (Florence-2 + LaMa) xây cho Kho Tài Nguyên. Yêu cầu `visual_status=="ready"` (400 nếu chưa) — chạy nền, đè `visual_asset_path` bằng bản `_nowm`. KHÔNG phát hiện watermark KHÔNG phải lỗi — ghi `ShotRenderStatus.visual_watermark_note` (không phải `visual_error`), asset gốc giữ nguyên. Nút "Xoá watermark" ở mỗi ShotCard, Visual Studio. |
+| POST | `/projects/{id}/render/remove-watermark-all` | **Mới (2026-08-28, mục 99)** — xoá watermark cho MỌI shot đang `visual_status=="ready"`, bỏ qua thầm lặng shot chưa sinh xong (cùng nguyên tắc `approve-all`). Ghi tóm tắt (`scanned`/`cleaned`/`no_watermark`/`failed`) vào `RenderState.watermark_scan_summary`, hiện thành banner sau khi quét xong. Mục "⋯ Tuỳ chọn khác" ở header Visual Studio. |
 | POST | `/projects/{id}/output/enter` | **Đã build lại (2026-08-17, mục 44)** — chuyển sang Output Center (step 3, đổi từ step 5 cũ), set LUÔN `status="ready_output"` (trước đây do `/gate2` approve set — nay `/gate2` không còn, endpoint này tự làm trọn vẹn). KHÔNG còn gate nào chặn trước khi gọi — nút "Đi tới Output →" ở Visual Studio dùng được ngay. |
 | POST | `/projects/{id}/render/intro/upload-visual` | **Mới (2026-08-20, mục 51)** — shot mở đầu RIÊNG của project. Multipart `file` (ảnh HOẶC video, tự nhận diện) — set `RenderState.intro.kind`/`visual_asset_path`. Đổi sang video → tự xoá `audio_asset_path` cũ (video có audio riêng, không cần audio rời). |
 | POST | `/projects/{id}/render/intro/upload-audio` | **Đã build lại (2026-08-20, mục 51)** — audio mở đầu, upload ĐỘC LẬP được (không còn bắt buộc phải có ảnh trước). Chỉ audio (không ảnh) → lúc ghép tự dùng ẢNH shot đầu tiên minh hoạ, giống audio thương hiệu cấp kênh. 400 nếu `kind=="video"` (video tự có audio riêng). |
@@ -121,10 +127,24 @@ bytes qua `GET .../file` rồi gọi thẳng API upload sẵn có ở nơi gọi
 | PATCH | `/projects/{id}/render/bg-music` | **Mới (2026-08-20, mục 53)** — chỉnh `volume` (0.0-1.0). Tự tạo `BgMusicOverride` nếu chưa có (chỉnh volume trước khi kịp upload file vẫn hợp lệ). |
 | DELETE | `/projects/{id}/render/bg-music` | **Mới (2026-08-20, mục 53)** — bỏ nhạc nền riêng, xoá hẳn file trên đĩa, quay về dùng nhạc nền mặc định cấp kênh (nếu có). |
 | GET | `/projects/{id}/render/bg-music/asset` | **Mới (2026-08-20, mục 53)** — tải/nghe lại nhạc nền riêng đã upload (hỗ trợ Range). |
-| POST | `/projects/{id}/render/overlay/upload` | **Mới (2026-08-22, mục 68)** — hiệu ứng lớp phủ RIÊNG của project (VD mưa/tuyết rơi), override overlay mặc định cấp kênh. Multipart `file` (video mp4/webm/mov). Giữ nguyên `opacity` hiện có nếu đã chỉnh trước đó. |
+| POST | `/projects/{id}/render/overlay/upload` | **Mới (2026-08-22, mục 68)** — hiệu ứng lớp phủ RIÊNG của project (VD mưa/tuyết rơi), override overlay mặc định cấp kênh. Multipart `file` (video mp4/webm/mov). Giữ nguyên `opacity` hiện có nếu đã chỉnh trước đó. Tự đặt `disabled=False`. |
 | PATCH | `/projects/{id}/render/overlay` | **Mới (2026-08-22, mục 68)** — chỉnh `opacity` (0.0-1.0). Tự tạo `OverlayEffectOverride` nếu chưa có. |
-| DELETE | `/projects/{id}/render/overlay` | **Mới (2026-08-22, mục 68)** — bỏ overlay riêng, xoá hẳn file trên đĩa, quay về dùng overlay mặc định cấp kênh (nếu có). |
+| DELETE | `/projects/{id}/render/overlay` | **Đổi hành vi (2026-09-02, mục 105)** — bỏ HẲN overlay cho project này (set `disabled=True`, KHÔNG còn fallback ngầm về overlay mặc định cấp kênh như trước), xoá hẳn file riêng trên đĩa nếu có. |
+| PATCH | `/projects/{id}/render/overlay/inherit` | **Mới (2026-09-02, mục 105)** — dùng lại overlay thương hiệu cấp kênh, đặt `disabled=False`. Không cần body, cùng pattern `render/intro/inherit`. |
 | GET | `/projects/{id}/render/overlay/asset` | **Mới (2026-08-22, mục 68)** — tải/xem lại video overlay riêng đã upload (hỗ trợ Range). |
+| POST | `/projects/{id}/render/background-video/upload` | **Mới (2026-09-02, mục 106)**, **đổi hành vi (mục 110)** — video nền CHUNG cho toàn bộ block, loop theo tổng thời lượng timeline (không phân biệt ranh giới shot). Multipart `file` (video mp4/webm/mov). KHÔNG có cấp kênh mặc định để kế thừa (thuần override project). Mục 110 — mỗi lần gọi THÊM 1 video vào `asset_paths` (list, KHÔNG còn thay thế tại chỗ như bản 1-video cũ) — cho phép nhiều video nối thành 1 "playlist" lúc ghép. |
+| DELETE | `/projects/{id}/render/background-video/{index}` | **Mới (2026-09-02, mục 110)** — bỏ ĐÚNG 1 video nền theo vị trí `index` (0-based, khớp thứ tự hiện trên UI) trong `asset_paths`, xoá file trên đĩa. Khác endpoint không-index bên dưới (bỏ HẲN cả danh sách). |
+| DELETE | `/projects/{id}/render/background-video` | **Mới (2026-09-02, mục 106)** — bỏ HẲN toàn bộ video nền (mọi video + cấu hình random/transition), xoá hẳn mọi file trên đĩa, quay lại yêu cầu MỌI shot phải có visual riêng lúc ghép (hành vi gốc). |
+| PATCH | `/projects/{id}/render/background-video` | **Mới (2026-09-02, mục 110)** — body `{ random_order?, transition? }` (chỉ gửi field muốn đổi). `random_order` (bool) — bật "random loop": xáo trộn thứ tự video 1 LẦN mỗi lượt ghép (không xáo lại mỗi vòng lặp). `transition` (cùng danh sách `TRANSITIONS` dùng cho shot-to-shot, 400 nếu sai) — hiệu ứng chuyển cảnh GIỮA các video liên tiếp trong playlist, `"cut"` mặc định. Chỉ có ý nghĩa khi có ≥2 video. |
+| GET | `/projects/{id}/render/background-video/asset/{index}` | **Mới (2026-09-02, mục 106)**, **đổi path (mục 110)** — tải/xem lại 1 video nền theo `index` (hỗ trợ Range). |
+| POST | `/projects/{id}/render/layers/upload` | **Mới (2026-09-02, mục 112)**, **`blend_mode` thêm mục 113** — layer video ĐỊNH VỊ theo lưới 3x3 (VD voice wave, logo) — theo yêu cầu người dùng. Multipart `file` (video mp4/webm/mov) + form field `position` (1 trong 9 giá trị lưới 3x3, mặc định `"bottom-center"`), `width_pct` (0.05–1.0, mặc định 0.3), `opacity` (0.0–1.0, mặc định 1.0), `blend_mode` (`"alpha"` mặc định — nguồn CÓ SẴN kênh alpha, WebM VP9/MOV ProRes4444 trong suốt; hoặc `"screen"` — nguồn NỀN ĐEN ĐẶC, không alpha, screen-blend cục bộ đúng vùng layer, theo yêu cầu người dùng "tôi chỉ có video layer nền đen thôi"). Mỗi lần gọi THÊM 1 layer MỚI vào `RenderState.layers` (list, không thay thế — nhiều layer cùng lúc, mỗi layer có thể dùng `blend_mode` khác nhau). |
+| PATCH | `/projects/{id}/render/layers/{layer_id}` | **Mới (2026-09-02, mục 112)** — body `{ position?, width_pct?, opacity?, blend_mode? }` (chỉ gửi field muốn đổi), validate cùng ràng buộc endpoint upload. |
+| DELETE | `/projects/{id}/render/layers/{layer_id}` | **Mới (2026-09-02, mục 112)** — bỏ ĐÚNG 1 layer, xoá file trên đĩa. |
+| GET | `/projects/{id}/render/layers/{layer_id}/asset` | **Mới (2026-09-02, mục 112)** — tải/xem lại 1 layer đã upload (hỗ trợ Range). |
+| POST | `/projects/{id}/render/image-layers/upload` | **Mới (2026-09-02, mục 115)** — layer ẢNH ĐỊNH VỊ, song song layer video ở trên — theo yêu cầu người dùng. Multipart `file` (ảnh png/jpg/webp) + form field `position` (1 trong 9 giá trị lưới 3x3 HOẶC `"full"` — phủ toàn khung hình, bỏ qua `width_pct`), `width_pct`/`opacity`/`blend_mode` (giống hệt layer video). Mỗi lần gọi THÊM 1 layer MỚI vào `RenderState.image_layers` (list RIÊNG, không chung với layer video). |
+| PATCH | `/projects/{id}/render/image-layers/{layer_id}` | **Mới (2026-09-02, mục 115)** — body `{ position?, width_pct?, opacity?, blend_mode? }`, validate cùng ràng buộc endpoint upload. |
+| DELETE | `/projects/{id}/render/image-layers/{layer_id}` | **Mới (2026-09-02, mục 115)** — bỏ ĐÚNG 1 layer ảnh, xoá file trên đĩa. |
+| GET | `/projects/{id}/render/image-layers/{layer_id}/asset` | **Mới (2026-09-02, mục 115)** — tải/xem lại 1 layer ảnh đã upload (hỗ trợ Range). |
 
 > **Đã build vòng 4 — đổi tên field**: `Shot.prompt` → `Shot.visual_fx`, `Shot.tts_emotion`
 > → `Shot.audio_sfx` (khớp tên 2 trong 6 cột import — xem mục Script Import). Endpoint
@@ -179,16 +199,53 @@ bytes qua `GET .../file` rồi gọi thẳng API upload sẵn có ở nơi gọi
 >   lỗi 1 vài shot, không gọi lại API tốn phí). **`force=true` — mới (2026-08-22, mục
 >   67)**: sinh lại HÀNG LOẠT kể cả shot đã có sẵn (dùng khi đổi BrandProfile sang giọng/
 >   style ảnh mới) — reset shot `ready` (đúng `kind`) về `generating` trước khi chạy, và
->   bỏ duyệt (`approved=false`) các shot visual bị sinh lại.
+>   bỏ duyệt (`approved=false`) các shot visual bị sinh lại. **Endpoint KHÔNG đổi** —
+>   nhưng UI gọi `kind=narration` (cả `force=false` lẫn `force=true`) đã chuyển HẲN từ
+>   Visual Studio sang Script Studio (2026-09-02, mục 109, theo yêu cầu người dùng) —
+>   Visual Studio giờ chỉ còn gọi `kind=visual` ở batch header (per-shot "Tạo giọng đọc"
+>   vẫn còn, không đổi).
 > - `GET /projects/{id}/render/status`, `GET /projects/{id}/render/gpu-status` — trạng
 >   thái từng shot + hàng đợi GPU local.
-> - `POST /projects/{id}/render/cancel` — dừng batch đang chạy.
+> - `POST /projects/{id}/render/cancel` — dừng batch đang chạy. Cờ "đang chạy"/"đã yêu
+>   cầu huỷ" (`engine.py::_in_progress`/`_cancel_requested`) là PER-PROJECT, KHÔNG tách
+>   theo `kind` (visual hay narration) — chỉ 1 batch chạy được cùng lúc cho 1 project
+>   (`_require_not_in_progress` chặn mở batch mới khi đã có 1 cái đang chạy), nên endpoint
+>   này LUÔN dừng ĐÚNG batch đang chạy bất kể gọi từ đâu. Nút "⏹ Dừng" có ở CẢ Visual
+>   Studio (dừng batch visual) lẫn Script Studio (**mới 2026-09-02, mục 110** — dừng
+>   batch giọng đọc, theo yêu cầu người dùng: batch giọng đọc quản lý chính ở Script
+>   Studio từ mục 109 nhưng trước đó chỉ Visual Studio có nút dừng, buộc người dùng rời
+>   màn để dừng cái họ vừa bấm ở Script Studio).
 > - `POST /projects/{id}/render/shots/{shot_id}/regenerate-visual` /
 >   `regenerate-narration` — sinh lại 1 shot riêng lẻ, LUÔN sinh lại (không có khái niệm
 >   "resume" ở mức 1 shot — bấm là sinh lại thật).
+> - `PATCH /projects/{id}/render/narration-speed` — **mới (2026-09-02, mục 109)** — body
+>   `{ speed: float }` (0.5–2.0, 400 nếu ngoài khoảng), lưu `RenderState.narration_speed`.
+>   Nút chỉnh tốc độ ở Script Studio. Áp dụng bằng time-stretch file audio (ffmpeg
+>   `atempo`) NGAY SAU khi provider TTS sinh xong — xem `engine.py::generate_narration_
+>   asset`/`_apply_narration_speed` — KHÔNG PHẢI tham số riêng của từng provider (hoạt
+>   động đồng nhất bất kể ElevenLabs/Gemini/Piper/OmniVoice). Chỉ áp dụng cho lần sinh
+>   MỚI — đổi giá trị KHÔNG tự sinh lại narration đã có sẵn.
+> - `DELETE /projects/{id}/render/shots/{shot_id}/visual` — **mới (2026-09-02, mục 107)**
+>   — xoá ảnh/video hiện có của 1 shot, trả về `visual_status="pending"` (xem bảng chi
+>   tiết ở trên).
 > - `POST /projects/{id}/render/shots/{shot_id}/approve`,
->   `POST /projects/{id}/render/approve-all` — duyệt shot đã sinh visual xong.
-> - `POST /projects/{id}/render/assemble` — ghép MP4 từ các shot đã ready + đã duyệt.
+>   `POST /projects/{id}/render/approve-all` — vẫn tồn tại (đánh dấu `approved` cho từng
+>   shot), nhưng **KHÔNG còn chặn ghép video** (bỏ 2026-09-02, mục 107, theo yêu cầu
+>   người dùng: "bỏ luồng duyệt block, ko cần phải có thì mới render được video") — chỉ
+>   còn là cờ tuỳ chọn, không có UI nào ở Visual Studio gọi tới 2 endpoint này nữa.
+> - `POST /projects/{id}/render/assemble` — ghép MP4 từ các shot đã `visual_status ==
+>   "ready"` (hoặc không có visual riêng NHƯNG project có video nền chung — xem
+>   `background-video/upload`), không còn yêu cầu `approved`. **Đổi (2026-09-02, mục
+>   111)** — 409 "đang ghép rồi" giờ CHỈ dựa vào `engine.is_assembly_in_progress` (cờ
+>   TRONG BỘ NHỚ), KHÔNG còn tin mù quáng `state.assembly_status` đã lưu — field này có
+>   thể bị KẸT "assembling" mãi mãi nếu thread ghép "chết lặng" giữa chừng (bug thật đã
+>   gặp — xem `assembly.py::assemble_video` docstring); giờ tự phục hồi được (khởi động
+>   lại app, hoặc cờ tự dọn qua `finally` khi hàm chạy xong dù lỗi gì).
+> - `POST /projects/{id}/render/assemble/reset` — **mới (2026-09-02, mục 111)** — đặt lại
+>   `assembly_status` bị kẹt "assembling" về "error" NGAY TRONG UI (nút "Đặt lại tiến
+>   trình bị treo", `RenderStudio.tsx`, hiện suốt lúc đang ghép). 409 nếu tiến trình vẫn
+>   đang chạy THẬT (`is_assembly_in_progress`), 400 nếu không có gì để đặt lại. Không xoá
+>   file trung gian đã dựng dở — lần ghép lại tự ghi đè.
 > - Còn nhiều endpoint khác (upload ảnh/audio thay AI, shot mở đầu, nhạc nền override...)
 >   — xem trực tiếp router, bảng này KHÔNG liệt kê đầy đủ.
 

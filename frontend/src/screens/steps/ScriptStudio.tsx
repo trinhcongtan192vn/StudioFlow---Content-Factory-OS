@@ -19,6 +19,7 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
   const [isPlayingAll, setIsPlayingAll] = useState(false);
   const pollRef = useRef<number | undefined>(undefined);
   const [startingNarration, setStartingNarration] = useState(false);
+  const [cancellingNarration, setCancellingNarration] = useState(false);
   const [downloadingAudio, setDownloadingAudio] = useState(false);
   const [narrationError, setNarrationError] = useState<string | null>(null);
   const [editingAudioIndex, setEditingAudioIndex] = useState<number | null>(null);
@@ -131,7 +132,12 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
   const totalBlockCount = (script?.body || []).length;
   const allNarrationReady = totalBlockCount > 0 && readyNarrationCount === totalBlockCount;
 
-  async function startNarrationBatch() {
+  // `force` — **mới (2026-09-02, mục 109)**: nút "Sinh lại TOÀN BỘ giọng đọc (kể cả đã
+  // có)" chuyển từ Visual Studio sang đây (theo yêu cầu người dùng: bỏ hẳn batch giọng
+  // đọc ở Visual Studio, gộp cả 2 mức "chỉ lấp chỗ trống" và "sinh lại toàn bộ" vào 1
+  // bước duy nhất — Script Studio, nơi kịch bản/giọng đọc được chốt trước khi qua Visual
+  // Studio làm hình ảnh).
+  async function startNarrationBatch(force = false) {
     setStartingNarration(true);
     setNarrationError(null);
     try {
@@ -140,7 +146,7 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
       // được trạng thái narration theo từng block, dù chưa thật sự qua Visual Studio.
       await api.ensureShotsForNarration(project.id);
       await refresh();
-      setRenderState(await api.startRender(project.id, "narration"));
+      setRenderState(await api.startRender(project.id, "narration", force));
       // Cùng lý do timing đã ghi ở VisualStudio.tsx::startAssetGeneration — BackgroundTasks
       // chỉ chạy SAU khi response HTTP trả về, state vừa nhận vẫn là "trước khi sinh".
       await new Promise((resolve) => window.setTimeout(resolve, 1200));
@@ -150,6 +156,42 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
       setNarrationError(e instanceof ApiError ? e.message : "Có lỗi khi sinh giọng đọc cho toàn bộ block.");
     } finally {
       setStartingNarration(false);
+    }
+  }
+
+  // Nút "Dừng" — **mới (2026-09-02, mục 110)**, theo yêu cầu người dùng: batch giọng đọc
+  // giờ quản lý CHÍNH ở Script Studio (mục 109) nhưng nút dừng vẫn chỉ nằm ở Visual
+  // Studio, buộc người dùng rời màn này mới dừng được. Cờ "đang chạy" (`_in_progress`/
+  // `_cancel_requested`, `engine.py`) là PER-PROJECT, KHÔNG tách theo kind (visual hay
+  // narration) — chỉ 1 batch chạy được cùng lúc cho 1 project (`_require_not_in_progress`
+  // chặn mở batch mới khi đã có 1 cái đang chạy), nên KHÔNG cần/không thể "tách riêng" ở
+  // tầng backend (không có 2 tiến trình visual+narration chạy song song để tách) — gọi
+  // ĐÚNG endpoint `POST render/cancel` y hệt Visual Studio, chỉ khác ở CHỖ hiện nút (màn
+  // người dùng đang thao tác), để họ không phải rời Script Studio mới dừng được.
+  async function cancelAssetGeneration() {
+    setCancellingNarration(true);
+    setNarrationError(null);
+    try {
+      setRenderState(await api.cancelRender(project.id));
+      window.setTimeout(loadRenderStatus, 1200);
+      window.setTimeout(loadRenderStatus, 3000);
+    } catch (e) {
+      setNarrationError(e instanceof ApiError ? e.message : "Có lỗi khi dừng sinh giọng đọc.");
+    } finally {
+      setCancellingNarration(false);
+    }
+  }
+
+  // Tốc độ giọng đọc TOÀN BỘ block — **mới (2026-09-02, mục 109)**, theo yêu cầu người
+  // dùng. Chỉ LƯU giá trị — áp dụng cho lần (re)generate TIẾP THEO (time-stretch file
+  // audio sau khi sinh, xem backend `engine.py::_apply_narration_speed`), KHÔNG tự sinh
+  // lại narration đã có sẵn (đúng nguyên tắc "không tự chạy ngầm").
+  async function setNarrationSpeed(speed: number) {
+    setNarrationError(null);
+    try {
+      setRenderState(await api.patchNarrationSpeed(project.id, speed));
+    } catch (e) {
+      setNarrationError(e instanceof ApiError ? e.message : "Có lỗi khi chỉnh tốc độ giọng đọc.");
     }
   }
 
@@ -239,16 +281,39 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
 
       {aiError && <AiErrorBanner message={aiError} onDismiss={() => setAiError(null)} />}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: "var(--space-4)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: "var(--space-2)" }}>
         <button
           className="btn btn-secondary"
           style={{ fontSize: 12, padding: "5px 12px" }}
-          onClick={startNarrationBatch}
+          onClick={() => startNarrationBatch()}
           disabled={startingNarration || hasInFlight}
-          title="Sinh giọng đọc thật cho toàn bộ block ngay ở bước này, không cần đợi tới Visual Studio."
+          title="Sinh giọng đọc thật cho toàn bộ block ngay ở bước này, không cần đợi tới Visual Studio. Bỏ qua block đã sinh xong (chỉ lấp chỗ trống/lỗi)."
         >
           {startingNarration || hasInFlight ? "Đang sinh giọng đọc..." : `Sinh giọng đọc cho toàn bộ block${totalBlockCount ? ` (${readyNarrationCount}/${totalBlockCount})` : ""}`}
         </button>
+        {/* Sinh lại TOÀN BỘ (force) — chuyển từ Visual Studio sang đây (2026-09-02, mục
+            109, theo yêu cầu người dùng). Màu cảnh báo — tốn phí/thời gian lại từ đầu,
+            kể cả block ĐÃ sinh xong, khác nút an toàn ở trên (chỉ lấp chỗ trống). */}
+        <button
+          className="btn btn-secondary"
+          style={{ fontSize: 12, padding: "5px 12px", color: "var(--color-danger)" }}
+          onClick={() => startNarrationBatch(true)}
+          disabled={startingNarration || hasInFlight}
+          title="Sinh lại TOÀN BỘ giọng đọc cho block, KỂ CẢ block đã có sẵn — dùng khi vừa đổi BrandProfile sang giọng đọc mới hoặc vừa chỉnh tốc độ giọng đọc. Tốn phí/thời gian lại từ đầu."
+        >
+          {startingNarration || hasInFlight ? "Đang sinh giọng đọc..." : "Sinh lại TOÀN BỘ giọng đọc (kể cả đã có)"}
+        </button>
+        {(hasInFlight || startingNarration) && (
+          <button
+            className="btn btn-secondary"
+            style={{ fontSize: 12, padding: "5px 12px", color: "var(--color-danger)" }}
+            onClick={cancelAssetGeneration}
+            disabled={cancellingNarration}
+            title="Dừng tiến trình sinh giọng đọc (hoặc ảnh/video nếu đang chạy từ Visual Studio) đang chạy cho project này — block đã sinh xong (ready) không bị ảnh hưởng."
+          >
+            {cancellingNarration ? "Đang dừng..." : "⏹ Dừng"}
+          </button>
+        )}
         <button
           className="btn btn-secondary"
           style={{ fontSize: 12, padding: "5px 12px" }}
@@ -270,6 +335,27 @@ export default function ScriptStudio({ project, pack, refresh, busy, setBusy }: 
         <button className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => api.downloadTranscriptSrt(project.id)} title="Tải transcript kèm timeline dạng .srt (mỗi block = 1 cue phụ đề)">
           ⭳ Tải transcript (.srt)
         </button>
+      </div>
+
+      {/* Tốc độ giọng đọc TOÀN BỘ block — mới (2026-09-02, mục 109). Chỉ lưu giá trị,
+          áp dụng cho lần (re)generate TIẾP THEO (xem setNarrationSpeed) — bấm 1 trong 2
+          nút phía trên SAU KHI chỉnh để nghe đúng tốc độ mới. */}
+      <div style={{ maxWidth: 360, marginBottom: "var(--space-4)" }}>
+        <label style={{ fontSize: 11 }}>
+          Tốc độ giọng đọc ({(renderState?.narration_speed ?? 1).toFixed(2)}x{(renderState?.narration_speed ?? 1) === 1 ? " — mặc định" : ""})
+        </label>
+        <input
+          key={renderState?.narration_speed ?? 1}
+          type="range"
+          min={0.5}
+          max={2}
+          step={0.05}
+          defaultValue={renderState?.narration_speed ?? 1}
+          onMouseUp={(e) => setNarrationSpeed(parseFloat((e.target as HTMLInputElement).value))}
+          onTouchEnd={(e) => setNarrationSpeed(parseFloat((e.target as HTMLInputElement).value))}
+          style={{ width: "100%" }}
+        />
+        <div style={{ fontSize: 10.5, opacity: 0.6 }}>Chỉ áp dụng cho giọng đọc SINH MỚI sau khi chỉnh — bấm "Sinh giọng đọc" (hoặc "Sinh lại TOÀN BỘ") ở trên để áp dụng cho block đã có sẵn.</div>
       </div>
       {narrationError && <AiErrorBanner message={narrationError} onDismiss={() => setNarrationError(null)} />}
 

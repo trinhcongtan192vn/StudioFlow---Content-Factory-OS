@@ -208,13 +208,17 @@ def test_sdxl_workflow_builder_uses_vertical_dims_when_passed():
 
 
 def test_wan_workflow_builder_uses_vertical_dims_when_passed():
-    from app.providers.video_comfy_wan import _build_txt2vid_workflow
+    """Độ phân giải mặc định đổi (2026-08-23) sang khớp bucket SDXL (1344×768, xem
+    test_video_comfy_wan.py::test_resolution_matches_sdxl_bucket_exactly) — test này chỉ
+    xác nhận đúng THAM SỐ width/height truyền vào có tới đúng node, không hardcode lại
+    số cụ thể (tránh trùng lặp nguồn sự thật với test kia)."""
+    from app.providers.video_comfy_wan import _HEIGHT, _HEIGHT_VERTICAL, _WIDTH, _WIDTH_VERTICAL, _build_txt2vid_workflow
 
     wf_default = _build_txt2vid_workflow(prompt="x", seed=1, num_frames=25)
-    assert wf_default["55"]["inputs"]["width"] == 1280 and wf_default["55"]["inputs"]["height"] == 704
+    assert wf_default["55"]["inputs"]["width"] == _WIDTH and wf_default["55"]["inputs"]["height"] == _HEIGHT
 
-    wf_vertical = _build_txt2vid_workflow(prompt="x", seed=1, num_frames=25, width=704, height=1280)
-    assert wf_vertical["55"]["inputs"]["width"] == 704 and wf_vertical["55"]["inputs"]["height"] == 1280
+    wf_vertical = _build_txt2vid_workflow(prompt="x", seed=1, num_frames=25, width=_WIDTH_VERTICAL, height=_HEIGHT_VERTICAL)
+    assert wf_vertical["55"]["inputs"]["width"] == _WIDTH_VERTICAL and wf_vertical["55"]["inputs"]["height"] == _HEIGHT_VERTICAL
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,11 @@ Inject vào mọi agent AI để giữ bản sắc kênh.
   ],
   "forbidden": ["cam kết lợi nhuận", "từ ngữ giật gân X, Y"],
   "visual_style_prompt": "minimal, tông xanh–trắng, biểu đồ sạch",
+  "cultural_lock_positive": "áo tứ thân, khăn mỏ quạ, mái đình làng Bắc Bộ, ngói âm dương",
+  "cultural_lock_negative": "japanese kimono, torii gate, korean hanbok, japanese architecture, korean architecture, anime style, manga, japanese art style",
+  "style_reference_paths": [],
+  "style_reference_weight": 0.6,
+  "motion_tone": "chuyển động chậm, tinh tế, không giật gân, không rung camera",
   "hook_formats_preferred": ["câu hỏi gây sốc", "con số phản trực giác"],
   "retention_benchmark": {
     "target_hook_strength": 0.7,
@@ -37,8 +42,7 @@ Inject vào mọi agent AI để giữ bản sắc kênh.
   "intro_audio_path": "",
   "bg_music_path": "",
   "bg_music_volume": 0.3,
-  "style_lora_path": "",
-  "style_lora_strength": 0.8,
+  "style_loras": [{ "name": "InkArtXL_1.2.safetensors", "strength": 0.8 }],
   "overlay_effect_path": "",
   "overlay_effect_opacity": 0.5,
   "version": 3
@@ -68,12 +72,34 @@ Inject vào mọi agent AI để giữ bản sắc kênh.
   ẢNH của shot ĐẦU TIÊN trong từng project làm hình minh hoạ (chỉ khả dụng nếu shot đó
   đã sinh xong visual — xem `app/render/assembly.py::_resolve_intro_source`). Có thể bị
   GHI ĐÈ bởi shot mở đầu riêng của TỪNG project — xem `3b. RenderState` bên dưới.
-- `style_lora_path`/`style_lora_strength` — **đã build 2026-08-22 (mục 64)**: Style LoRA
-  khoá "chữ ký hình ảnh" cho ảnh sinh bằng provider `local_sdxl` (ComfyUI). `style_lora_
-  path` là TÊN FILE thật trong `ComfyUI/models/loras/` (KHÔNG PHẢI đường dẫn tuyệt đối
-  như các field asset khác — LoRA sống trong thư mục ComfyUI, không phải channel_dir).
-  Rỗng = không dùng LoRA. `style_lora_strength` (mặc định 0.8) là trọng số áp dụng. CHỈ
-  áp dụng cho `local_sdxl` — provider khác bỏ qua. Xem `specs/05_ai_providers.md` §8h.
+- `motion_tone` — **đã build 2026-08-23 (mục 73)**: ràng buộc chuyển động cho video AI
+  local (`local_wan`/Wan2.2) — KHÁC `visual_style_prompt` (phong cách thị giác TĨNH,
+  không nói gì về tốc độ/kiểu chuyển động). Mặc định "chậm, tinh tế, không giật gân"
+  khớp brand DNA kênh sử. Nối vào prompt qua `app/render/engine.py::
+  _build_video_motion_prompt`. CHỈ áp dụng `local_wan` — provider video cloud (Sora/
+  Veo/Flux) bỏ qua field này.
+- `cultural_lock_positive`/`cultural_lock_negative` — **đã build 2026-08-23 (mục 75)**:
+  chống thiên lệch văn hoá Nhật/Hàn của checkpoint/LoRA "Á Đông" (đa số train từ dữ liệu
+  Nhật/Trung/Hàn). `cultural_lock_positive` — từ khoá Việt Nam cụ thể theo triều đại/
+  thời kỳ (trang phục, kiến trúc, hoạ tiết), rỗng mặc định (đặc thù từng kênh), áp dụng
+  MỌI provider (cloud lẫn local) — nối vào `_build_visual_prompt`/`_build_video_motion_
+  prompt` NGAY SAU content. `cultural_lock_negative` — loại trừ văn hoá ngoại lai, default
+  KHÔNG rỗng ("japanese kimono, torii gate, korean hanbok..."), CHỈ áp dụng đầy đủ cho
+  `local_sdxl`/`local_wan` (negative-prompt thật) — provider cloud không có tham số
+  negative prompt.
+- `style_loras` — **đã build 2026-08-22 (mục 64), đổi sang STACK nhiều LoRA (mục 75)**:
+  Style LoRA khoá "chữ ký hình ảnh" cho ảnh sinh bằng provider `local_sdxl` (ComfyUI) —
+  danh sách `{name, strength}` (thay `style_lora_path`/`style_lora_strength` đơn cũ),
+  cho phép xếp chồng 2-3 LoRA (VD 1 LoRA chất liệu + 1 LoRA hướng văn hoá). `name` là TÊN
+  FILE thật trong `ComfyUI/models/loras/` (KHÔNG PHẢI đường dẫn tuyệt đối — LoRA sống
+  trong thư mục ComfyUI, không phải channel_dir). Rỗng = không dùng LoRA nào. CHỈ áp dụng
+  cho `local_sdxl` — provider khác bỏ qua. Xem `specs/05_ai_providers.md` §8h/§8k.
+- `style_reference_paths`/`style_reference_weight` — **đã build 2026-08-23 (mục 75)**:
+  ảnh tham chiếu phong cách qua IPAdapter — danh sách đường dẫn TUYỆT ĐỐI trong
+  `channel_dir(id)/style_refs/` (khác `style_loras` — LoRA sống trong ComfyUI). Đảo
+  ngược 1 phần quyết định "không dùng IPAdapter" (xem `specs/05_ai_providers.md` §8k) —
+  RỦI RO CAO (custom node cộng đồng, CHƯA verify thật). `style_reference_weight` (mặc
+  định 0.6) là trọng số IPAdapter dùng chung cho cả bộ ảnh. CHỈ áp dụng `local_sdxl`.
 - `bg_music_path`/`bg_music_volume` — **đã build 2026-08-20 (mục 53)**: nhạc nền MẶC
   ĐỊNH của kênh, phát ĐÈ LIÊN TỤC dưới TOÀN BỘ video (kể cả intro) khi ghép MP4 cho mọi
   project của kênh, rỗng nếu chưa upload. `bg_music_volume` (0.0=câm, 1.0=to bằng giọng
@@ -92,6 +118,48 @@ Inject vào mọi agent AI để giữ bản sắc kênh.
   /channels/{id}/brandprofile/overlay/upload` (multipart, luôn video). Có thể bị GHI ĐÈ
   bởi overlay riêng của TỪNG project (`RenderState.overlay`, ưu tiên cao hơn) — xem
   `app/render/overlay.py::resolve_overlay_source` và `3b. RenderState` bên dưới.
+- `visual_grade`/`grain_enabled`/`aspect_fill_mode`/`bg_music_ducking_enabled` — **đã
+  build 2026-08-26 (CHANGE_Semantic_BRoll_Asset_Vault.md §9b)**: mở rộng hậu kỳ theo
+  BrandProfile, KHÔNG viết render engine mới (mở rộng `app/render/assembly.py` đã có).
+  `visual_grade` (rỗng mặc định = giữ hành vi cũ) chọn 1 trong preset màu cố định
+  (`cinematic_warm`/`moody_dark`/`documentary_faded`, danh sách hằng số
+  `assembly.py::_GRADE_PRESETS` — KHÔNG cho nhập chuỗi filter tuỳ ý). `grain_enabled`
+  (mặc định tắt) bật film grain nhẹ (`noise=alls=8:allf=t+u`). `aspect_fill_mode`
+  (`"crop"` mặc định — hành vi cover-crop cũ; `"blur"` — nền là chính nội dung phóng to +
+  làm mờ, không mất chi tiết rìa, hữu ích cho clip B-roll từ Asset Vault lệch tỷ lệ).
+  `bg_music_ducking_enabled` (mặc định tắt) — tự giảm nhạc nền khi có giọng đọc
+  (`sidechaincompress`) thay vì trộn 1 mức volume cố định xuyên suốt. Chuẩn hoá loudness
+  EBU R128 (`loudnorm=I=-14:TP=-1.0:LRA=11`) áp dụng LUÔN cho mọi video (không cần field
+  BrandProfile — chuẩn hoá kỹ thuật thuần tuý, không phải lựa chọn thẩm mỹ).
+> **Đã REVERT (2026-08-27)**: tính năng "2.5D Depth-Parallax" (`CHANGE_2.5D_Parallax_
+> Synthesizer.md`, build 2026-08-26 — thêm `BrandProfile.parallax_intensity_default`,
+> `Shot.parallax_intensity`, 4 preset `parallax_*` trong `camera_motion`, module
+> `app/render/depth_parallax.py`, endpoint sinh video Parallax riêng shot) đã bị GỠ BỎ
+> HOÀN TOÀN theo yêu cầu người dùng — không còn field/endpoint/module nào liên quan tồn
+> tại trong code. Xem IMPLEMENTATION_REPORT.md mục 87 (lịch sử build) và mục nói về revert
+> (lý do gỡ, phạm vi đã xoá) để biết chi tiết.
+
+## 1b. Kho Tài Nguyên / Asset Vault (SQL, ĐỘC LẬP khỏi BrandProfile JSON — mới 2026-08-26, chuyển TOÀN CỤC 2026-08-27)
+
+Kho tư liệu video TOÀN CỤC (CHANGE_Semantic_BRoll_Asset_Vault.md) — màn RIÊNG ở sidebar
+("Kho Tài nguyên", dưới Dashboard), hiện TẤT CẢ video/clip từ MỌI kênh, lọc theo kênh qua
+query param. 1 `RawVideo` gắn được NHIỀU kênh dạng tag (bảng m2m `raw_video_channel`,
+bắt buộc ≥1 lúc import) — trước đây (2026-08-26) mỗi kênh có kho RIÊNG (`channel_id` FK
+đơn trên `raw_video`/`processed_clip`, Chroma collection/kênh); đổi hẳn sang TOÀN CỤC theo
+yêu cầu người dùng, xem `specs/02_database.md` mục `raw_video`/`raw_video_channel`/
+`processed_clip`. 3 bảng SQL (`raw_video`/`raw_video_channel`/`processed_clip`) + 1 Chroma
+collection TOÀN CỤC (`workspace/asset_vault/vault.chroma/`, lọc kênh ở tầng SQL sau khi
+overfetch), KHÁC `CreativeAsset` (§3c, dùng lại NGUYÊN VẸN, đứng ngoài mọi kênh — Asset
+Vault là NGUYÊN LIỆU THÔ bị cắt thành nhiều clip con). Tiến trình thật khi tải video (yt-dlp
+`progress_hooks`) và khi cắt cảnh (PySceneDetect `callback=` cho bước phát hiện, đếm vòng
+lặp cho bước cắt) — xem `raw_video.progress_current`/`progress_total`/`progress_label`.
+`shots[].linked_clip_id` **KHÔNG tồn tại** trên `Shot` (ProductionPack) —
+field tương đương sống trên `ShotRenderStatus.linked_clip_id` (`3b. RenderState` bên
+dưới), để việc gán clip từ Kho đi ĐÚNG con đường `upload-visual` đã có (module `render.py`
+chỉ ĐỌC `pack.json`, không bao giờ ghi lại). `shots[].asset_type` (đã có sẵn giá trị
+`stock_footage`, xem §3 bên dưới) hiện KHÔNG được set tự động khi gán clip từ Kho — đây
+là quyết định đơn giản hoá có chủ ý (tránh module `render.py` phải ghi `pack.json`), có
+thể bổ sung sau nếu cần phân loại `asset_type` chính xác hơn ở tầng script.
 
 ## 2. Brief (cấp video, đầu vào)
 
@@ -219,7 +287,7 @@ Script Studio (nhận script từ import) → Visual Studio → Output. Schema T
     "cta": { "spoken", "conversion_point" }
   },
   "shots": [
-    { "shot_id", "asset_type", "visual_type": "image|video", "provider", "visual_fx", "audio_sfx", "block_id": "null trừ khi import", "linked_timestamp_sec", "transition_to_next": "cut (mặc định) — xem app/render/transitions.py, mục 33 IMPLEMENTATION_REPORT.md (2026-08-17)", "camera_motion": "none (mặc định) — Ken Burns cho ẢNH tĩnh (zoom/pan/tilt/roll/orbit), xem app/render/camera_motion.py, mục 48 IMPLEMENTATION_REPORT.md (2026-08-19), KHÔNG có tác dụng khi visual_type=video" }
+    { "shot_id", "asset_type", "visual_type": "image|video", "provider", "visual_fx", "audio_sfx", "block_id": "null trừ khi import", "linked_timestamp_sec", "transition_to_next": "cut (mặc định) — xem app/render/transitions.py, mục 33 IMPLEMENTATION_REPORT.md (2026-08-17)", "camera_motion": "none (mặc định) — Ken Burns cho ẢNH tĩnh (zoom/pan/tilt/roll/orbit), xem app/render/camera_motion.py, KHÔNG có tác dụng khi visual_type=video" }
   ],
   "youtube_meta": {
     "thumbnail_description": "chỉnh tay ở Visual Studio (ThumbnailCard) — KHÔNG còn sinh bằng AI",
@@ -295,13 +363,15 @@ Chi tiết & lý do từng quyết định: xem `IMPLEMENTATION_REPORT.md` ở g
 ```
 RenderState
   project_id: string
+  narration_speed: float                  # mới (2026-09-02, mục 109) — mặc định 1.0, chỉnh ở Script Studio, xem ghi chú dưới
   shots: ShotRenderStatus[]
     shot_id: string
     visual_status: "pending" | "generating" | "ready" | "error"
     visual_asset_path: string | null      # đường dẫn file trong assets/<shot_id>.<ext> — AI sinh luôn png/mp4; upload tay có thể là jpg/webp/webm/mov (2026-08-17)
     visual_provider: string | null        # tên provider AI, hoặc "upload" nếu người dùng tự tải ảnh/video lên (2026-08-17)
     visual_error: string | null
-    approved: bool                        # human review — bắt buộc trước khi ghép
+    approved: bool                        # cờ human review tuỳ chọn — KHÔNG còn bắt buộc trước khi ghép (bỏ gate 2026-09-02, mục 107, theo yêu cầu người dùng); vẫn ghi lại qua POST .../approve nhưng Visual Studio không còn UI nào gọi tới
+    linked_clip_id: string | null         # mới (2026-08-26) — trỏ tới ProcessedClip.clip_id khi visual_provider=="asset_vault" (Channel Asset Vault, §1b); dùng cho dedup (usage_count/last_used_at) + cảnh báo rights ở Guardrail
     narration_status: "pending" | "generating" | "ready" | "error"
     narration_asset_path: string | null   # assets/<shot_id>.{mp3|wav} — TTS hoá script.body[].audio (lời thoại thật)
     narration_provider: string | null
@@ -318,8 +388,33 @@ RenderState
   overlay: OverlayEffectOverride | null   # hiệu ứng lớp phủ RIÊNG của project — mới (2026-08-22, mục 68), xem ghi chú dưới
     asset_path: string | null             # assets/overlay.<ext> — LUÔN video
     opacity: float                         # 0.0 (tắt hẳn) .. 1.0 (full cường độ) — mặc định 0.5
+    disabled: bool                         # mới (2026-09-02, mục 105) — tắt HẲN overlay cho project này, kể cả khi kênh CÓ overlay mặc định (khác `asset_path=null`, vốn vẫn ngầm kế thừa kênh)
+  background_video: BackgroundVideoOverride | null  # video nền CHUNG cho toàn bộ block — mới (2026-09-02, mục 106), nhiều video (mục 110), xem ghi chú dưới
+    asset_paths: string[]                 # assets/background_video_<ts>_<n>.<ext> — LUÔN video, KHÔNG có field volume/opacity (chỉ lấy hình, không audio) và KHÔNG có cấp kênh mặc định để kế thừa. Thứ tự = thứ tự upload (đổi từ `asset_path` đơn cũ — mục 110)
+    random_order: bool                    # mới (2026-09-02, mục 110) — mặc định false; true = xáo trộn thứ tự video 1 LẦN mỗi lượt ghép (không xáo lại mỗi vòng lặp khi loop)
+    transition: string                    # mới (2026-09-02, mục 110) — mặc định "cut"; cùng danh sách TRANSITIONS dùng cho shot-to-shot, áp dụng GIỮA các video liên tiếp trong playlist
+  layers: VideoLayer[]                    # layer video ĐỊNH VỊ theo lưới 3x3 (VD voice wave, logo) — mới (2026-09-02, mục 112), xem ghi chú dưới
+    id: string
+    asset_path: string                    # assets/layer_<ts>_<n>.<ext> — có/không kênh alpha tuỳ blend_mode (xem dưới)
+    position: "top-left"|"top-center"|"top-right"|"middle-left"|"center"|"middle-right"|"bottom-left"|"bottom-center"|"bottom-right"  # mặc định "bottom-center"
+    width_pct: float                      # % chiều rộng khung hình xuất, mặc định 0.3 — chiều cao tự co theo tỉ lệ gốc
+    opacity: float                        # mặc định 1.0
+    blend_mode: "alpha" | "screen"        # mới (2026-09-02, mục 113) — mặc định "alpha" (nguồn CÓ SẴN kênh alpha); "screen" = nguồn NỀN ĐEN ĐẶC, screen-blend cục bộ đúng vùng layer
+  image_layers: ImageLayer[]              # layer ẢNH định vị (VD khung viền, watermark) — mới (2026-09-02, mục 115), xem ghi chú dưới. Song song VideoLayer, KHÁC 2 điểm: nguồn LUÔN ảnh tĩnh, position có thêm "full"
+    id: string
+    asset_path: string                    # assets/imglayer_<ts>_<n>.<ext> — png/jpg/webp
+    position: "top-left"|"top-center"|"top-right"|"middle-left"|"center"|"middle-right"|"bottom-left"|"bottom-center"|"bottom-right"|"full"  # mặc định "bottom-center"; "full" = phủ TOÀN khung hình, bỏ qua width_pct
+    width_pct: float                      # % chiều rộng khung hình xuất, mặc định 0.3 — bỏ qua khi position=="full"
+    opacity: float                        # mặc định 1.0
+    blend_mode: "alpha" | "screen"        # mặc định "alpha"; "screen" = ảnh nền đen đặc/không nền
   assembly_status: "not_started" | "assembling" | "done" | "error"
   assembly_error: string | null
+  assembly_started_at: string | null      # mốc TOÀN BỘ assembly bắt đầu — dùng hiện "Đã chạy: X" ở RenderStudio.tsx
+  assembly_progress: AssemblyProgress | null  # tiến trình ghép — mới (mục 43), xem ghi chú dưới
+    stage: "background_video" | "segments" | "concat"  # "background_video" — mới (2026-09-02, mục 108)
+    current: int
+    total: int
+    stage_started_at: string | null       # mốc STAGE HIỆN TẠI bắt đầu — mới (2026-09-02, mục 108), KHÁC assembly_started_at (toàn bộ assembly)
   final_video_path: string | null         # renders/final.mp4 sau khi ghép xong
 ```
 
@@ -347,12 +442,18 @@ Chi tiết: `specs/05_ai_providers.md` §8c, `IMPLEMENTATION_REPORT.md`.
 > `PATCH /projects/{id}/render/intro/transition`.
 
 > **Đã build (2026-08-20, mục 53 IMPLEMENTATION_REPORT.md):** `bg_music` — nhạc nền
-> riêng của project, OVERRIDE HẲN `BrandProfile.bg_music_path`/`bg_music_volume` khi có
-> `asset_path` — xem `app/render/bg_music.py::resolve_bg_music_source`. Trộn vào audio
-> là bước HẬU KỲ CUỐI CÙNG trong `assemble_video()` (SAU intro), không đụng tới video
-> stream (`-c:v copy`) — xem `app/render/assembly.py::_mix_bg_music`. Endpoint:
+> riêng của project, OVERRIDE `BrandProfile.bg_music_path`/`bg_music_volume` — xem
+> `app/render/bg_music.py::resolve_bg_music_source`. Trộn vào audio là bước HẬU KỲ CUỐI
+> CÙNG trong `assemble_video()` (SAU intro), không đụng tới video stream (`-c:v copy`) —
+> xem `app/render/assembly.py::_mix_bg_music`. Endpoint:
 > `POST /projects/{id}/render/bg-music/upload`, `PATCH .../bg-music` (chỉnh `volume`,
 > tự tạo record nếu chưa có), `DELETE .../bg-music`, `GET .../bg-music/asset`.
+>
+> **Đã đổi hành vi (2026-08-23, mục 71 IMPLEMENTATION_REPORT.md):** `asset_path` và
+> `volume` giờ override ĐỘC LẬP nhau thay vì all-or-nothing — `asset_path` ưu tiên
+> project > brand (fallback riêng biệt); `volume` ưu tiên project (nếu object override
+> TỒN TẠI, dù chưa có `asset_path`) > brand. Cho phép "dùng nhạc nền của kênh, chỉnh âm
+> lượng riêng cho project này" chỉ bằng `PATCH .../bg-music`, không cần upload lại file.
 
 > **Đã build (2026-08-22, mục 68 IMPLEMENTATION_REPORT.md):** `overlay` — hiệu ứng lớp
 > phủ (overlay, VD mưa/tuyết rơi) riêng của project, OVERRIDE HẲN `BrandProfile.overlay_
@@ -363,6 +464,130 @@ Chi tiết: `specs/05_ai_providers.md` §8c, `IMPLEMENTATION_REPORT.md`.
 > AUDIO — xem `app/render/assembly.py::_mix_overlay_effect`. Endpoint:
 > `POST /projects/{id}/render/overlay/upload`, `PATCH .../overlay` (chỉnh `opacity`, tự
 > tạo record nếu chưa có), `DELETE .../overlay`, `GET .../overlay/asset`.
+>
+> **Đã đổi hành vi (2026-09-02, mục 105 IMPLEMENTATION_REPORT.md):** thêm `disabled` —
+> `DELETE .../overlay` giờ set `disabled=True` (tắt HẲN, không còn fallback ngầm về
+> overlay mặc định cấp kênh — trước đây KHÔNG có cách tắt hẳn khi đang kế thừa). `PATCH
+> .../overlay/inherit` (mới) đặt lại `disabled=False`, cùng pattern `intro.disabled`/
+> `render/intro/inherit`.
+
+> **Đã build (2026-09-02, mục 106 IMPLEMENTATION_REPORT.md):** `background_video` — video
+> nền CHUNG cho TOÀN BỘ block, khác hẳn `overlay`/`bg_music` (KHÔNG có cấp kênh mặc định
+> để kế thừa, thuần override của project). Lúc ghép, dựng 1 bản "master" loop
+> (`-stream_loop -1`) đúng nguồn upload cho tới khi phủ hết tổng thời lượng timeline shot
+> list (SAU reflow), scale/color-grade CHỈ 1 LẦN — xem `app/render/assembly.py::_build_
+> background_video_master`. Shot NÀO CHƯA cấu hình visual riêng (`ShotRenderStatus.
+> visual_asset_path == null`) không còn bị chặn cứng lúc ghép (trước đây MỌI shot bắt
+> buộc phải `visual_status=="ready"`) — tự lấy ĐÚNG đoạn nền tương ứng trên timeline
+> (offset cộng dồn, KHÔNG loop riêng biệt từng shot — xem `_extract_background_video_
+> chunk`) làm nội dung. Shot ĐÃ có visual riêng vẫn giữ NGUYÊN yêu cầu `ready` (`approved`
+> không còn được kiểm — bỏ gate 2026-09-02, mục 107) và THAY THẾ TOÀN MÀN HÌNH cho đúng
+> khoảng thời gian của nó (không phải chồng mờ/PiP) — nền chỉ hiện lại SAU khi hết shot
+> đó. Endpoint: `POST /projects/{id}/render/background-video/upload`, `DELETE .../
+> background-video`, `GET .../background-video/asset`.
+
+> **Đã build (2026-09-02, mục 110 IMPLEMENTATION_REPORT.md):** nhiều video nền — theo
+> yêu cầu người dùng ("cho phép upload nhiều video làm nền, cho phép set random loop
+> on/off, cho phép set hiệu ứng chuyển cảnh giữa các video"). `asset_paths` (list, đổi
+> từ `asset_path` đơn) — mỗi lần `POST .../upload` THÊM 1 video (KHÔNG còn thay thế tại
+> chỗ). Trước khi loop (`_build_background_video_master`, không đổi), nếu có ≥2 video —
+> `_build_background_video_playlist` (mới) nối chúng thành 1 "playlist" DUY NHẤT trước:
+> scale/grade TỪNG clip rồi nối bằng filter `concat` (`transition=="cut"`) hoặc `xfade`
+> THẬT (khác "cut", video-only — không audio, khác `_xfade_chain` của pipeline chính vốn
+> phải blend cả audio). `random_order=true` — xáo trộn thứ tự `asset_paths` 1 LẦN mỗi
+> lượt `assemble_video()` (KHÔNG mutate danh sách gốc, KHÔNG xáo lại mỗi vòng lặp khi
+> `-stream_loop -1` lặp lại) — giữ đơn giản đúng yêu cầu "random loop on/off". Chỉ 1
+> video (case phổ biến nhất) — bỏ qua HẲN bước playlist, dùng thẳng video đó, giữ NGUYÊN
+> 100% hành vi mục 106 (không tốn thêm 1 lần re-encode vô ích). `assembly_progress`
+> (mục 108) cộng thêm 1 đơn vị "playlist" khi có ≥2 video: `bg_total = 2 (playlist +
+> master) + số shot trống`, so với `1 + số shot trống` khi chỉ 1 video. Endpoint mới:
+> `DELETE .../background-video/{index}` (bỏ 1 video), `PATCH .../background-video`
+> (`{random_order?, transition?}`) — `GET .../background-video/asset` đổi thành
+> `GET .../background-video/asset/{index}`.
+
+> **Đã build (2026-09-02, mục 108 IMPLEMENTATION_REPORT.md):** `assembly_progress.stage`
+> thêm `"background_video"` — bước dựng video nền chung (`_build_background_video_master`
+> + cắt chunk cho từng shot trống) chạy TRƯỚC Pass 2 (segment thật) khi project có cấu
+> hình video nền, có thể mất vài phút với video dài (re-encode phủ hết tổng thời lượng
+> timeline). TRƯỚC ĐÂY bước này chạy trong lúc `assembly_progress` đứng yên ở
+> `stage="segments", current=0` (đặt sẵn từ đầu hàm cho có `total` ngay) — UI hiện nhầm
+> "Đang ghép cảnh 0/N..." dù segment thật CHƯA bắt đầu, trông như bị treo. Đơn vị tiến
+> trình tự nhiên: 1 (dựng master) + 1/chunk cắt cho mỗi shot trống. `stage_started_at`
+> (mới, cùng đợt) — mốc STAGE HIỆN TẠI bắt đầu, reset lại NGAY trước khi Pass 2 chạy —
+> ước lượng thời gian còn lại (`RenderStudio.tsx::remainingSec`) tính theo elapsed từ mốc
+> này (không phải từ `assembly_started_at` toàn cục), tránh gộp nhầm thời gian dựng video
+> nền vào trung bình thời gian/segment.
+
+> **Đã build (2026-09-02, mục 109 IMPLEMENTATION_REPORT.md):** `narration_speed` — tốc
+> độ phát giọng đọc cho TOÀN BỘ block của project, chỉnh qua `PATCH /projects/{id}/
+> render/narration-speed` (nút ở Script Studio, KHÔNG PHẢI Visual Studio). Áp dụng bằng
+> TIME-STRETCH file audio (ffmpeg `atempo`) NGAY SAU khi provider TTS sinh xong — xem
+> `engine.py::generate_narration_asset`/`_apply_narration_speed` — KHÔNG PHẢI 1 tham số
+> API riêng của từng provider TTS (ElevenLabs/Gemini/Piper/OmniVoice hỗ trợ speed khác
+> nhau, có provider hoàn toàn không hỗ trợ) — hoạt động ĐỒNG NHẤT bất kể provider nào
+> đang cấu hình, không cần sửa từng adapter. `narration_duration_sec` (ShotRenderStatus)
+> đo SAU khi đã time-stretch — mọi logic downstream (segment duration lúc ghép, timeline
+> transcript .srt) tự động dùng đúng thời lượng đã điều chỉnh mà không cần biết gì về
+> khái niệm "speed". CHỈ áp dụng cho lần (re)generate MỚI — đổi giá trị KHÔNG tự sinh lại
+> narration đã có sẵn (đúng nguyên tắc "không tự chạy ngầm, người dùng tự bấm sinh lại"),
+> cần bấm "Sinh giọng đọc cho toàn bộ block" hoặc "Sinh lại TOÀN BỘ giọng đọc" (đều đã
+> chuyển từ Visual Studio sang Script Studio cùng đợt này) để asset MỚI dùng tốc độ vừa
+> chỉnh. Giá trị hợp lệ: 0.5–2.0 (400 nếu ngoài khoảng — phạm vi giữ trong ngưỡng ffmpeg
+> `atempo` xử lý tốt bằng 1 lần filter, không cần chain nhiều lần).
+
+> **Đã build (2026-09-02, mục 112 IMPLEMENTATION_REPORT.md):** `layers` — layer video
+> ĐỊNH VỊ theo lưới 3x3, theo yêu cầu người dùng ("thêm layer voice wave (dạng video
+> loop) vào bên trên video nền... chia khung hình thành 9 phần và cho phép lựa chọn vị
+> trí"). KHÁC `OverlayEffectOverride` (screen-blend, phủ HẾT khung hình liên tục, dành
+> cho clip nền đen VD mưa/tuyết) — layer ở đây dùng nguồn CÓ SẴN KÊNH ALPHA (WebM VP9/
+> MOV ProRes4444 trong suốt, xác nhận với người dùng asset thực tế của họ có alpha) và
+> filter `overlay` chuẩn (không phải `blend`) để ĐỊNH VỊ tại 1 trong 9 ô lưới thay vì phủ
+> hết khung hình. `list[VideoLayer]` (không phải 1 field đơn) — nhiều layer cùng lúc, VD
+> voice wave góc dưới + logo góc trên. Vị trí → toạ độ dùng THẲNG biến runtime của ffmpeg
+> (`main_w/main_h/overlay_w/overlay_h`) trong filter `overlay`, không tính pixel cụ thể ở
+> Python — tự đúng tỉ lệ dù xuất độ phân giải nào (xem `assembly.py::_grid_position_
+> expr`). Độ mờ (`opacity`) chỉnh qua `colorchannelmixer=aa={opacity}` trên kênh alpha
+> CÓ SẴN của nguồn — khác cách overlay hiệu ứng lớp phủ phải giảm SÁNG (không có alpha
+> để chỉnh trực tiếp). Áp dụng NGAY SAU overlay hiệu ứng lớp phủ (nếu có) trong hậu kỳ
+> cuối cùng (`assembly.py::_composite_layers`) — layer LUÔN nổi TRÊN CÙNG, không bị mưa/
+> tuyết che. Endpoint: `POST /projects/{id}/render/layers/upload` (multipart `file` +
+> form `position`/`width_pct`/`opacity`, THÊM 1 layer mỗi lần gọi), `PATCH .../layers/
+> {layer_id}`, `DELETE .../layers/{layer_id}`, `GET .../layers/{layer_id}/asset`.
+
+> **Đã build (2026-09-02, mục 113 IMPLEMENTATION_REPORT.md):** `blend_mode` — theo yêu
+> cầu người dùng ("tôi chỉ có video layer nền đen thôi, hãy process nền đen"): asset
+> thật của người dùng KHÔNG có kênh alpha (khác giả định lúc thiết kế mục 112). Thêm
+> `"screen"` (khác mặc định `"alpha"`, mục 112) — screen-blend CỤC BỘ đúng vùng layer,
+> cùng kỹ thuật `_mix_overlay_effect` (nền đen "biến mất" khi blend screen) nhưng KHÔNG
+> phủ hết khung hình — `assembly.py::_composite_layers` chế độ này: (1) `crop` đúng vùng
+> nền tương ứng vị trí layer từ khung hình chính (dùng CHUNG `_grid_position_expr` với
+> `overlay`, chỉ khác tên biến runtime của `crop`: `in_w/in_h/out_w/out_h`), (2)
+> `format=gbrp` cả 2 nhánh rồi `blend=all_mode=screen` cho ra 1 "miếng vá" đã hoà trộn,
+> (3) `overlay` miếng vá đó trở LẠI đúng vị trí đã cắt — vùng khác của khung hình giữ
+> NGUYÊN không đụng tới. Cần biết TRƯỚC cả width lẫn height cụ thể của layer sau khi
+> scale (`assembly.py::_layer_target_size`, dùng `media_probe.py::probe_video_
+> dimensions` đo tỉ lệ khung hình GỐC qua ffprobe, kẹp không vượt khung hình chính) — khác
+> chế độ `"alpha"` chỉ cần width (`scale=W:-2` để ffmpeg tự tính height). Độ mờ chỉnh qua
+> `colorchannelmixer=rr/gg/bb={opacity}` (giảm SÁNG layer trước khi blend — cùng cách
+> overlay hiệu ứng lớp phủ, vì `blend` screen không có tham số alpha trực tiếp).
+
+> **Đã build (2026-09-02, mục 115 IMPLEMENTATION_REPORT.md):** `image_layers` — layer
+> ẢNH ĐỊNH VỊ, theo yêu cầu người dùng ("bổ sung thêm block... setup Layer ảnh định vị
+> với chức năng tương tự [layer video] nhưng cho ảnh nền đen hoặc không có nền. Ngoài hỗ
+> trợ 9 vị trí layer thì còn hỗ trợ thêm full khung hình"). Song song `VideoLayer` (mục
+> 112/113, DANH SÁCH RIÊNG — không dùng chung), CÙNG 2 chế độ `blend_mode`, chỉ khác 2
+> điểm: (1) nguồn LUÔN ảnh tĩnh PNG/JPEG/WEBP — `assembly.py::_composite_image_layers`
+> dùng `-loop 1` (không phải `-stream_loop -1` của video loop) để ghép; (2) `position`
+> có thêm giá trị `"full"` — phủ TOÀN KHUNG HÌNH (scale-cover đúng độ phân giải xuất,
+> `_scale_cover_filter` — CÙNG hàm `_mix_overlay_effect` dùng, KHÔNG phụ thuộc
+> `BrandProfile.aspect_fill_mode`), bỏ qua HẲN `width_pct`. `"full"` + `blend_mode==
+> "screen"` — KHÔNG cần bước `crop` (vùng blend = toàn khung hình = chính khung hình
+> đang ghép, không phải 1 phần) nên blend THẲNG, bản chất chính là "hiệu ứng lớp phủ"
+> (`OverlayEffectOverride`) áp dụng cho ẢNH TĨNH thay vì video loop. Áp dụng NGAY SAU
+> layer video (nếu có) trong hậu kỳ cuối cùng — layer ẢNH LUÔN nổi TRÊN CÙNG mọi layer
+> khác. Endpoint: `POST /projects/{id}/render/image-layers/upload`, `PATCH .../image-
+> layers/{layer_id}`, `DELETE .../image-layers/{layer_id}`, `GET .../image-layers/
+> {layer_id}/asset`.
 
 ## 3c. CreativeAsset (Thư viện Creative Asset, ĐỘC LẬP — mới 2026-08-20, mục 53)
 

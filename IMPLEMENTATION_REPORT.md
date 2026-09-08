@@ -4183,6 +4183,3236 @@ có hiệu lực trong phiên Electron đang chạy cho tới khi người dùng
 tự ý kill tiến trình Electron/terminal đang chạy của người dùng. Người dùng cần restart
 app để nghiệm thu tính năng này trên UI thật.
 
+## 69. Bug thật: overlay đổi màu toàn bộ video sang tím + thêm/xoá overlay lỗi thoáng qua (2026-08-23)
+
+### Yêu cầu người dùng
+
+"Hiệu ứng lớp phủ (layter) test ở project 'Bài học "trọng dụng lúc khủng hoảng, nghi kỵ
+lúc ổn định"' khi thêm/xóa bị lỗi. Thử lại lại được. Video render sau khi thêm layer
+hiệu ứng bị đổi màu toàn bộ sang một lớp phủ màu tím - vẫn nhận ra hiệu ứng nhưng hình
+ảnh bị đổi màu"
+
+### Bug 1 — đổi màu tím: lỗi thật trong ffmpeg `blend` filter, không phải lỗi thiết kế
+
+Điều tra bằng tay trực tiếp qua ffmpeg CLI (không đoán, đo thật): dựng nền ĐỎ THUẦN +
+overlay XÁM 50% (đã qua `colorchannelmixer` như code thật), `blend=all_mode=screen` PHẢI
+cho kết quả hồng nhạt (255,128,128 theo công thức screen chính xác — `screen(0,x)=x` là
+đẳng thức toán học, không phải phỏng đoán) nhưng đo thật ra (255,59,255) — G và B lệch xa
+nhau bất thường, đúng như triệu chứng "ngả tím" người dùng báo. Test dò từng bước:
+- `blend` áp thẳng lên `yuv420p` (code cũ): SAI. Giả thuyết ban đầu — "screen" tính trên
+  từng plane Y/U/V độc lập là sai về mặt toán học vì U/V trung tính là 128 (không phải 0
+  như Y) — hợp lý nhưng CHƯA ĐỦ để giải thích hết.
+- Ép `format=rgb24` trước `blend` (tưởng sẽ sửa vì RGB không có vùng trung tính lệch
+  tâm): VẪN SAI, giá trị giống hệt như không ép. Loại trừ giả thuyết "chỉ do YUV".
+  Test triệt để hơn: `blend(trắng,trắng)` và `blend(xám,xám)` qua `rgb24` cũng cho U/V
+  lệch CỐ ĐỊNH +64 so với đúng — chứng minh bản thân pixel format `rgb24` (packed) có
+  lỗi xử lý trong filter `blend` ở BUILD ffmpeg đang dùng (8.1.2-essentials, gyan.dev),
+  không liên quan gì đến YUV/RGB nữa.
+- Đổi `format=rgb24` → **`format=gbrp`** (planar RGB, cùng số liệu màu nhưng bố cục
+  plane khác — mỗi kênh 1 plane riêng thay vì đan xen từng pixel): kết quả ĐÚNG NGAY —
+  đo thật (255,127,127), sai số làm tròn 1 đơn vị, khớp hoàn toàn công thức. Xác nhận
+  lại ở độ phân giải HD 1280x720 (khớp render thật) — vẫn đúng.
+
+Fix (`app/render/assembly.py::_mix_overlay_effect`): thêm `format=gbrp` trên CẢ 2 nhánh
+(overlay và video nền) TRƯỚC `blend=all_mode=screen:shortest=1`, giữ nguyên
+`colorchannelmixer`/`_scale_cover_filter`/`shortest=1` đã có. Không cần hiểu sâu hơn TẠI
+SAO build ffmpeg này lỗi riêng với `rgb24` trong `blend` — `gbrp` cho kết quả đúng và ổn
+định qua nhiều lần đo lại nên chọn làm fix, không cố vá theo hướng khác phức tạp hơn
+(colorspace/matrix flags — đã thử `setparams=range=pc`, `scale=out_range=full`, đều
+KHÔNG chính xác bằng `gbrp`).
+
+### Bug 2 — thêm/xoá overlay lỗi thoáng qua, thử lại được: Windows file lock
+
+Rà log backend lúc lỗi: không có traceback/500 nào gắn với request overlay (chỉ có
+`ConnectionResetError` là noise vô hại từ Range request bị huỷ giữa chừng, không liên
+quan). Xác định nguyên nhân qua đọc code: MỌI endpoint upload/xoá asset ghi đè-tại-chỗ
+(shot visual, intro visual/audio, bg-music, overlay — cả cấp kênh lẫn cấp project, 12
+điểm gọi trong `render.py`+`channels.py`) đều gọi thẳng `Path.unlink()`/`path.write_bytes()`
+KHÔNG có xử lý lỗi. Trên Windows, xoá/ghi đè 1 file NGAY SAU KHI trình duyệt vừa stream
+xong preview `<video>`/`<audio>` (`range_file_response`) có thể vẫn còn giữ handle đọc
+file trong chốc lát → `PermissionError` (WinError 32) — đúng khớp "lỗi 1 lần, thử lại
+ngay sau đó lại được" (handle đã được trình duyệt nhả ra). Đây là lỗi TIỀM ẨN CÓ SẴN từ
+trước ở MỌI tính năng upload media (không riêng overlay) — người dùng chỉ mới gặp rõ ở
+overlay vì đây là tính năng đầu tiên có preview VIDEO (giữ connection/handle lâu hơn
+audio) và người dùng đang test nhanh thêm/xoá liên tục.
+
+Fix: `app/filestore.py` thêm `_retry_on_permission_error()` (thử lại tối đa 10 lần ×
+150ms ≈ 1.5s khi gặp `PermissionError`) + `unlink_retrying()`; `write_bytes()` cũng tự
+thử lại theo cùng cơ chế. Áp dụng THAY THẾ toàn bộ 12 điểm gọi `.unlink()` trực tiếp
+trong `render.py`/`channels.py` (không chỉ overlay — sửa nhất quán cho shot visual,
+intro, bg-music luôn, tránh lặp lại đúng bug này ở tính năng khác sau này).
+
+### Verify
+
+Test mới `test_mix_overlay_effect_preserves_hue_no_color_cast` (`test_overlay.py`) —
+nền đỏ + overlay xám qua `blend`, assert G≈B (đúng hue) thay vì lệch xa (bug tím cũ) —
+sẽ FAIL nếu quay lại `rgb24`/bỏ `format=gbrp`. Test mới `test_filestore.py` (3 test) —
+mock `PermissionError` thoáng qua (2-3 lần đầu) rồi thành công, xác nhận
+`unlink_retrying`/`write_bytes` tự thử lại đúng và vẫn raise nếu lỗi kéo dài mãi (không
+retry vô hạn). Full `pytest`: **336 passed** (332 + 1 hue test + 3 filestore test).
+Restart Electron, xác nhận cả 2 fix đã nạp vào backend đang chạy.
+
+## 70. Nhạc nền & overlay riêng ở Visual Studio hiển thị rõ kế thừa từ BrandProfile (2026-08-23)
+
+### Yêu cầu người dùng
+
+"Phần nhạc nền và hiệu ứng lớp phủ riêng ở bước visual studio cũng cần inherit từ brand
+profile nếu đã config sẵn (tương tự intro video)"
+
+### Việc đã làm
+
+`BgMusicCard`/`OverlayEffectCard` (`VisualStudio.tsx`) TRƯỚC ĐÂY hiện trống ("Chưa có
+nhạc nền/overlay riêng") khi project chưa upload gì, dù lúc ghép MP4 THẬT SỰ đã tự
+fallback dùng nhạc nền/overlay mặc định cấp kênh (`resolve_bg_music_source`/
+`resolve_overlay_source`, fallback NGẦM, không hiện gì ở UI) — cùng loại vấn đề
+`IntroShotCard` đã sửa ở mục 61. Áp dụng ĐÚNG pattern đó cho 2 card này: đọc
+`BrandProfile.bg_music_path`/`overlay_effect_path` qua `api.getBrandProfile(channelId)`
+(CHỈ để hiển thị, không PUT lại), khi project CHƯA có asset riêng và brand CÓ cấu hình
+→ hiện preview thật (nghe được/xem được) của asset thương hiệu + tag "Kế thừa từ hồ sơ
+thương hiệu". Cả 2 component cần thêm prop `channelId` (lấy từ `project.channel_id` ở
+2 call site đầu Visual Studio).
+
+KHÔNG thêm nút "tắt hẳn kế thừa" như `IntroAssetStatus.disabled` — bg-music/overlay
+chưa có yêu cầu đó (chỉ có 2 trạng thái: override hoặc không, không có "chủ động tắt
+hẳn cả 2"). Slider âm lượng/cường độ vẫn CHỈ hiện khi project có asset RIÊNG (giữ
+nguyên hành vi cũ) — chỉnh khi đang kế thừa vô nghĩa vì `resolve_*_source` bỏ qua
+override không có `asset_path` (xem test `test_resolve_bg_music_source_ignores_
+override_without_path`/tương tự cho overlay).
+
+### Verify
+
+`tsc --noEmit`: 0 lỗi. Không cần test backend mới (không đổi logic backend, chỉ đọc
+field BrandProfile có sẵn để hiển thị — đúng field đã có test resolve_*_source từ mục
+53/68). Restart Electron để nạp thay đổi.
+
+## 71. Chỉnh âm lượng nhạc nền riêng ở Visual Studio kể cả khi đang kế thừa brand (2026-08-23)
+
+### Yêu cầu người dùng
+
+"Block Phần nhạc nền cũng cần bổ sung thêm cấu hình 'Âm lượng nhạc nền so với giọng đọc
+chính' ở visual studio tương tự như ở brand profile"
+
+### Vấn đề
+
+Sau mục 70 (hiển thị kế thừa), `BgMusicCard` vẫn CHỈ hiện thanh trượt âm lượng khi
+project có asset RIÊNG (`hasAsset`) — lúc đang kế thừa nhạc brand thì KHÔNG chỉnh được
+gì cả. Lý do lúc đó: `resolve_bg_music_source` coi `BgMusicOverride` là ALL-OR-NOTHING —
+override CHƯA có `asset_path` (chỉ chỉnh volume, chưa upload) bị bỏ qua HOÀN TOÀN kể cả
+phần volume, nên hiện thanh trượt lúc đó cũng vô nghĩa (chỉnh xong không có tác dụng gì
+lúc ghép MP4).
+
+### Việc đã làm
+
+**Backend** (`app/render/bg_music.py::resolve_bg_music_source`) — tách riêng
+`asset_path` và `volume` thay vì all-or-nothing: `asset_path` vẫn ưu tiên project >
+brand (fallback riêng biệt), nhưng `volume` giờ ưu tiên project (nếu object override
+TỒN TẠI, bất kể có `asset_path` hay chưa) > brand. Cho phép "dùng nhạc nền của kênh,
+chỉnh âm lượng RIÊNG cho project này" mà không cần upload lại file — đúng ý người dùng
+"tương tự brand profile" (brand profile chỉnh audio+volume độc lập, project giờ cũng
+vậy).
+
+**Frontend** (`BgMusicCard`) — thanh trượt âm lượng giờ hiện khi CÓ nguồn nhạc (asset
+riêng HOẶC đang kế thừa brand), không chỉ khi có asset riêng. Giá trị khởi điểm khi
+CHƯA có override riêng = volume HIỆN TẠI của brand (đọc thêm `bp.bg_music_volume` qua
+`api.getBrandProfile`, trước đó chỉ đọc `bg_music_path`) — tránh "nhảy giá trị" về mặc
+định cứng 0.3 khi brand đã chỉnh khác đi. Thêm ghi chú nhỏ dưới nhãn khi đang kế thừa
+("chỉnh riêng cho project này, vẫn dùng nhạc của kênh") để rõ ý không phải đang sửa
+BrandProfile.
+
+### Verify
+
+Cập nhật test `test_resolve_bg_music_source_ignores_override_without_asset_path` →
+`test_resolve_bg_music_source_uses_project_volume_with_brand_asset_when_no_project_
+asset` (đổi assertion đúng hành vi mới: override chỉ có volume vẫn áp dụng được, ghép
+với asset_path của brand). Full `pytest`: **336 passed** (không đổi tổng số — sửa 1 test
+cũ thay vì thêm mới, vì đây là đổi HÀNH VI của hàm resolve có sẵn). `tsc --noEmit`: 0
+lỗi. Chưa áp dụng tương tự cho overlay/opacity (người dùng chỉ yêu cầu nhạc nền đợt
+này) — `resolve_overlay_source` vẫn all-or-nothing, có thể cần đợt sau nếu người dùng
+muốn tương tự.
+
+## 72. Bug thật: shot B01 "lỗi" video local thực ra chỉ là bị Dừng — thêm 1 bug thật khác lúc điều tra (2026-08-23)
+
+### Yêu cầu người dùng
+
+"Kiểm tra lại lỗi tạo video cho shot B01 của project 'Nguyễn Trãi và án Lệ Chi Viên: Khi
+tri thức va chạm quyền lực triều đình'" — kèm câu hỏi kiến trúc về pipeline video local
+(xem phần trả lời riêng trong hội thoại, không phải mục sửa code).
+
+### Điều tra B01
+
+Đọc `render.json` của `prj_1787331251320`: `visual_error` là JSON THÔ từ ComfyUI —
+`status_str: 'error'`, `messages` có entry `execution_interrupted` tại node `3`
+(KSampler), sau khi đã chạy xong 7 node trước đó (~9.35 phút tính theo timestamp
+`execution_start`→`execution_interrupted`). `execution_interrupted` là message ComfyUI
+gửi khi có ai gọi `POST /interrupt` — rà code xác nhận `POST /projects/{id}/render/
+cancel` (nút "Dừng") gọi ĐÚNG `engine.try_interrupt_local_gpu_job()` → ComfyUI
+`/interrupt`, và đây là NƠI DUY NHẤT trong codebase gọi `/interrupt`. Kết luận: B01
+KHÔNG lỗi thật — ai đó đã bấm "Dừng" trong lúc video đang render (video Wan2.2 local
+mất nhiều phút/shot).
+
+### Bug thật #1: interrupted bị hiện như lỗi kỹ thuật thay vì "đã dừng"
+
+ComfyUI báo CẢ lỗi thực thi thật LẪN job bị Dừng qua CÙNG `status_str == "error"` trong
+`/history` — code cũ (`image_comfy_sdxl.py`/`video_comfy_wan.py`) coi MỌI `status_str
+== "error"` là lỗi provider thật, dump nguyên `entry['status']` (traceback/node id kỹ
+thuật) vào `visual_error` — người dùng thấy shot "lỗi" trông như crash thật dù chỉ bấm
+Dừng.
+
+Fix: `app/providers/base.py` thêm `GenerationInterrupted` (exception dùng chung, đặt ở
+`base.py` để tránh vòng import — provider không được import `engine.py`) +
+`raise_if_interrupted(status, job_id)` (soi `status.messages` tìm message loại
+`execution_interrupted`, phân biệt với `execution_error` — lỗi thật). Gọi hàm này TRƯỚC
+khi raise `RuntimeError` chung ở cả `image_comfy_sdxl.py` VÀ `video_comfy_wan.py`
+(cùng lỗ hổng, sửa nhất quán cả 2 — dù bug report chỉ nói video). `engine.py` bắt
+`GenerationInterrupted` CÙNG NHÁNH với `GenerationCancelled` có sẵn (dừng ngay, không
+thử fallback provider, thông báo rõ "đã dừng").
+
+### Bug thật #2 (phát hiện phụ, lúc viết test cho bug #1): lỗi ảnh local KHÔNG BAO GIỜ báo được, treo tới hết timeout
+
+Viết test cho `image_comfy_sdxl.py` (mô phỏng ComfyUI trả job lỗi) làm PYTEST TREO
+THẬT — điều tra bằng debug print xác nhận: check `status_str == "error"` nằm LỒNG bên
+trong `if entry.get("outputs")` — nhưng job lỗi/bị Dừng THẬT SỰ hầu như KHÔNG BAO GIỜ
+có `outputs` (đó chính là ý nghĩa "lỗi", chưa kịp render xong) → nhánh raise KHÔNG BAO
+GIỜ chạy tới, job lỗi bị coi nhầm là "đang chạy" cho tới khi hết hẳn timeout poll mới
+báo lỗi CHUNG CHUNG "ComfyUI không trả kết quả" — che mất lý do lỗi thật hoàn toàn. Đây
+là bug ĐỘC LẬP, có TRƯỚC cả đợt sửa này, chỉ tình cờ lộ ra vì trước giờ chưa có test nào
+cho đường lỗi của file này. `video_comfy_wan.py` KHÔNG dính bug này (cấu trúc code vốn
+đã kiểm `status_str` độc lập với `outputs`).
+
+Fix: tách check `status_str == "error"` ra ĐỘC LẬP với `entry.get("outputs")`, kiểm
+TRƯỚC khi cần outputs — khớp đúng cấu trúc `video_comfy_wan.py` đã có sẵn.
+
+### Verify
+
+5 test mới: `test_image_comfy_sdxl.py` (+2: raise đúng `GenerationInterrupted` khi có
+`execution_interrupted`, raise `RuntimeError` thường khi lỗi thật — test THỨ 2 này lúc
+đầu TREO THẬT, dẫn tới phát hiện bug #2), `test_video_comfy_wan.py` (file test MỚI, 3
+test — chưa có test nào cho file này trước đợt này). Full `pytest`: **341 passed** (336
++ 5). Không cần restart Electron ngay (chưa test lại trên GPU thật) — khuyến nghị bấm
+"Sinh lại video" cho shot B01, lỗi cũ chỉ là do đã bị Dừng giữa chừng, không phải lỗi
+pipeline.
+
+## 73. Cải thiện sinh video local (Wan2.2 TI2V-5B) — Image-to-Video + tinh chỉnh tham số (2026-08-23)
+
+### Yêu cầu người dùng
+
+Người dùng đính kèm `StudioFlow_Video_Improvement_Plan.md` (dựa trên điều tra mục 72)
+đề xuất cải thiện pipeline video local — trọng tâm: chuyển từ text-to-video sang
+image-to-video (dùng ảnh SDXL đã tune làm khung hình đầu), tách prompt chuyển động
+riêng, rút ngắn clip + tinh chỉnh tham số. Lên plan (plan mode) rồi triển khai cả 3
+phase liền theo yêu cầu người dùng "Triển khai luôn cả 3 phases".
+
+### Quyết định phạm vi khác đề xuất gốc
+
+KHÔNG thêm `shot.motion_type` (static_parallax/map_animation/ai_video) vào
+ProductionPack — cơ chế "ảnh tĩnh + chuyển động camera" đề xuất mô tả (gọi là "parallax
+2.5D") ĐÃ TỒN TẠI: `Shot.visual_type=image` + `Shot.camera_motion`
+(`app/render/camera_motion.py` — Ken Burns 2D thật qua `zoompan`/`rotate`, KHÔNG phải
+parallax lớp độ sâu thật như tên gọi trong đề xuất, nhưng cùng tinh thần: chuyển động
+mượt trên ảnh tĩnh, không cần AI video). Đạt mục tiêu "giảm phụ thuộc Wan" bằng hướng
+dẫn sử dụng (`specs/06_uiux.md`/`07_prompt_templates.md`), không đổi schema/pipeline.
+`map_animation` (template bản đồ động) ngoài phạm vi hoàn toàn — hệ thống riêng, không
+liên quan sinh video AI.
+
+### Phase A — Tinh chỉnh tham số (`app/providers/video_comfy_wan.py`)
+
+- Độ phân giải đổi `1280×704` → **`1344×768`** (khớp CHÍNH XÁC bucket SDXL đang dùng —
+  `image_comfy_sdxl.py`, cả 2 số chia hết 16) — để ảnh anchor (Phase B) không cần
+  `ImageScale` co/crop, giữ nguyên khung đã tune. Tăng ~14.5% pixel — CHƯA verify tốc
+  độ/VRAM thật.
+- Negative prompt thêm cụm chống lỗi ĐẶC THÙ video diffusion: `flickering, morphing,
+  warping face, identity drift between frames, jittery motion` (khác lỗi ảnh tĩnh).
+- `_MAX_GENERATE_SECONDS = 4` — số khung THỰC SỰ gửi cho Wan bị chặn ở 4s, `assembly.py`
+  tự lặp (`-stream_loop -1`, `_build_segment`) hoặc hấp thụ chênh lệch
+  (`_reflow_video_durations`) để lấp đầy thời lượng thật của shot — xác nhận AN TOÀN
+  qua điều tra code trước khi làm (không vỡ đồng bộ audio).
+
+### Phase B — Image-to-Video (`app/render/engine.py`)
+
+Hàm mới `_try_generate_wan_anchor_image()`: khi provider đang thử là `local_wan`, sinh
+1 ảnh anchor bằng ĐÚNG provider `local_sdxl` (nếu đã cấu hình) — cùng prompt đã tune
+(`_build_visual_prompt(..., for_local_sdxl=True)`), cùng seed, cùng Style LoRA
+(`brand.style_lora_path/strength`) — đảm bảo anchor CÙNG "chữ ký hình ảnh" với ảnh
+khác trong project. Lưu `assets/{shot_id}_anchor.png` (KHÔNG phải `visual_asset_path`
+của shot, chỉ artifact debug, chưa hiện UI). BEST-EFFORT toàn diện: không cấu hình
+`local_sdxl`, hoặc sinh anchor lỗi bất kỳ → trả `None`, rơi về T2V thuần y hệt hành vi
+cũ, KHÔNG chặn việc sinh video.
+
+KHÁC Tier 2 cũ (mục ~18, đã tắt vì dùng CHUNG 1 thumbnail cho mọi shot gây lệch nội
+dung): anchor lần này sinh RIÊNG cho ĐÚNG shot đang xử lý.
+
+**Giữ nguyên `denoise: 1`** — không giảm để "tăng tốc": video model cần denoise đủ
+mọi frame để tổng hợp chuyển động mạch lạc, hạ denoise giữ lại nhiễu trên TOÀN BỘ
+latent (không chỉ frame đầu), rủi ro artifact mà không có lợi ích tốc độ rõ ràng (chi
+phí vẫn là frame×step). I2V ở đây là đòn bẩy CHẤT LƯỢNG/NHẤT QUÁN phong cách, không
+phải tốc độ.
+
+### Phase C — Motion prompt riêng
+
+`BrandProfile.motion_tone` (mới, mặc định "chuyển động chậm, tinh tế, không giật gân,
+không rung camera" — khớp brand DNA kênh sử) + hàm `_build_video_motion_prompt()`
+(content-first, lọc tag như `for_local_sdxl`, nối bằng ". " — Wan dùng UMT5 XXL kiểu
+T5, hiểu câu văn tự nhiên tốt hơn CLIP nên KHÔNG dùng kiểu phẩy-ngăn-cách của SDXL).
+CHỈ áp dụng cho `local_wan`, không đổi Sora/Veo/Flux. Field mới ở `ChannelDialog.tsx`
+cạnh "Style hình ảnh kênh".
+
+### Verify
+
+14 test mới: `test_video_comfy_wan.py` (+3 — resolution khớp SDXL, negative prompt
+chứa từ khoá mới, `_MAX_GENERATE_SECONDS` cắt đúng số khung), `test_render.py` (+9 —
+`_build_video_motion_prompt` × 3, `_try_generate_wan_anchor_image` × 4 đơn vị (fallback
+graceful khi thiếu provider/lỗi, lưu đúng file + truyền đúng LoRA), 1 test END-TO-END
+thật qua `/render/start` xác nhận `local_wan` upload đúng ảnh anchor lên ComfyUI và
+workflow video có `start_image`). Sửa 1 test cũ (`test_short_form_projects.py`) hardcode
+số 1280×704 — đổi sang so sánh với hằng số thay vì số cứng, tránh trùng nguồn sự thật.
+Full `pytest`: **352 passed** (341 + 14 mới − sửa lại 1 test cũ không tính thêm/bớt số
+lượng thật). `tsc --noEmit`: 0 lỗi.
+
+**Cần verify bằng mắt trên GPU thật** (không thể qua test): chất lượng/tốc độ ở độ
+phân giải 1344×768 mới, video anchor có giữ đúng phong cách ảnh không, thời gian sinh
+1 clip 4s có chấp nhận được không.
+
+## 74. Rà soát UX luồng Brief → Script Studio → Visual Studio → Output (2026-08-23)
+
+### Yêu cầu người dùng
+
+"rà soát lại UI UX của luồng tạo video từ brief, đến script studio, visual studio, đến
+output và để xuất cải thiện" — kèm 2 quan sát cụ thể: "nhiều nút bấm, bố trí chưa
+consistent" và "right sidebar không để làm gì". Sau khi rà soát + trình bày báo cáo
+(artifact), người dùng chốt "triển khai toàn bộ đề xuất".
+
+### Điều tra
+
+Đọc trực tiếp source 4 màn + shell dùng chung (`StepHeader.tsx`, `RightPanel.tsx`,
+`ProjectView.tsx`, `Stepper.tsx`). Phát hiện chính: comment TRONG chính
+`StepHeader.tsx` đã tự thú nhận nguyên nhân gốc — *"actions ngày càng dài (nhiều nút
+được thêm theo các đợt cập nhật)"* — mỗi tính năng mới thêm 1 nút vào ĐÚNG chỗ cũ,
+không ai rà lại tổng thể. Header Visual Studio có 7 nút cùng cỡ `btn-secondary`/
+`btn-danger-color` trong 1 hàng; `RightPanel.tsx` sau khi bỏ tóm tắt BrandProfile
+(mục 62) chỉ còn 1 dòng "Phiên bản Pack", chiếm 280px mọi màn.
+
+### Đề xuất được duyệt + đã triển khai (5/5)
+
+1. **RightPanel có nội dung thật** — thêm Kênh+niche, Định dạng (Long/Short), Số shot,
+   Cảnh báo guardrail (script.body[].warning) — tất cả tính từ props đã có sẵn
+   (`project`+`pack`, đã thêm `pack` làm prop mới), KHÔNG gọi thêm API nào. Chủ động
+   không lặp lại thông tin StatsBar đã hiện ở header (từ/shot/thời lượng ước tính).
+2. **Header Visual Studio tách 2 cấp** — component mới `OverflowMenu` (menu thả xuống,
+   đóng bằng bấm ra ngoài — cùng cơ chế backdrop-click-to-close đã dùng ở
+   `LibraryPicker.tsx`, chỉ đổi backdrop trong suốt + neo cạnh nút thay vì giữa màn
+   hình) gom 2 nút "Sinh lại TOÀN BỘ..." (tốn phí + bỏ duyệt) vào "⋯ Tuỳ chọn khác" —
+   tách khỏi 2 nút an toàn dùng hằng ngày. "Duyệt toàn bộ block" chuyển xuống sát danh
+   sách shot (nó thao tác trên danh sách đó, không phải điều hướng cấp trang).
+3. **1 `btn-primary`/hàng** — `ShotCard`: nút "Tạo giọng đọc" đổi `btn-primary` →
+   `btn-secondary` (trước đó đứng ngang hàng với "Tạo ảnh/video", 2 primary cạnh nhau
+   mất phân cấp). Các card khác (BgMusicCard/OverlayEffectCard/IntroShotCard) đã đúng
+   quy tắc từ trước (không nút nào primary), không cần đổi.
+4. **OutputCenter dùng lại `StepHeader`** — bỏ `<h3>/<p>` tự viết riêng (khác 3 màn
+   kia). Bỏ nhãn "Beta · M2" đã lỗi thời trên "Render in-app" (đây giờ là đường DUY
+   NHẤT thực sự ra được video hoàn chỉnh) + bỏ liệt kê cứng tên provider cụ thể
+   (ElevenLabs/OpenAI/Sora — danh sách đã lỗi thời, giờ còn cả local SDXL/Wan2.2/
+   OmniVoice/Piper/Flux/Gemini).
+5. **Bỏ `window.confirm()` ở xoá project** (`ProjectView.tsx`) — đây là nơi DUY NHẤT
+   dùng dialog xác nhận trình duyệt, trong khi mọi hành động phá huỷ khác chỉ dựa
+   nhãn+tooltip. Hành động này CHỈ chuyển vào Thùng rác (khôi phục được), không xoá
+   vĩnh viễn, nên hợp lý hơn khi theo ĐÚNG quy ước "label rõ đủ" của phần còn lại app —
+   dành dialog xác nhận thật cho đúng chỗ cần (xoá VĨNH VIỄN ở Thùng rác, đã có sẵn,
+   không hoàn tác được).
+
+### Verify
+
+`tsc --noEmit`: 0 lỗi sau mỗi file sửa. HMR (vite) áp thành công cả 4 file sửa
+(`RightPanel.tsx`, `ProjectView.tsx`, `OutputCenter.tsx`, `VisualStudio.tsx`) không lỗi
+runtime. Không đổi backend — không cần restart Electron.
+
+## 75. Cultural lock chống thiên lệch văn hoá Nhật/Hàn cho ảnh local SDXL (2026-08-23)
+
+### Yêu cầu người dùng
+
+Ảnh sinh bằng local SDXL mang nét văn hoá Nhật/Hàn thay vì Việt Nam — nguyên nhân gốc:
+checkpoint/LoRA phong cách "Á Đông/thuỷ mặc" trên Civitai tuyệt đại đa số train từ dữ
+liệu Nhật (anime/Danbooru/ukiyo-e) và Trung/Hàn (webtoon/hanbok). Đề xuất 3 lớp giải
+pháp: (1) prompt cultural-lock (từ khoá Việt + negative loại Nhật/Hàn), (2) ảnh tham
+chiếu (IPAdapter) — chấp nhận đảo ngược quyết định "không dùng IPAdapter" đã ghi 2 lần
+trong code, (3) stack nhiều LoRA (chất liệu + hướng văn hoá). Lên plan (plan mode, có
+hỏi lại 1 câu về cơ chế ảnh tham chiếu — người dùng chọn IPAdapter dù biết rủi ro) rồi
+triển khai cả 3 phần.
+
+### Phần A — Cultural lock trong prompt
+
+`BrandProfile` thêm `cultural_lock_positive` (rỗng mặc định — đặc thù theo từng kênh/
+thời kỳ lịch sử, người dùng tự điền) và `cultural_lock_negative` (default sẵn: "japanese
+kimono, torii gate, korean hanbok, japanese architecture, korean architecture, anime
+style, manga, japanese art style" — phổ quát cho mọi kênh Việt). `_build_visual_prompt`/
+`_build_video_motion_prompt` nối `cultural_lock_positive` SAU content, TRƯỚC style — áp
+dụng MỌI provider (cloud lẫn local). `cultural_lock_negative` CHỈ áp dụng
+`local_sdxl`/`local_wan` (negative-prompt thật qua ComfyUI) — cloud không có tham số
+negative prompt (xác nhận qua code, không đoán). Field mới ở ChannelDialog.tsx.
+
+### Phần B — Stack nhiều Style LoRA
+
+Đổi `BrandProfile.style_lora_path`/`style_lora_strength` (đơn, mục 64) →
+`style_loras: list[StyleLoraEntry]` (nhiều LoRA). `image_comfy_sdxl.py::_add_lora_nodes`
+(đổi từ `_add_lora_node` số ít) CHAIN nhiều node `LoraLoader` liên tiếp — vẫn chỉ dùng
+core node có sẵn. Frontend đổi 1 dòng LoRA thành danh sách thêm/bớt được, tái dùng
+`ComfyModelSelect` mỗi dòng.
+
+### Phần C — Ảnh tham chiếu qua IPAdapter (rủi ro cao, CHƯA verify thật)
+
+**Đảo ngược quyết định** "không dùng IPAdapter" (`image_comfy_sdxl.py` docstring +
+specs/05 §8d, do rủi ro custom node lệch tên/version) — người dùng xác nhận chấp nhận
+đánh đổi vì IPAdapter là cơ chế ĐÚNG (tách phong cách khỏi bố cục, nhận nhiều ảnh cùng
+lúc), khác img2img có sẵn (Tier 2, 1 ảnh, bố cục/màu ảnh gốc ảnh hưởng trực tiếp — GIỮ
+NGUYÊN, không đụng).
+
+`BrandProfile.style_reference_paths`/`style_reference_weight` mới — endpoint CRUD ĐẦU
+TIÊN xử lý DANH SÁCH nhiều file trong BrandProfile (`POST/DELETE/GET .../style-
+references/...`, khác logo/intro/bg-music/overlay đều 1 file). `image_comfy_sdxl.py::
+_add_ipadapter_nodes` — `CLIPVisionLoader`+`IPAdapterModelLoader`+`LoadImage` (chain
+`ImageBatch` nếu >1 ảnh)+`IPAdapterApply`, áp SAU LoRA nếu cả 2 cùng dùng (đọc thẳng
+`workflow["3"]["inputs"]["model"]` hiện tại làm input). **Fallback tự động**: ComfyUI từ
+chối job (400, thường "node type not found" nếu chưa cài đúng
+`ComfyUI_IPAdapter_plus`/model) → thử lại NGAY 1 lần KHÔNG IPAdapter thay vì chặn hẳn
+sinh ảnh.
+
+**CHƯA THỂ verify thật** trên ComfyUI+IPAdapter (khác MỌI tính năng ComfyUI khác trong
+codebase, đều verify qua GPU thật) — API IPAdapter đã đổi qua nhiều phiên bản cộng đồng.
+Người dùng cần: cài `ComfyUI_IPAdapter_plus`, tải `CLIP-ViT-H-14-laion2B-s32B-b79K.
+safetensors` (`ComfyUI/models/clip_vision/`) + `ip-adapter-plus_sdxl_vit-h.safetensors`
+(`ComfyUI/models/ipadapter/`), test thật, báo lại NGUYÊN VĂN lỗi nếu ComfyUI từ chối
+node/tham số để chỉnh đúng theo bản đã cài.
+
+### Verify
+
+Test mới: `_build_visual_prompt`/`_build_video_motion_prompt` cultural_lock_positive
+đúng vị trí + áp dụng cả cloud/local; `_local_sdxl_kwargs` đọc đúng `style_loras`/
+`cultural_lock_negative`/`style_reference_paths` (bỏ qua ảnh thiếu, không raise);
+`_add_lora_nodes` chain đúng 2 LoRA liên tiếp (tương thích ngược 1 LoRA); `_add_ipadapter_
+nodes` — 1 ảnh, nhiều ảnh (chain `ImageBatch`), áp SAU LoRA, fallback khi ComfyUI 400,
+raise khi fallback cũng lỗi. Full `pytest`: **368 passed** (352 + 16 mới). `tsc --noEmit`:
+0 lỗi.
+
+## 76. Migrate LocalAI làm lớp AI local cho LLM+ảnh+video — additive, song song ComfyUI/Ollama (2026-08-25)
+
+### Yêu cầu người dùng
+
+Người dùng đưa `CHANGE_LocalAI_Migration.md` — đề xuất gộp 3 service local rời rạc
+(ComfyUI cho ảnh+video, Ollama cho LLM, OmniVoice/Piper cho TTS) thành 1 service duy
+nhất: **LocalAI** (github.com/mudler/LocalAI). Lên plan (plan mode) trước khi code:
+
+- **Research code hiện tại** xác nhận: tài liệu change-spec nói 4 file spec (`01_
+  architecture.md`, `05_ai_providers.md`, `02_database.md`, `09_sprint_tasks.md`) "đã cập
+  nhật theo LocalAI" là SAI — cả 4 vẫn mô tả 100% kiến trúc ComfyUI/Ollama/OmniVoice hiện
+  tại, vừa build/verify qua GPU thật tới mục 75 (23/8). Người dùng xác nhận: đây là tài
+  liệu **đề xuất**, không phải hiện trạng.
+- **Research tài liệu LocalAI thật** (WebFetch/WebSearch, không suy đoán): multi-LoRA CÓ
+  hỗ trợ sẵn (`lora_adapters`/`lora_scales` dạng list trong YAML) + API quản lý model
+  runtime (`POST /models/apply`, không cần restart); **IPAdapter KHÔNG được LocalAI hỗ
+  trợ/expose** (cộng đồng khuyên dùng thẳng ComfyUI cho nhu cầu đó); video qua `/v1/videos`
+  (PR #6777) hỗ trợ `InputReference` (image-to-video) nhưng là tính năng RẤT MỚI, chưa có
+  case study rộng.
+- 2 vòng `AskUserQuestion`: (1) hỏi rõ IPAdapter (mục 75, Phần C) đã từng chạy thật chưa —
+  người dùng xác nhận **CHƯA TỪNG cài `ComfyUI_IPAdapter_plus`/test** → de-risk hẳn việc bỏ
+  tính năng này; (2) hỏi phạm vi/khẩu vị rủi ro migrate — người dùng chọn **migrate TOÀN
+  BỘ LLM + ảnh + video** sang LocalAI, xoá ComfyUI/Ollama SAU KHI verify thật qua GPU (TTS
+  ngoài phạm vi, giữ nguyên Piper/OmniVoice).
+
+### Đã build (đợt ADDITIVE — chưa xoá gì)
+
+**Ảnh** — `backend/app/providers/image_localai.py` mới, `LocalAIImageProvider`
+(`provider_name="localai_image"`), `POST /v1/images/generations` (OpenAI-compatible,
+response `data: [{b64_json}]` — tái dùng pattern parse như `image_openai.py`). Giữ NGUYÊN
+chữ ký `generate()` như `ComfySDXLImageProvider` (drop-in cho `engine.py`) — `loras` đồng
+bộ vào 1 "model ảo" (`studioflow-sdxl`) qua `POST /models/apply`, CHỈ gọi khi chữ ký LoRA
+(tên+trọng số) thực sự đổi so với lần gọi gần nhất (cache instance), tránh gọi thừa mỗi
+shot; `reference_images`/`style_reference_weight` (IPAdapter) — BỎ QUA + log cảnh báo 1
+lần, không có đường sang LocalAI; `extra_negative` map vào field `negative_prompt`.
+
+**Video** — `backend/app/providers/video_localai.py` mới, `LocalAIVideoProvider`
+(`provider_name="localai_video"`), `POST /v1/videos`. **Rủi ro cao nhất trong toàn bộ
+migrate** — response đồng bộ (video có ngay) hay bất đồng bộ (job id, cần poll) CHƯA xác
+nhận thật, thiết kế chịu được CẢ 2: nhánh đồng bộ cache bytes theo job_id giả (`sync:...`)
+trả ngay ở `poll_generation`; nhánh bất đồng bộ GET `/v1/videos/{job_id}` (ĐOÁN theo quy
+ước REST phổ biến, CHƯA verify) tới khi `status` hoàn tất. `input_reference` — ảnh anchor
+gửi base64 data URI trong body JSON (khác ComfyUI cần `POST /upload/image` multipart).
+
+**`factory.py`** — đăng ký `"localai_image"`/`"localai_video"` vào `_IMAGE_ADAPTERS`/
+`_VIDEO_ADAPTERS` SONG SONG `"local_sdxl"`/`"local_wan"` (KHÔNG xoá).
+
+**`engine.py`** — 5 chỗ hardcode `provider.provider_name == "local_sdxl"`/`"local_wan"`
+đổi sang 2 tuple mới `_LOCAL_IMAGE_PROVIDER_NAMES = ("local_sdxl", "localai_image")`/
+`_LOCAL_VIDEO_PROVIDER_NAMES = ("local_wan", "localai_video")` — cơ chế ảnh anchor per-
+shot cho video (`_try_generate_wan_anchor_image`), chọn biến thể prompt (`for_local_sdxl`),
+bọc `gpu_lock`, và cost estimation đều nhận diện ĐÚNG dù đang dùng ComfyUI hay LocalAI.
+Xác nhận `try_interrupt_local_gpu_job`/`get_local_gpu_status` KHÔNG cần sửa — đã generic
+theo `endpoint_url` của BẤT KỲ provider `local_endpoint` nào, có sẵn try/except best-
+effort (LocalAI không có `/interrupt`/`/queue`/`/system_stats` kiểu ComfyUI sẽ tự thoái
+hoá thành "unreachable", không lỗi).
+
+**LLM** — KHÔNG cần code provider mới: `LocalOpenAICompatProvider` đã generic (không
+hardcode Ollama), chỉ đổi hint ở `ProviderSettings.tsx::LOCAL_CATALOG.llm` (trỏ
+`http://127.0.0.1:8080/v1` thay `:11434/v1` để dùng LocalAI thay Ollama).
+
+**Frontend** — `GET /providers/localai/models` (`routers/providers.py`, liệt kê model
+ĐÃ ĐĂNG KÝ qua `GET /v1/models`, khác `list_comfyui_models` liệt kê file thô trên đĩa) +
+component `LocalAIModelSelect` mới (`ProviderSettings.tsx`, mirror `ComfyModelSelect`) +
+2 entry mới trong `LOCAL_CATALOG.image`/`.video` (`localai_image`/`localai_video`, SONG
+SONG entry ComfyUI cũ).
+
+**Dọn dẹp 1 phần** (KHÔNG đợi cổng verify — tính năng chưa từng dùng thật, không phụ
+thuộc kết quả verify LocalAI): bỏ hẳn mục "Ảnh tham chiếu phong cách — IPAdapter" khỏi
+`ChannelDialog.tsx` (upload/xoá/thanh trượt trọng số) + 3 hàm client tương ứng
+(`uploadStyleReference`/`deleteStyleReference`/`styleReferenceUrl`) +
+`style_reference_paths`/`style_reference_weight` khỏi `api/types.ts`. **CỐ Ý giữ NGUYÊN**
+field schema backend (`BrandProfile.style_reference_paths`/`style_reference_weight`) và 3
+endpoint CRUD (`routers/channels.py`) — dọn nốt phần backend + `_add_ipadapter_nodes` ở
+`image_comfy_sdxl.py` SAU khi xoá hẳn ComfyUI (cổng verify dưới).
+
+### CHƯA làm ở đợt này (chờ cổng verify GPU thật)
+
+`image_comfy_sdxl.py`/`video_comfy_wan.py` KHÔNG xoá, `local_sdxl`/`local_wan` vẫn đăng
+ký đầy đủ và hoạt động bình thường (rollback tức thì bằng cách đổi default provider, dù
+đã cấu hình LocalAI). 4 file specs CHƯA viết lại theo LocalAI. 2 điểm CHƯA verify được ghi
+rõ ngay trong code (không suy đoán cứng mà không đánh dấu): (1) tên field negative-prompt
+(`negative_prompt`, quy ước diffusers phổ biến, chưa xác nhận), (2) path/shape API quản
+lý model runtime (`/models/apply`) và path poll job video bất đồng bộ
+(`/v1/videos/{job_id}`) — đoán theo tài liệu đọc được, CHƯA verify request/response thật.
+
+Cổng verify (từ plan, bắt buộc trước khi xoá ComfyUI/Ollama): người dùng tự cài/chạy
+LocalAI, đăng ký model SDXL+LoRA+Wan2.2, đổi default provider llm/image/video sang
+LocalAI, verify thật qua GPU: (a) 1 action LLM, (b) 1 shot ảnh có LoRA+cultural lock, (c)
+1 shot video dùng ảnh anchor. Cả 3 PASS mới xoá code ComfyUI cũ + viết lại specs.
+
+### Verify
+
+Test mới: `test_image_localai.py` (12 test — đồng bộ LoRA/cache theo chữ ký/re-sync khi
+đổi, negative_prompt, bỏ qua reference_images, size theo aspect_ratio, fallback khi
+`/models/apply` lỗi, test_connection, `list_localai_models`), `test_video_localai.py` (10
+test — nhánh đồng bộ VÀ bất đồng bộ, tải video qua `url`, raise khi job failed,
+`input_reference` base64, `negative_prompt`, reject job, `generate()` raise
+NotImplementedError, test_connection), `test_render.py` thêm
+`test_try_generate_wan_anchor_image_finds_localai_image_provider_too` (unit) +
+`test_video_localai_uses_localai_image_anchor_when_configured` (end-to-end qua
+`/render/start` thật, xác nhận `localai_video` gọi được với `input_reference` từ ảnh
+anchor `localai_image` sinh ra). Full `pytest`: **396 passed** (372 + 24 mới). `tsc
+--noEmit`: 0 lỗi.
+
+**Khác MỌI tính năng ComfyUI trong dự án (đều verify qua GPU thật trước khi coi là
+xong)**: toàn bộ phần LocalAI ở mục này **CHƯA verify qua GPU thật** — test chỉ xác nhận
+code build ĐÚNG request theo tài liệu LocalAI đã đọc, không xác nhận được hành vi LocalAI
+thật. Chờ người dùng qua cổng verify ở trên.
+
+## 77. LocalAI — sửa endpoint video đúng thật + thêm ảnh tham chiếu phong cách qua img2img (2026-08-25)
+
+### Yêu cầu người dùng
+
+Đưa bản `CHANGE_LocalAI_Migration.md` đã bổ sung §6 mục 2 — người dùng TỰ research thật
+(không phải Claude) xác nhận qua tài liệu LocalAI chính thức: reference image giữ style
+CÓ hỗ trợ (img2img `pipeline_type: StableDiffusionImg2ImgPipeline` field `image`, hoặc
+Flux Kontext field `ref_images`), image-to-video CÓ hỗ trợ qua endpoint riêng `POST
+/video` (KHÔNG `/v1`) nhận `start_image`/`num_frames`/`fps`/`cfg_scale`/`step`. Yêu cầu
+đọc + đề xuất tính năng cải tiến + lên kế hoạch triển khai.
+
+Lên plan mode (sửa tiếp file plan cũ của mục 76, không tạo mới): tự research thêm qua
+WebFetch/WebSearch để xác nhận CHI TIẾT (docs `localai.io/docs/features/
+video-generation/` và `/image-generation/`) — phát hiện quan trọng nhất: **Flux Kontext
+KHÔNG PHẢI cloud `fluxapi.ai`** đã tích hợp sẵn (`image_flux_kontext.py`) mà là model MỞ
+`flux.1-kontext-dev` (họ Flux ~12B) chạy LOCAL qua backend `stable-diffusion.cpp` —
+tốn tải + VRAM riêng, không dùng chung checkpoint SDXL. Hỏi lại người dùng qua
+`AskUserQuestion` — chọn **img2img** (rẻ hơn, dùng ngay checkpoint hiện có), Flux Kontext
+ngoài phạm vi đợt này.
+
+### Sửa `video_localai.py` — endpoint mục 76 SAI, viết lại toàn bộ
+
+Đợt 76 code theo SUY ĐOÁN (`POST /v1/videos`, field `input_reference`, nhánh job-poll
+`GET /v1/videos/{job_id}`) vì lúc đó chưa có tài liệu chính thức. Xác nhận thật qua
+`localai.io/docs/features/video-generation/`: endpoint đúng là `POST {base_url}/video`
+(không tiền tố `/v1`), field `start_image` (base64/data-URI/URL), `negative_prompt`,
+`width`/`height`, `seconds`, `seed`, `response_format` (`"url"`/`"b64_json"`) —
+**response ĐỒNG BỘ** (`{created, id, data: [{url}]}` hoặc `[{b64_json}]`), KHÔNG job-poll
+như giả định đợt 76. Viết lại `LocalAIVideoProvider` — `start_generation()` gọi thẳng
+`/video`, request `response_format: "b64_json"` (giữ fallback đọc `url`), nhận video
+NGAY trong response, cache theo job_id giả (`sync:{id}`); `poll_generation()` chỉ đọc
+cache trả về ngay — **xoá hẳn** nhánh GET job-status cũ.
+
+### Thêm img2img vào `image_localai.py` — ảnh tham chiếu phong cách (thay IPAdapter cũ)
+
+Đợt 76 nhận `reference_images`/`style_reference_weight` nhưng chỉ log cảnh báo rồi bỏ
+qua ("không có đường sang LocalAI" — kết luận SAI, sửa lại đợt này). `generate()` giờ:
+có `reference_images` → dùng ảnh ĐẦU TIÊN (img2img LocalAI chỉ nhận 1 ảnh/lần, khác
+IPAdapter cũ nhận nhiều), đăng ký RIÊNG 1 model img2img
+(`_virtual_model_name(img2img=True)` → `"studioflow-sdxl-img2img"`) qua CÙNG cơ chế
+`/models/apply` đã có cho model txt2img (mở rộng `_apply_model()` thêm tham số
+`pipeline_type`), cache đồng bộ LoRA đổi từ 1 biến đơn (`_synced_lora_signature`) sang
+dict theo tên model (`_synced_lora_signatures`) — txt2img và img2img là 2 model KHÁC
+NHAU trong LocalAI, đồng bộ độc lập. Body thêm field `image` (base64) + `strength` —
+map từ `style_reference_weight` theo HƯỚNG NGƯỢC (`strength` cao = ít giữ ảnh gốc,
+`style_reference_weight` cao = muốn giữ NHIỀU) bằng `strength = clamp(1 -
+style_reference_weight, 0.3, 0.85)` — khoảng mượn kinh nghiệm tune thật cho Tier 2
+ComfyUI (`image_comfy_sdxl.py::_IMG2IMG_DENOISE=0.7`).
+
+**RỦI RO ĐÃ GHI RÕ, CHƯA LOẠI TRỪ**: img2img seed latent bằng 1 ảnh — CÙNG bản chất/rủi
+ro Tier 2 ComfyUI đã TẮT (ảnh tham chiếu nhiều chi tiết đồ hoạ dễ bị copy nguyên khung/
+chữ vào ảnh mới). Nếu người dùng gặp lại đúng bug này qua GPU thật, cân nhắc bỏ hẳn tính
+năng thay vì cố tune tiếp — đã có tiền lệ. `pipeline_type` cho SDXL
+(`StableDiffusionXLImg2ImgPipeline`) là SUY ĐOÁN theo quy ước đặt tên `diffusers` (tài
+liệu LocalAI chỉ có ví dụ SD1.5), CHƯA verify tên class chính xác.
+
+### Frontend — làm lại UI ảnh tham chiếu (đơn giản hơn IPAdapter cũ)
+
+Đợt 76 xoá hẳn mục UI + 3 hàm client + 2 field `BrandProfile` type (tưởng dead feature).
+Đợt này thêm lại `style_reference_paths`/`style_reference_weight` (`api/types.ts`),
+`uploadStyleReference`/`deleteStyleReference`/`styleReferenceUrl` (`client.ts`, endpoint
+backend không đổi — chưa từng xoá ở backend). UI ở `ChannelDialog.tsx` **đơn giản hơn**
+gallery nhiều ảnh của IPAdapter cũ — **1 ô ảnh duy nhất** (khớp giới hạn thật 1 ảnh của
+img2img) — upload ảnh mới tự xoá ảnh cũ trước (đảm bảo tối đa 1 phần tử, không đổi API
+backend vẫn nhận list) + 1 thanh trượt "Mức giữ phong cách ảnh tham chiếu".
+
+### Verify
+
+Viết lại `test_video_localai.py` (11 test — bỏ hết test nhánh job-poll cũ, test mới cho
+`/video` đồng bộ: đúng path không `/v1`, response đồng bộ không cần poll, đúng field
+body, `start_image` base64, size theo aspect_ratio, fallback đọc `url`, reject job,
+response không nhận diện được, `generate()` raise, test_connection). Thêm 4 test img2img
+vào `test_image_localai.py` (dùng model img2img riêng + đúng `pipeline_type`, chỉ dùng
+ảnh đầu tiên khi có nhiều, `strength` map đúng hướng ngược `style_reference_weight`,
+cache đồng bộ độc lập giữa txt2img/img2img) — 12→16 test. Sửa
+`test_video_localai_uses_localai_image_anchor_when_configured` (`test_render.py`) theo
+endpoint/field mới. Full `pytest`: **401 passed** (396 + 5 mới ròng). `tsc --noEmit`: 0
+lỗi.
+
+Vẫn CHƯA verify qua GPU thật (cùng lý do mục 76) — endpoint/field đã CONFIRM qua tài
+liệu chính thức (không còn thuần suy đoán), nhưng hành vi LocalAI thật + chất lượng
+img2img/video vẫn chờ cổng verify của người dùng.
+
 ## 6. File specs đã cập nhật
 
 `01_architecture.md`, `02_database.md`, `03_api.md`, `04_data_schemas.md`, `05_ai_providers.md`, `06_uiux.md`, `07_prompt_templates.md`, `09_sprint_tasks.md` — mỗi chỗ lệch đánh dấu bằng blockquote `> **Đã build...`, giữ nguyên nội dung gốc bên cạnh để thấy được ý định ban đầu vs. thực tế.
+
+## 78. Bỏ LLM khỏi "Tạo lại Visual/Audio" — khôi phục nguyên si từ script gốc thay vì diễn giải lại qua AI (2026-08-25)
+
+### Yêu cầu người dùng
+
+"Khi Tạo lại visual/audio tại sao lại cần LLM? Lấy nguyên si mô tả đang điền trong phần
+này chứ nhỉ? nếu ko có mô tả thì báo lỗi hoặc skip qua shot đó." + xác nhận Hook Strength
+không cần nữa (không có UI, luồng đã bỏ) + yêu cầu chuyển hẳn sang provider LLM API ngoài,
+chọn model tiết kiệm nhất.
+
+### Điều tra trước khi sửa (không giả định)
+
+Đọc `routers/pipeline.py` xác nhận đúng như người dùng nói: `shot.visual_fx`/
+`shot.audio_sfx` được khởi tạo TRỰC TIẾP từ `beat.visual`/`beat.direction` (2 cột script
+gốc) lúc tạo shot ở `/visual/generate` — KHÔNG qua LLM. "Tạo lại Visual/Audio"
+(`regenerate-shot-visual`/`-audio`) trước đó gọi LLM chỉ để DIỄN GIẢI LẠI đúng 2 field này
+thành 1 câu khác — không cộng thêm thông tin, tốn 1 lượt gọi Provider AI vô ích. Đồng thời
+kiểm `hook_spoken`: `pack.script.hook.spoken` khởi tạo `""` lúc import script, KHÔNG có
+đường ghi nào khác trong codebase — nhánh LLM Hook Strength ở `run_guardrail_check` (gate
+`if hook_spoken:`) xác nhận đúng là dead code không thể chạm tới trong luồng M1 hiện tại
+(hàm vẫn còn dùng cho cảnh báo anchor-gap/từ cấm không-LLM, không xoá cả hàm).
+
+### Sửa
+
+- `app/pipeline/generation.py` — viết lại toàn bộ, bỏ hết hàm LLM cũ, chỉ còn
+  `restore_shot_visual_fx(beat)`/`restore_shot_audio_sfx(beat)`: trả nguyên si
+  `beat.visual`/`beat.direction`, raise `ValueError` nếu rỗng.
+- `app/pipeline/fallback_content.py` — xoá hẳn (không còn nơi nào import).
+- `app/routers/pipeline.py` — 2 endpoint đơn shot (`regenerate-visual`/`regenerate-audio`)
+  gọi hàm restore, bắt `ValueError` → `HTTPException(400, ...)`. 2 endpoint bulk
+  (`generate-all-visual`/`generate-all-tts`) gọi restore trong vòng lặp, `except
+  ValueError: continue` — bỏ qua đúng 1 shot thiếu mô tả, không chặn cả batch. Bỏ import
+  `get_llm` (không còn dùng ở file này).
+- `PROMPT_SEED` (`seed.py`, template `visual_image`/`visual_video`/`visual_tts`) và UI
+  nhãn tương ứng ở `PromptTemplatesSettings.tsx` giờ hết tác dụng thật (module
+  `generation.py` không còn đọc) — CHƯA xoá, để quyết định dọn tiếp sau (hạ tầng CRUD
+  template dùng chung cho task khác, không phải code chết toàn bộ).
+
+### Verify
+
+`test_pipeline_flow.py`: siết assertion happy-path (`regenerate-visual`/`-audio` phải trả
+đúng lại giá trị GỐC của script, không phải câu LLM diễn giải), thêm
+`test_regenerate_visual_errors_when_script_beat_has_no_visual_description` (400 khi
+script gốc rỗng) và `test_generate_all_visual_skips_shots_with_no_script_description_
+instead_of_erroring` (bulk bỏ qua, không lỗi cả batch). `test_settings.py::
+test_budget_detail_groups_after_pipeline_usage` phải viết lại nguồn usage LLM (test cũ
+dùng `regenerate-visual` để sinh 1 lượt usage — nay endpoint đó không còn gọi LLM) —
+chuyển sang set tay `hook.spoken` rồi gọi `guardrail/check` thật, monkeypatch
+`MockLLMProvider.complete` trả JSON hợp lệ (Mock mặc định không bao giờ trả JSON, xác
+nhận qua `test_guardrail.py::test_score_hook_strength_mock_provider_uses_fallback` — đúng
+hành vi sẵn có, không phải bug). Full `pytest`: **403 passed**. `tsc --noEmit`: 0 lỗi
+(không có thay đổi frontend ở đợt này).
+
+### Chưa làm — chuyển sang LLM API ngoài
+
+Yêu cầu thứ 3 của người dùng ("chuyển hẳn sang provider API LLM ngoài, lựa chọn model
+tiết kiệm nhất") KHÔNG thể tự làm trọn vẹn — cần API key thật của người dùng, không có
+sẵn. Sau đợt sửa này, LLM chỉ còn dùng ở ĐÚNG 1 chỗ thật trong toàn app: nhánh Hook
+Strength của `guardrail/check` (hiện dead code vì `hook_spoken` luôn rỗng) + 1 số việc
+nhẹ khác đã khảo sát trước đó trong phiên (research, không code) — nghĩa là cấu hình LLM
+giờ gần như KHÔNG BẮT BUỘC nữa cho luồng M1 chính. Khuyến nghị đã đưa trước đó: nếu vẫn
+muốn cấu hình, chọn tier rẻ/nhanh nhất đã tích hợp sẵn (Claude Haiku 4.5 hoặc Gemini 2.5
+Flash-Lite) qua Cài đặt → Provider AI — người dùng tự nhập API key.
+
+## 79. Bug thật (tiếp mục 76): CFR-normalize trước ghép intro phải áp dụng MỌI khi có intro, không chỉ nhánh có transition (2026-08-26)
+
+### Yêu cầu người dùng
+
+Project short-form thật "Đính chính lầm tưởng — vụ án không phải chuyện tình cảm cung
+đình đơn giản mà là một cuộc thanh trừng chính trị" (`prj_1787673042428`) bị mất shot
+cuối sau khi ghép video — đúng LỚP bug đã sửa ở mục 76, nhưng project này KHÔNG dùng
+transition nào (mọi ranh giới "cut" mặc định), chỉ có intro riêng.
+
+### Điều tra + tái hiện thật (không suy đoán)
+
+Đọc `render.json`/`pack.json` thật của project: 4 shot ảnh + giọng đọc (S3-01..S3-04),
+intro video riêng (`kind="video"`, `transition_to_next="cut"`), overlay hiệu ứng. `final.mp4`
+đo qua ffprobe dài **40.3s**; tính tay theo lý thuyết (intro 10.005s + tổng narration
+32.68s, không transition nên không có padding/overlap) phải ra **~42.685s** — hụt đúng
+2.36s = ĐÚNG BẰNG độ dài giọng đọc shot S3-04. Trích 1 frame ở giây 41.5s của bản ĐÃ SỬA
+xác nhận bằng mắt đây chính là ảnh S3-04 thật (không phải shot khác/đen), chứng minh
+trước khi sửa nó bị drop hoàn toàn.
+
+Tái hiện trực tiếp trên CHÍNH project này (backup rồi tạm set `transition_to_next=None`
+cho mọi shot khớp đúng trạng thái lúc lỗi, gọi thẳng `assemble_video()`): ra đúng 40.3s
+— xác nhận 100% đúng bug, không phải nghi ngờ.
+
+Nguyên nhân gốc: bản fix mục 76 (2026-08-23) CHỈ chuẩn hoá `body_path` về CFR sạch
+(`-vsync cfr` + `aresample=async=1:first_pts=0`) khi `has_transitions=True` (nhánh
+`_xfade_chain`) — kết luận lúc đó "nhánh KHÔNG-transition dùng concat DEMUXER `-c copy`,
+cùng nguồn `_build_segment` nên không gặp lệch" là **SAI**: concat demuxer giữ NGUYÊN
+timestamp/timebase gốc từng segment (không viết lại liền mạch như concat filter), vẫn có
+thể mang timebase không đều tuỳ input gốc. Khi `_concat_intro_and_body` (filter `concat`)
+ghép `body_path` này với `intro_path` (CFR sạch), ffmpeg vẫn gặp DTS không tăng đơn điệu
+và tự ý drop frame video cuối — HỆT bug mục 76, chỉ khác đường vào.
+
+### Sửa
+
+`app/render/assembly.py` — chuyển khối CFR-normalize (biến `cfr_body_path`) ra khỏi
+nhánh lồng trong `else:` (has_transitions), đặt NGAY ĐẦU khối `if intro_source:` chung
+(áp dụng cho CẢ 2 nhánh has_transitions True/False, miễn có intro). Test lại chính kịch
+bản gây lỗi (all-"cut" + intro) với code đã sửa: ra **42.73s** (khớp lý thuyết, sai số
+làm tròn bình thường) — hết drop. Regenerate lại `final.mp4` THẬT cho project của người
+dùng (44.6s, đủ 4 shot, verify bằng ffprobe + trích frame S3-04 tại giây 41.5s).
+
+### Verify
+
+Thêm `test_export_pack_bundle_...` không liên quan — riêng cho bug này: thêm
+`test_assemble_with_intro_and_no_transitions_does_not_drop_last_shot` (`test_render.py`)
+— cùng cấu trúc test mục 76 nhưng KHÔNG patch transition nào (giữ mặc định "cut"), verify
+`result_duration` không hụt hẳn so với lý thuyết. Full `pytest`: **407 passed** (404 + 2
+test mới mục này + đã tính cả 1 test export-pack mục 80... — xem tổng cuối mục 80).
+
+## 80. Tái cấu trúc Output Center — bỏ "Output A", "Output B" hiện thẳng không qua entry point, thêm "Xuất Pack" (2026-08-26)
+
+### Yêu cầu người dùng
+
+"Bỏ output A. Đưa nội dung tính năng outputB ra ngoài, ko cần bấm 'Mở render studio' làm
+entry point nữa, Bổ sung nút Xuất pack — khi đó sẽ export các nội dung gói video ra
+folder trên máy local (user chọn location) bao gồm: file transcript srt chuẩn, bộ assets
+(ảnh,video) được đặt tên theo ID phù hợp, file voice mp3 đã ghép full, video rendered
+(nếu có)."
+
+### Sửa — Output Center (frontend)
+
+`frontend/src/screens/steps/OutputCenter.tsx` — viết lại: bỏ hẳn card "Output A" (export
+markdown/JSON spec-only qua `POST /projects/{id}/export`, ít dùng thực tế, `pack.json`
+JSON đã có sẵn trên đĩa cho ai cần đọc trực tiếp) — endpoint backend + test liên quan
+GIỮ NGUYÊN (không có caller frontend nào khác, không gây hại khi để đó, chỉ gỡ 3 hàm
+client thừa `exportPack`/`downloadUrl`/`downloadExportFile` ở `api/client.ts`). Bỏ state
+`renderOpen` + nút "Mở Render Studio" — `RenderStudio` giờ render THẲNG trong
+`OutputCenter` (không còn prop `onClose`, bỏ luôn nút "← Quay lại" ở header của nó — xem
+`RenderStudio.tsx`).
+
+### Thêm — "Xuất Pack" (backend + Electron + frontend)
+
+**Backend** (`app/render/pack_export.py`, mới): `build_srt_text()` — sinh transcript SRT
+chuẩn từ `pack.script.body[].audio` (VO Content), timing dùng ĐÚNG `_shot_base_duration`
+(tái dùng từ `assembly.py` — ưu tiên độ dài giọng đọc thật, khớp mốc thời gian với
+`narration_full.mp3` xuất CÙNG bundle, để SRT tra đúng track audio đó). `export_pack_bundle()`
+— orchestrator: (1) SRT, (2) copy asset ảnh/video từng shot `ready` vào `assets/{shot_id}{ext}`
+(tên đã sẵn đúng chuẩn từ lúc sinh, không cần đổi tên), (3) tái dùng THẲNG
+`engine.build_narration_download()` có sẵn (từng chỉ dùng cho nút tải riêng ở Script
+Studio) rồi copy ra `narration_full.mp3`, (4) copy `final_video_path` (nếu
+`assembly_status=="done"` và file tồn tại) ra `video_final.{ext}`. Từng phần lỗi riêng
+(thiếu asset/narration chưa sinh xong hết/chưa ghép video) **KHÔNG chặn cả export** — ghi
+vào `skipped` kèm lý do, đúng nguyên tắc "lỗi 1 phần không chặn cả batch" đã dùng ở
+`generate_all_visual`. Endpoint mới `POST /projects/{id}/export/pack-bundle` (`render.py`,
+body `{dest_dir}`) — ghi THẲNG ra filesystem tại `dest_dir` (backend chạy local ngay trên
+máy người dùng, không cần stream qua HTTP).
+
+**Electron** — cần dialog chọn thư mục NATIVE (React chạy trong Electron không có File
+System Access API kiểu trình duyệt để chọn absolute path ghi trực tiếp bằng backend). Thêm
+`ipcMain.handle("choose-folder", ...)` (`electron/src/main.ts`, `dialog.showOpenDialog`
+với `openDirectory`+`createDirectory`) + cầu nối `window.studioflowNative.chooseFolder()`
+(`electron/src/preload.ts`, cùng pattern optional-global đã có của `STUDIOFLOW_API_BASE`).
+
+**Frontend** — `PackExportCard` mới trong `OutputCenter.tsx`: nút "Chọn thư mục..." gọi
+`window.studioflowNative.chooseFolder()` khi có (Electron); fallback ô nhập đường dẫn tay
+khi chạy dev server thuần trình duyệt (`window.studioflowNative` không tồn tại — không có
+IPC). Nút "Xuất Pack" gọi `api.exportPackBundle()`, hiển thị danh sách `included`
+(✓, xanh) + `skipped` (⊘, kèm lý do) sau khi xong.
+
+### Verify
+
+Backend: 3 test mới trong `test_render.py`
+(`test_export_pack_bundle_writes_srt_assets_and_narration_but_skips_missing_video`,
+`test_export_pack_bundle_includes_final_video_after_assemble`,
+`test_export_pack_bundle_requires_dest_dir`) — verify thật bằng ffmpeg/ffprobe (SRT chứa
+đúng text từng block, asset đặt tên đúng shot_id, narration mp3 ghép đúng độ dài, video
+xuất hiện/vắng mặt đúng theo trạng thái ghép). Full `pytest`: **407 passed** (bao gồm cả 2
+test mục 79). Xác nhận THÊM bằng HTTP call thật (không chỉ pytest fixture DB) tới backend
+đang chạy trong Electron thật, nhắm đúng project `prj_1787673042428` (project vừa sửa bug
+mục 79) — trả về đủ `["transcript.srt","assets/","narration_full.mp3","video_final.mp4"]`,
+`skipped: []`; đọc lại SRT thấy đúng nội dung kịch bản thật, `ffprobe` xác nhận
+`narration_full.mp3` = 32.68s (khớp tổng narration), `video_final.mp4` = 44.6s (khớp bản
+đã sửa bug mục 79, đủ 4 shot) — xoá thư mục test sau khi verify xong.
+
+Frontend: `tsc --noEmit` sạch cả `frontend/` lẫn `electron/`. KHÔNG chạy được click-through
+tự động qua UI thật (môi trường này không có Playwright/trình duyệt cài sẵn, cài mới tốn
+thời gian tải browser binary) — đã chụp màn hình xác nhận app khởi động lại không lỗi sau
+khi đổi `main.ts`/`preload.ts`, nhưng CHƯA tự bấm thử nút "Chọn thư mục..."/"Xuất Pack"
+qua chuột thật. Khuyến nghị người dùng tự bấm thử 1 lượt ở Output Center, đặc biệt dialog
+chọn thư mục native (bản chất mở 1 dialog OS ngoài DOM, dù có Playwright cũng khó tự động
+hoá đáng tin cậy hơn người dùng tự bấm).
+
+## 81. Bug thật: giọng đọc bị cắt cụt khi shot video ngắn hơn chính giọng đọc của nó — đổi loop sang đóng băng khung hình cuối (2026-08-26)
+
+### Yêu cầu người dùng
+
+"Khi shot đang là video nhưng duration ngắn hơn độ dài của giọng đọc, giọng đọc shot đó
+bị cắt để chuyển sang shot tiếp theo luôn. Hãy fix lại để ưu tiên việc play hết giọng đọc
+của shot đó rồi mới chuyển cảnh. Có thể làm theo hướng khi video play hết thì dừng lại ở
+frame cuối, giữ ở đó đến khi đọc xong mới chuyển cảnh."
+
+### Điều tra (không suy đoán)
+
+Đọc lại `_reflow_video_durations` (mục 45, 2026-08-17): vòng lặp này LUÔN co
+`durations[i]` về ĐÚNG độ dài video thật (`actual`) mỗi khi lệch với `duration` đang gán
+— kể cả khi `duration` đang gán DÀI HƠN `actual` CHÍNH VÌ đó là độ dài giọng đọc CỦA
+SHOT ĐÓ (`_shot_base_duration`, Pass 1, ưu tiên giọng đọc thật làm `duration` gốc). Co
+xuống `actual` (video thật, ngắn) làm `_build_segment` sau đó cắt narration audio theo
+đúng `-t duration` méo này — mất phần cuối lời thoại. Đây là tương tác phụ không lường
+trước giữa 2 tính năng: mục 43 (loop video ngắn để lấp `duration`, bảo vệ audio) và mục
+45 (reflow — cố tình "tắt" loop bằng cách co `duration` xuống bằng `actual`, VÌ MỘT LÝ DO
+KHÁC hẳn: video upload/AI lệch so với timestamp kịch bản, không phải vì giọng đọc).
+
+### Sửa
+
+`app/render/assembly.py`:
+1. **`_narration_floor(status)`** (mới) — trả `narration_duration_sec` nếu shot có giọng
+   đọc `ready`, else `0.0`.
+2. **`_reflow_video_durations`** — `target = max(actual, _narration_floor(status))` thay
+   vì luôn `= actual`; áp dụng CÙNG sàn khi shot LÁNG GIỀNG bị vay bớt (`donor_floor`) để
+   láng giềng cũng không bị co xuống dưới giọng đọc của chính nó. Khi giọng đọc dài hơn
+   video thật, `target == durations[i]` sẵn (vì đã set y hệt từ Pass 1) → `diff≈0` → bỏ
+   qua hẳn, không co/vay gì.
+3. **`_build_segment`** — bỏ hẳn `-stream_loop -1` (lặp lại TỪ ĐẦU — nhìn "giật", user
+   đánh giá là "nhìn giả") cho input video, thay bằng filter `tpad=stop_mode=clone:
+   stop_duration={duration}` (nhân bản khung hình CUỐI, đệm dư — phần dư luôn bị `-t
+   duration` cắt bớt nên không cần biết trước độ dài thật để tính đúng số giây đệm). Vô
+   hại khi video DÀI hơn `duration` (không bao giờ chạm tới phần đệm). Sửa CÓ ĐIỀU KIỆN
+   theo `is_video` TRỰC TIẾP (không theo `motion_filter` — ảnh tĩnh `camera_motion=
+   "none"` cũng cho `motion_filter is None`, dễ lẫn nhánh nếu chỉ if/else theo biến đó).
+
+### Verify
+
+Test thật bằng ffmpeg (không suy đoán): dựng video test 2s có nội dung ĐỔI DẦN theo thời
+gian (`testsrc`), ép segment 5s, trích khung ở giây 1.9 (gần cuối clip gốc) và giây 4.5
+(vùng đệm) — so bằng SSIM (không so byte thô, đã xác nhận byte thô lệch vài vị trí do
+nhiễu nén H.264 dù nội dung giống hệt) — SSIM đo được đúng **1.0** (đóng băng đúng, không
+lặp lại từ đầu). Thêm test unit cho `_reflow_video_durations` (shot video 2s + giọng đọc
+6s → `durations[0]` giữ nguyên 6s, không co) và test END-TO-END qua `assemble_video()`
+thật (project thật CSV import → visual/generate → gán video 2s + narration 6s → assemble
+→ video ra ≥5.7s, không còn cắt cụt còn ~2s). Full `pytest`: **409 passed**.
+
+## 82. Bug thật phát hiện khi bật GPU (NVENC): probe cũ dùng frame quá nhỏ, NVENC từ chối — mặc định bật sẵn checkbox GPU (2026-08-26)
+
+### Bối cảnh
+
+Người dùng hỏi cách bật GPU cho render (đang chạy CPU) — driver cũ (576.88) thiếu API
+NVENC 13.1 (yêu cầu ≥610.00). Người dùng tự update driver lên **610.88**, báo lại "đã
+update driver xong" + yêu cầu mặc định tick sẵn checkbox GPU.
+
+### Bug thật phát hiện khi verify lại (không suy đoán)
+
+Sau update driver, test NVENC thật với frame `64x64` (đúng size `probe_gpu_encoder` cũ
+dùng) VẪN lỗi — nhưng lỗi KHÁC hẳn: `InitializeEncoder failed: invalid param (8): Frame
+Dimension less than the minimum supported value.` — không còn liên quan driver, mà NVENC
+từ chối kích thước frame quá nhỏ. Xác nhận bằng ffmpeg thật: `128x128` vẫn FAIL, `145x49`/
+`256x144` PASS; encode THẬT ở độ phân giải thật (1280x720) chạy tốt bình thường. Nếu
+không sửa, `probe_gpu_encoder` sẽ mãi báo "không dùng được" SAI dù GPU đã hoạt động tốt —
+chặn đúng yêu cầu "mặc định bật" của người dùng ngay từ gốc.
+
+### Sửa
+
+- `app/render/assembly.py::probe_gpu_encoder` — đổi frame test từ `64x64` sang `256x144`
+  (16:9 thu nhỏ, an toàn trên ngưỡng tối thiểu đã đo thật).
+- `frontend/src/screens/steps/RenderStudio.tsx` — thêm `useEffect` theo dõi `gpuEncode`:
+  khi `gpuEncode.available===true` (VÀ codec hiện tại không phải `vp9` — NVENC không hỗ
+  trợ vp9), tự set `config.use_gpu=true` MỘT LẦN lúc probe xong — không đè lên lựa chọn
+  người dùng tự tắt sau đó (effect không phụ thuộc lại chính `config` trong deps).
+
+### Verify
+
+`probe_gpu_encoder(shutil.which("ffmpeg"))` gọi trực tiếp trên máy thật (driver 610.88):
+trả `(True, '')` — xác nhận đúng GPU khả dụng. Full `pytest`: **409 passed** (bao gồm 8
+test GPU/reflow/freeze mục 81 hiện có, không cần test riêng cho kích thước frame vì
+`test_probe_gpu_encoder_real_returns_consistent_cached_result` không hardcode size, tự
+verify qua kết quả thật của máy chạy CI). `tsc --noEmit` sạch.
+
+## 83. Xác nhận thật: đệm lặng tại ranh giới transition (mục 57) đã tự hoạt động đúng cho shot video bị đóng băng (mục 81) — không cần sửa code, chỉ thêm test khoá lại (2026-08-26)
+
+### Yêu cầu người dùng
+
+"việc xử lý delay khi chuyển cảnh để tránh bị cắt mất phần giọng đọc cũng cần áp dụng cho
+trường hợp freeze shot là video" — lo ngại tính năng đệm lặng tại ranh giới transition
+(`narration_lead_in_sec`/`narration_lead_out_sec`, mục 57) chưa tính tới shot video vừa
+được đổi sang đóng băng khung hình cuối (mục 81, cùng ngày).
+
+### Điều tra bằng ffmpeg thật (không kết luận từ đọc code suông)
+
+Đọc lại luồng tính toán trong `assemble_video`: `_shot_base_duration` (ưu tiên giọng đọc)
+→ `_reflow_video_durations` (mục 81, có sàn narration) → cộng `lead_in`/`lead_out` (mục
+57) → `_build_segment` (tpad đóng băng phủ ĐỦ `duration` đã cộng đệm). Về logic, cơ chế
+đệm lặng vốn KHÔNG phân biệt shot là ảnh hay video (chỉ dựa `has_narration` +
+`transition_to_next`) — nên NÊN đã tự đúng, nhưng quyết định KHÔNG suy đoán, verify thật.
+
+Dựng 2 test THẬT qua `assemble_video()` (không chỉ unit `_reflow_video_durations`):
+1. Shot A = video 2s + giọng đọc 6s (sine 440Hz), transition "fade" sang shot B (ảnh).
+2. Chiều ngược lại: shot A (ảnh) transition "fade" sang shot B = video 2s + giọng đọc 6s.
+
+Dùng `ffmpeg -af silencedetect` (không đoán bằng mắt/tai) đo TOÀN BỘ audio video đã ghép:
+cả 2 chiều chỉ phát hiện ĐÚNG 1 khoảng lặng — đúng vùng đệm transition (~0.65s, khớp
+`_XFADE_DURATION_SEC=0.6` + sai số) — KHÔNG có khoảng lặng nào khác lọt vào giữa 6s giọng
+đọc thật (sine tone phát liên tục không đứt quãng). Xác nhận: đệm lặng transition ĐÃ hoạt
+động đúng cho shot video bị đóng băng, ở CẢ 2 hướng (lead-in lẫn lead-out) — không có bug,
+không cần sửa `assembly.py`.
+
+### Việc đã làm
+
+Không sửa code (không có gì để sửa) — thêm CỐ ĐỊNH 2 test thật vào `test_render.py`
+(`test_freeze_video_shot_lead_out_before_transition_does_not_truncate_narration`,
+`test_freeze_video_shot_lead_in_after_transition_does_not_truncate_narration`) dùng
+`silencedetect` để khoá lại hành vi đúng này — đây là đúng LOẠI tương tác 2 tính năng dễ
+bị 1 refactor sau này vô tình phá vỡ mà không ai nhận ra ngay (2 tính năng viết ở 2 thời
+điểm khác nhau, không có test chung nào phủ tổ hợp trước đây). Full `pytest`: **411
+passed**.
+
+## 84. Cải thiện tốc độ ghép video — build segment SONG SONG; 2 hướng khác đã thử nhưng phải bỏ (2026-08-26)
+
+### Yêu cầu người dùng
+
+"việc render bằng gpu vẫn có vẻ khá chậm, đặc biệt là bước ghép toàn bộ các cảnh, có cách
+nào cải thiện ko"
+
+### Đo đạc thật trước khi sửa (không đoán)
+
+Viết script profiling tạm (monkeypatch `subprocess.run` để in thời gian từng lệnh ffmpeg)
+chạy `assemble_video()` thật trên project 4 shot có đủ intro+overlay+transition
+(`prj_1787673042428`). Xác nhận GPU (NVENC) đã hoạt động đúng và có lợi rõ: **22.85s
+(GPU) so với 45.18s (CPU)** cho CÙNG project — không phải GPU "không chạy", nhưng vẫn có
+dư địa cải thiện thêm.
+
+### Hướng ĐÃ THỬ nhưng PHẢI HOÀN TÁC — gộp bước CFR-normalize vào `_concat_intro_and_body`
+
+Phát hiện qua profiling: `body_cfr.{ext}` (mục 79, decode+re-encode NGUYÊN thân video để
+tránh bug mất shot cuối) và `_concat_intro_and_body` (decode+re-encode LẠI, ghép intro)
+chạy NGAY SAU NHAU trên CÙNG nội dung — tưởng có thể gộp làm 1 lệnh (chèn filter
+`fps={_OUTPUT_FPS}` + `aresample=async=1:first_pts=0` thẳng vào filter graph `concat`,
+tránh phải ghi/đọc lại file trung gian). **Verify thật lại đúng project gây bug gốc phát
+hiện bản gộp làm bug "mất shot cuối" (mục 76/79) QUAY LẠI** — ra đúng ~40.3s (hụt shot
+cuối) thay vì ~42.7s đúng. Đã HOÀN TÁC hoàn toàn, giữ nguyên bản 2-lệnh riêng của mục 79
+— không đánh đổi ĐÚNG ĐẮN lấy tốc độ. (Nghi ngờ nguyên nhân: file trung gian ghi thật ra
+đĩa rồi đọc lại có timestamp "chốt cứng" qua 1 lượt mux/demux hoàn chỉnh mà filter đơn
+thuần trong CÙNG 1 graph không tái tạo được — chưa điều tra sâu hơn, không cần thiết vì
+đã có đủ bằng chứng loại bỏ phương án.)
+
+### Hướng ĐÃ THỬ nhưng KHÔNG đáng đánh đổi — NVENC preset nhanh hơn (`p1`/`p3`)
+
+Test preset `p1` (nhanh nhất): SSIM so với mặc định (`p4`) = 0.989 (rất gần, có thể chấp
+nhận được) NHƯNG file `final.mp4` (project test) ra **~53.6MB** so với **~14-19MB** mặc
+định — gần **GẤP 3-4 LẦN** cho tốc độ tổng thể nhanh hơn ~20%. `p3` ("fast") không khá
+hơn nhiều (~50MB, nhanh hơn ~17%). Phát hiện phụ (không phải bug, đặc tính vốn có của
+NVENC): NGAY CẢ preset mặc định, GPU (NVENC) ra file LỚN HƠN ~2× so với CPU (libx264) ở
+CÙNG số CQ/CRF=23 (verify thật: GPU ~40MB vs CPU ~18.76MB, cùng project/cấu hình) — đánh
+đổi tốc độ-lấy-dung lượng vốn đã có sẵn khi bật GPU, KHÔNG đáng khuếch đại thêm bằng
+preset nhanh hơn. Không áp dụng thay đổi preset.
+
+### Hướng ĐÃ ÁP DỤNG — build segment (Pass 2, `assemble_video`) SONG SONG
+
+Mỗi shot build ra `segment_{i}.{ext}` HOÀN TOÀN ĐỘC LẬP (không đọc/ghi chung gì với shot
+khác) — trước đây chạy TUẦN TỰ dù không có lý do kỹ thuật bắt buộc. Đổi sang
+`ThreadPoolExecutor` (`_SEGMENT_BUILD_WORKERS = min(4, os.cpu_count() or 4)` — 4 mặc
+định, tự hạ trên máy ít core hơn). Verify AN TOÀN trước khi áp dụng: 4 lệnh `h264_nvenc`
+chạy đồng thời trên máy dev (RTX 5060 Ti) không bị driver từ chối (không phải mọi GPU
+GeForce đều giới hạn số phiên NVENC đồng thời — máy này không giới hạn), CPU (libx264, tự
+đa luồng nội bộ) cũng không bị "oversubscribe" nghiêm trọng trên máy 20 core. Đo tốc độ
+riêng: 4 lệnh GPU đồng thời nhanh hơn ~26% so với tuần tự (2.65s→1.96s); CPU đồng thời
+nhanh hơn ~15% (5.14s→4.38s).
+
+`seg_paths`/`assembly_progress` (2 trạng thái CHUNG cần đồng bộ giữa luồng) — dùng
+`concurrent.futures.as_completed` + khoá (`threading.Lock`) quanh việc cập nhật tiến độ +
+`save_render_state`; `seg_paths` build lại theo ĐÚNG thứ tự index (không theo thứ tự hoàn
+thành) trước khi dùng ở các bước sau — giữ nguyên hành vi downstream. Lỗi ở 1 luồng vẫn
+dừng cả assembly (giữ hành vi cũ) — `future.result()` re-raise ngay ở luồng chính.
+
+### Verify
+
+Re-run lại ĐÚNG kịch bản bug gốc (mục 79, transition "cut" toàn bộ + intro) SAU KHI đã
+song song hoá — vẫn ra đúng ~42.7s (không hụt shot cuối), xác nhận song song hoá không
+đụng gì tới logic timing/CFR. Full `pytest`: **411 passed** (103/103 test_render.py). Đo
+lại tổng thời gian pipeline (project 4 shot, GPU): **22.85s → 16.51s (~28% nhanh hơn)** —
+mức cải thiện sẽ RÕ RỆT HƠN cho project long-form thật nhiều shot hơn (4 worker xử lý
+theo từng đợt 4 — càng nhiều shot, tỉ trọng thời gian tiết kiệm được ở Pass 2 càng lớn so
+với các bước hậu kỳ cố định 1 lần như overlay/bg-music).
+
+## 85. Channel Asset Vault + mở rộng Render Engine (CHANGE_Semantic_BRoll_Asset_Vault.md) — build đầy đủ Phase A+B+C (2026-08-26)
+
+### Yêu cầu người dùng
+
+Đưa `CHANGE_Semantic_BRoll_Asset_Vault.md` — đề xuất kho tư liệu video theo từng kênh
+(user tự import footage, hệ thống cắt cảnh + gắn nhãn ngữ nghĩa + gợi ý khớp vào shot,
+ưu tiên trước AI video) + mở rộng khả năng hậu kỳ (color grade, grain, loudness chuẩn,
+ducking). Yêu cầu: "điều chỉnh lại plan nếu... chưa phù hợp với code base hiện tại...
+tuyệt đối không build duplicate flow" + "triển khai toàn bộ luôn các phase rồi test 1
+thể" — không tách giai đoạn, build hết Phase A/B/C trong 1 lượt.
+
+### Đối chiếu spec ↔ thực tế TRƯỚC khi build (đầy đủ ở kế hoạch `partitioned-sauteeing-
+pillow.md`, tóm tắt các điểm sai/lệch đã sửa)
+
+1. **`shots[].motion_type` KHÔNG tồn tại** — spec khẳng định "đã có sẵn" từ 1 file
+   (`StudioFlow_Video_Improvement_Plan.md`) không có trong repo. Thật ra đề xuất này ĐÃ
+   bị bác bỏ trước đó (`specs/05_ai_providers.md` dòng ~618) — cơ chế tương đương đã có
+   sẵn: `visual_type` + `camera_motion`. KHÔNG thêm field mới.
+2. **`commercial_use_allowed` KHÔNG tồn tại** ở bất kỳ đâu — spec viện dẫn 2 lần như
+   khuôn mẫu có sẵn, thực ra đã bị bác bỏ ở 1 lượt lên plan trước (mục 76).
+3. **Phase C ("Render Engine mới") trùng lặp lớn với `assembly.py`** — Ken Burns,
+   transition, bg music mix, overlay, GPU/CPU fallback, concat ĐỀU đã có (80+ mục sửa
+   lỗi thật, 411 test). Quyết định (người dùng xác nhận): MỞ RỘNG `assembly.py`, KHÔNG
+   viết engine mới — chỉ code phần thật sự thiếu (color grade theo kênh, grain, loudness
+   chuẩn, ducking, blur-fill).
+4. **VLM vision qua LocalAI dùng CHUNG `/v1/chat/completions`** với LLM thường (xác nhận
+   qua tài liệu chính thức) — tách task "vision" riêng thay vì sửa `LLMProvider` hiện có.
+5. **GPU máy dev đã xác nhận CHẬT VRAM** (OmniVoice giữ ~9.9GB) — chọn Moondream
+   (~2-4GB) làm VLM mặc định thay Qwen2.5-VL 7B (~12GB) spec đề xuất.
+6. **`CreativeAsset` (Thư viện, mục 53) KHÔNG trùng Asset Vault** — đã kiểm tra kỹ:
+   `CreativeAsset` dùng lại NGUYÊN VẸN, đứng ngoài mọi kênh; Asset Vault là NGUYÊN LIỆU
+   THÔ bị cắt thành nhiều clip con, per-channel, có metadata phong phú (caption/tags/
+   rights/vector) — giữ 2 bảng tách biệt, KHÔNG gộp.
+
+### Dependencies mới (cài + verify sạch trước khi code, không đoán API)
+
+`chromadb==1.5.9`, `scenedetect[opencv]==0.7.1`, `yt-dlp==2026.8.19` — cài thử, xác nhận
+`pydantic==2.9.2`/`fastapi==0.115.0` đã ghim KHÔNG bị nâng version, `import app.main`
+sạch cùng lúc với 3 lib mới. Verify API thật bằng tay TRƯỚC khi viết code (không suy
+đoán): `scenedetect.AdaptiveDetector` phát hiện đúng 2 scene trên video test 2 màu tách
+biệt (mốc 3.0s chính xác); `chromadb.PersistentClient` add/query cosine — `distance`
+trả về, KHÔNG phải similarity (`similarity = 1 - distance`, verify bằng số đo thật);
+`yt_dlp.YoutubeDL` có `download()`. `-ss` TRƯỚC `-i` + `-t <duration>` SAU `-i` (không
+phải `-to`) để cắt clip đúng mốc — verify bằng video 3 cảnh màu, trích frame xác nhận.
+
+### Kiến trúc dữ liệu
+
+`app/models/__init__.py`: `RawVideo` (id/channel_id/file_path/source_url/import_note/
+status/error_message), `ProcessedClip` (clip_id/channel_id/raw_video_id/storage_url/
+duration_sec/resolution/caption/tags/mood_tone/vector_id/usage_count/last_used_at/
+active/rights_status/rights_note) — KHÔNG cascade xoá `ProcessedClip` khi `RawVideo` bị
+xoá (clip đã cắt dùng độc lập). `app/config.py`: `asset_vault_raw_dir`/
+`asset_vault_clips_dir`/`asset_vault_chroma_dir` (cùng cây `channel_dir(id)`).
+`app/schemas/__init__.py::BrandProfile` thêm `visual_grade`/`grain_enabled`/
+`aspect_fill_mode`/`bg_music_ducking_enabled`. `app/render/schemas.py::ShotRenderStatus`
+thêm `linked_clip_id` (KHÔNG thêm gì vào `Shot`/pack.json — xem điểm #1 mục đối chiếu
+và lý do kiến trúc ở specs/04 §1b).
+
+### Provider infra mới: `vision`/`embedding`
+
+`app/providers/base.py`: `VisionProvider`/`EmbeddingProvider` (ABC riêng, không sửa
+`LLMProvider`). `app/providers/vision_localai.py` (`localai_vision`, model mặc định
+`moondream2`, gọi `/v1/chat/completions`, parse JSON `{caption,tags,mood_tone}` từ
+response text — fallback dùng nguyên văn text làm caption nếu không phải JSON, không
+raise). `app/providers/vision_gemini.py` (`gemini_vision`, cloud, cùng pattern
+`image_gemini.py`). `app/providers/embedding_localai.py` (`localai_embedding`, thử
+`/v1/embeddings` trước, dự phòng `/embeddings` nếu 404). `factory.py` đăng ký
+`_VISION_ADAPTERS`/`_EMBEDDING_ADAPTERS` + `get_vision`/`get_embedding`, dùng chung
+`_build_asset_provider` đã có. `routers/providers.py` thêm 2 task vào registry test
+connection + `CLOUD_MODELS_BY_TASK`. Frontend `ProviderSettings.tsx`: thêm `vision`/
+`embedding` vào `GROUPS`/`CLOUD_CATALOG`/`LOCAL_CATALOG` — `CLOUD_CATALOG.embedding=[]`
+(mảng rỗng, không thiếu key — tránh `CLOUD_CATALOG[group][0]` văng lỗi runtime khi mở
+dialog "+ Thêm provider" ở tab chỉ có local); dialog tự mặc định tab "Local" khi nhóm
+không có provider cloud nào.
+
+### Pipeline Ingestion & Matching (`app/asset_vault/`, module mới)
+
+`ingest.py`: `import_raw_video_upload`/`import_raw_video_url` (URL CHỈ tải khi user chủ
+động dán + xác nhận qua request HTTP thật, không job nền nào tự gọi); `manual_cut_clip`
+(cắt tay, đồng bộ) + `auto_detect_scenes` (PySceneDetect `AdaptiveDetector`, chạy nền —
+CẢ 2 cách CÙNG tồn tại, không phải "thay thế nhau", lưới an toàn khi auto-detect chưa
+tinh chỉnh tốt cho footage archival); `_extract_clip` tách audio (`-an`), chuẩn hoá
+H.264; `caption_clip` (1 keyframe đại diện giữa clip — ĐƠN GIẢN HOÁ có chủ ý so với đề
+xuất "2 keyframe 25%/75%" của spec, gộp 2 caption cần thêm bước merge phức tạp, lợi ích
+chưa rõ hơn hẳn) → Vision provider → Embedding provider → upsert Chroma;
+`caption_all_pending_clips` lỗi 1 clip không chặn cả batch (đúng nguyên tắc đã dùng ở
+`generate_all_visual`). `matching.py`: `match_by_keyword` (Phase A, SQL LIKE thô, không
+cần Chroma), `match_semantic` (Phase B, cosine similarity đúng namespace kênh, lọc
+`active`+ngưỡng 0.65), `apply_dedup` (loại clip đã dùng trong CHÍNH project — nhận
+`used_clip_ids` từ caller, KHÔNG đọc `render.json` trực tiếp để tránh phụ thuộc ngược
+`app/render/`), `rank_by_usage`, `fallback_neutral_broll` (tag `"ambient"`).
+`vector_store.py`: wrapper Chroma, 1 `PersistentClient`/kênh (cache theo `channel_id`).
+
+### Router `app/routers/asset_vault.py` (mới, channel-scoped)
+
+CRUD Raw/Processed Library đầy đủ theo §7.2: upload/import-url/delete/detect-scenes/
+manual-cut/caption-all cho raw video; list (filter raw_video_id/rights_status/tag/
+mood_tone)/patch/batch-patch/delete/file cho processed clip. Đăng ký trong `main.py`.
+
+### `app/routers/render.py` — Video Slot (gán clip vào shot)
+
+`GET .../vault-candidates` (đọc `pack.json` lấy `visual_fx` làm mô tả, thử semantic
+trước rồi rơi về keyword, dedup theo `linked_clip_id` của shot KHÁC trong CÙNG project,
+fallback B-roll trung tính khi hết candidate) — CHỈ gợi ý, human-gate giữ nguyên. `POST
+.../assign-vault-clip` — hành vi Y HỆT `upload_shot_visual` đã có (copy file vào
+`assets/{shot_id}{ext}`, `visual_provider="asset_vault"`, `approved=False`) chỉ khác
+nguồn bytes; tăng `usage_count`/`last_used_at` của clip NGAY khi gán. Yêu cầu
+`shot.visual_type=="video"` sẵn (cùng ràng buộc `upload_shot_visual`).
+
+### Guardrail — cảnh báo rights
+
+`routers/guardrail.py::_check_rights_warnings` — quét `render.json` (không phải
+`pack.json`) tìm shot có `linked_clip_id` trỏ tới clip `rights_status=="unverified"`,
+thêm warning `{"type":"rights","severity":"amber",...}` vào kết quả `guardrail/check` —
+ĐÚNG cấu trúc warning dict đã có, KHÔNG chặn cứng (single-user, người dùng tự quyết).
+
+### Mở rộng `app/render/assembly.py` (Phase C — KHÔNG viết engine mới)
+
+5 thay đổi ĐỘC LẬP, mỗi cái verify riêng bằng ffmpeg thật trước khi ghép vào pipeline
+(đúng kỷ luật đã dùng suốt phiên, đặc biệt sau bài học mục 84 — 1 thay đổi tưởng an toàn
+đã tái phát bug thật):
+
+1. **Color grade theo kênh** — `_resolve_color_grade_filter(brand)` tra
+   `_GRADE_PRESETS` (`cinematic_warm`/`moody_dark`/`documentary_faded`), rỗng/không khớp
+   → dùng ĐÚNG `_COLOR_GRADE_FILTER` cũ (không đổi hành vi kênh chưa cấu hình — verify
+   bằng SSIM: `brand=None` và `brand={}` ra pixel giống hệt nhau, SSIM=1.0).
+2. **Film grain** — `_grain_filter_suffix(brand)`, `noise=alls=8:allf=t+u` khi
+   `grain_enabled`, rỗng khi tắt.
+3. **Blur-fill tỷ lệ khung hình** — `_scale_blurfill_filter` (filter đa nhánh `split`+
+   `overlay`, verify thật ghép chung 1 chuỗi `-vf` với color grade/fps chạy được không
+   lỗi) — chọn qua `aspect_fill_mode`, mặc định vẫn `_scale_cover_filter` cũ.
+4. **Auto-ducking nhạc nền** — nâng cấp `_mix_bg_music` bằng `sidechaincompress`
+   (bg=main, giọng đọc=sidechain) + `amix normalize=0`. **Phát hiện quan trọng lúc
+   verify tay**: `amix` có `normalize=true` MẶC ĐỊNH tự rescale, làm so sánh "có ducking
+   vs không ducking" trên TOÀN BỘ mix bị nhiễu/đảo ngược — phải cô lập đúng dải tần nhạc
+   nền (`bandpass=f=880`, tách khỏi giọng đọc 220Hz) trên CÙNG 1 output để đo đúng, cách
+   so 2 output khác `normalize` là SAI PHƯƠNG PHÁP (đã tự phát hiện + sửa lại test).
+5. **Chuẩn hoá loudness EBU R128** — `loudnorm=I=-14:TP=-1.0:LRA=11`, bước hậu kỳ CUỐI
+   CÙNG, LUÔN áp dụng (không cần field BrandProfile). Verify: input cố tình rất nhỏ
+   (volume=0.02) → output đo được > -20 LUFS (kéo gần về -14). Verify AN TOÀN với video
+   KHÔNG có audio track (`-af` không lỗi, output giữ nguyên không audio, không crash).
+
+Mỗi hàm nhận thêm `brand: dict | None = None`, mặc định giữ NGUYÊN hành vi cũ tuyệt
+đối. Re-verify lại đúng kịch bản bug frame-drop (mục 79) SAU khi thêm cả 5 thay đổi —
+vẫn ra đúng ~42.7s, không hụt shot cuối.
+
+### Frontend
+
+`ChannelDialog.tsx` — thêm tab-bar (`seg`/`seg-opt`, tái dùng CSS đã có) — "Thông tin
+chung" (nội dung cũ, không đổi) / "Kho Tài nguyên" (CHỈ hiện ở `mode="edit"`, cùng ràng
+buộc mọi upload asset khác trong dialog này). `AssetVaultTab.tsx` (mới) — Raw Library
+(upload/URL, badge tiến trình `detecting→tagging→indexed→error`, poll nhẹ khi có video
+đang xử lý) + Processed Clip Library (lưới thẻ clip, video preview, inline sửa caption/
+rights, chọn nhiều + thao tác theo lô, bộ lọc). `VisualStudio.tsx` — nút "Video từ Kho"
+(`VaultClipPicker.tsx`, mới, cùng khung mẫu `LibraryPicker.tsx`) cạnh nút Upload hiện có,
+CHỈ hiện cho shot video — modal gợi ý candidate + match score (nếu semantic) + rights
+badge, trạng thái rỗng dẫn thẳng tới "Cấu hình kênh → Kho Tài nguyên". `api/types.ts`/
+`api/client.ts` — thêm `RawVideo`/`ProcessedClip`/`VaultCandidate(s)` + toàn bộ client
+method tương ứng.
+
+### Verify
+
+Backend: `tests/test_asset_vault.py` (mới, 35 test — provider mock qua `respx`, scene
+detection/cắt clip bằng ffmpeg THẬT không suy đoán, router qua HTTP thật, rights warning
+end-to-end) + 6 test mới trong `test_render.py` cho 5 thay đổi assembly.py. Phát hiện +
+sửa 1 lỗi cô lập test lúc viết: 2 fixture tạo kênh (`channel`/`project_with_brief`) bằng
+ID mốc mili-giây CÓ THỂ TRÙNG nếu tạo quá nhanh trong cùng 1 test — tránh dùng cả 2
+fixture kênh riêng biệt trong cùng 1 test, dùng channel_id cố định giả khi cần "kênh
+khác" thay vì phụ thuộc timing. Full `pytest`: **452 passed** (411 cũ + 41 mới). `tsc
+--noEmit` sạch cả `frontend/`.
+
+KHÔNG thể verify qua UI thật bằng click chuột (không có Playwright/trình duyệt tự động
+trong môi trường này) — đã xác nhận app khởi động lại không lỗi. CHƯA verify: hành vi
+THẬT của LocalAI vision/embedding qua GPU thật (endpoint `/embeddings` cụ thể là
+`/v1/embeddings` hay `/embeddings` tuỳ bản LocalAI người dùng cài — code đã tự dự phòng
+cả 2, nhưng chưa xác nhận qua request thật), chất lượng caption Moondream thật, PySceneDetect
+trên footage archival chất lượng thấp (câu hỏi mở #4 change-spec — chưa có dữ liệu thật
+để đánh giá), ngưỡng similarity 0.65 (cần dữ liệu dùng thật để hiệu chỉnh).
+
+## 86. Bug thật + gỡ rối dài hơi: tab "Kho Tài nguyên" (mục 85) không hiện/tự revert trên máy người dùng — nguyên nhân KHÔNG phải code, mà `ELECTRON_RUN_AS_NODE` bị kế thừa từ tiến trình Claude Code (2026-08-26)
+
+**Triệu chứng người dùng báo** (nhiều vòng): (1) "chưa thấy giao diện Kho Tài nguyên",
+(2) mở lên thấy 2 tab một lúc rồi "tự back lại màn cũ", (3) bấm tab "Thông tin chung" thì
+dialog revert về giao diện cũ mất luôn 2 tab, (4) hard-refresh (Ctrl+Shift+R) trong cửa sổ
+đang mở KHÔNG fix được.
+
+**Đường đi sai lúc đầu**: nghi ngờ đầu tiên đúng một phần — 1 lỗi thật đã xảy ra (thêm
+dòng `import AssetVaultTab from "./AssetVaultTab"` vào `ChannelDialog.tsx` TRƯỚC KHI tạo
+file đó, khiến Vite dev server kẹt lỗi cho module này). Nhưng sau khi fix + verify bằng
+Chrome DevTools Protocol (mở app thật, click qua CDP, screenshot) xác nhận code ĐÚNG, các
+lần user report tiếp theo vẫn xảy ra — vì mỗi lần Claude Code tự restart tiến trình Vite
+dev server trong khi cửa sổ Electron của người dùng vẫn đang mở/kết nối, Vite phát hiện
+server restart và ép client full-reload — nếu người dùng đang thao tác đúng lúc đó, họ sẽ
+thấy "vừa hiện đúng xong lại revert" dù code hoàn toàn đúng cả trước và sau. Đây là hệ quả
+phụ của việc Claude Code tự ý kill/restart process nhiều lần liên tiếp để debug, KHÔNG
+phải bug trong `ChannelDialog.tsx`/`AssetVaultTab.tsx`.
+
+**Nguyên nhân gốc thật sự** (phát hiện khi build `start-app.bat`, xem dưới): biến môi
+trường `ELECTRON_RUN_AS_NODE=1` — do chính tiến trình Claude Code (bản thân cũng là ứng
+dụng Electron) đặt sẵn cho MỌI tiến trình con nó spawn (cả Bash tool lẫn PowerShell tool)
+— bị KẾ THỪA khi Claude Code tự chạy `node_modules\.bin\electron.cmd` để mở app cho người
+dùng test. Khi biến này bật, `electron.cmd` chạy như Node.js thường (KHÔNG mở cửa sổ
+Electron thật) → `require("electron").app` trả về `undefined` → crash
+`TypeError: Cannot read properties of undefined (reading 'isPackaged')` tại
+`electron/dist/main.js:42`. Việc này giải thích tại sao `npm run dev --workspace=electron`
+(script `dev:electron` gốc trong `electron/package.json`) LUÔN LỖI trên các phiên chạy từ
+Claude Code — không phải lỗi cấu hình dự án, mà môi trường gọi bị ô nhiễm biến này. Suốt
+phiên làm việc, Claude Code đã tránh được lỗi này bằng cách LUÔN gọi
+`Remove-Item Env:\ELECTRON_RUN_AS_NODE` ngay trước mỗi lần `Start-Process electron.cmd`
+trong PowerShell — nhưng đây là 1 bước dễ quên/dễ bỏ sót ở 1 số nhánh gọi (VD gọi qua
+`.bat`/`cmd.exe` không có bước này), và mỗi lần bỏ sót sẽ khiến cửa sổ app KHÔNG mở được
+(hoặc mở nhầm 1 cửa sổ Electron cũ còn sống sót từ lần trước, gây ảo giác "vẫn là giao
+diện cũ" y hệt các báo cáo của người dùng).
+
+**Fix triệt để**: tạo `start-app.bat` ở gốc repo (`e:\VideCode\StudioFlow\start-app.bat`)
+— script khởi động 1 lệnh duy nhất, TỰ XOÁ `ELECTRON_RUN_AS_NODE` ngay trong thân script
+(`set ELECTRON_RUN_AS_NODE=`) bất kể được gọi từ môi trường nào, rồi: (1) kill tiến trình
+`electron`/`node` cũ còn sót, (2) khởi động Vite dev server nền, (3) tự chạy `tsc -p
+electron/tsconfig.json` rồi mở app bằng đường dẫn `.bin\electron.cmd` TRỰC TIẾP (không
+qua `npm run dev:electron` — script gốc đó vẫn lỗi trên môi trường này vì cùng lý do biến
+môi trường, giữ nguyên không sửa vì không phải bug của riêng electron/package.json, mà là
+môi trường gọi). **Verify đã làm thật**: xoá sạch mọi tiến trình electron/node, launch
+`start-app.bat` như 1 tiến trình tách biệt hoàn toàn (`Start-Process`, không có bước can
+thiệp thủ công nào khác) — xác nhận qua `Get-CimInstance Win32_Process` CHỈ ĐÚNG 1 tiến
+trình electron.exe chính xuất hiện, và chụp ảnh TOÀN MÀN HÌNH thật (không phải CDP cô lập)
+xác nhận app render đúng nội dung thật (Dashboard, danh sách kênh) — chứng minh launcher
+hoạt động đúng kể cả khi gọi từ môi trường có biến `ELECTRON_RUN_AS_NODE` bị ô nhiễm.
+
+**Bài học cho các phiên sau**: khi Claude Code cần tự mở ứng dụng Electron của người dùng
+để test/demo, LUÔN xoá `ELECTRON_RUN_AS_NODE` trong CHÍNH lệnh khởi động (không dựa vào
+nhớ xoá ở bước gọi bên ngoài) — và ưu tiên dùng `start-app.bat` có sẵn thay vì tự spawn
+tiến trình bằng tay nhiều lần, để tránh đúng lớp lỗi "nhiều cửa sổ chồng chéo, cửa sổ cũ
+còn sống sót" đã gây nhầm lẫn kéo dài trong phiên này.
+
+**Vision/Embedding cho Channel Asset Vault đổi provider mặc định sang Ollama** (phát hiện
+cùng lúc điều tra bug trên): máy người dùng THẬT SỰ không cài LocalAI (đã xác nhận qua
+`netstat`/`curl` cổng 8080 không có gì lắng nghe) — chỉ có Ollama chạy sẵn (cổng 11434,
+model `qwen3:14b` cho LLM). Thêm mới `app/providers/vision_ollama.py`
+(`OllamaVisionProvider`, provider_name=`ollama_vision`) và
+`app/providers/embedding_ollama.py` (`OllamaEmbeddingProvider`, provider_name=
+`ollama_embedding`) — tái dùng ĐÚNG service Ollama đã chạy qua shim OpenAI-compat
+(`{base_url}/chat/completions` và `{base_url}/embeddings`, base_url mặc định
+`http://127.0.0.1:11434/v1`), model mặc định `moondream` (~1.7GB, vision) và
+`nomic-embed-text` (~274MB, embedding) — cả 2 đã `ollama pull` thật và **verify thật qua
+`curl` trực tiếp** (vision trả về caption hợp lệ dù ảnh test quá nhỏ để mô tả chính xác;
+embedding trả về vector 768 chiều hợp lệ). Đặt làm mặc định (đứng đầu `_VISION_ADAPTERS`/
+`_EMBEDDING_ADAPTERS` trong `factory.py` và đầu danh sách `LOCAL_CATALOG` trong
+`ProviderSettings.tsx`), giữ nguyên `localai_vision`/`localai_embedding` cho người dùng
+nào có cài LocalAI riêng (provider thay thế được, không xoá — CLAUDE.md nguyên tắc #4).
+
+**Verify đã làm**: full `pytest` **452 passed** (không đổi số lượng — 2 adapter mới không
+có test riêng theo mock, chỉ verify qua `curl` thật vì mục tiêu là xác nhận kết nối thật
+với service đang chạy, không phải hành vi logic của adapter — logic parse JSON/response
+giống hệt `vision_localai.py`/`embedding_localai.py` đã có test), `tsc --noEmit` sạch.
+
+## 87. 2.5D Depth-Parallax Motion cho shot ảnh tĩnh (CHANGE_2.5D_Parallax_Synthesizer.md) — đổi hẳn kỹ thuật M1 sau khi verify Qwen-Image-Layered KHÔNG vừa VRAM máy này (2026-08-26)
+
+**Yêu cầu người dùng**: triển khai spec đính kèm — biến ảnh minh hoạ tĩnh của shot thành
+video "chiều sâu chuyển động" (2.5D parallax) thay cho Ken Burns phẳng hiện có, nhận cả
+ảnh AI sinh lẫn ảnh người dùng tự upload. "Nếu có thông tin gì khác với code base hiện
+tại, hãy chủ động đưa ra giải pháp xử lý phù hợp" — đúng tinh thần này, đối chiếu spec
+với thực tế TRƯỚC khi code phát hiện 1 vấn đề chặn cứng cần đổi hướng kỹ thuật.
+
+**Đối chiếu spec ↔ thực tế (đã verify bằng đọc code + tra cứu web thật, không suy đoán)**:
+
+1. **`shots[].motion_type` KHÔNG tồn tại** — spec khẳng định field này "đã có sẵn" từ
+   `StudioFlow_Video_Improvement_Plan.md` (file không có trong repo). Y HỆT lỗi đã bắt
+   được ở mục 85 cho 1 spec khác — cơ chế tương đương đã có sẵn: `Shot.visual_type` +
+   `Shot.camera_motion` (`app/render/camera_motion.py::CAMERA_MOTIONS`). Không thêm field
+   mới, mở rộng ĐÚNG field `camera_motion` với 4 giá trị mới.
+2. **P0 — CHẶN CỨNG thật sự: Qwen-Image-Layered không vừa VRAM máy này**. Model này CÓ
+   THẬT (Alibaba, Apache 2.0, `github.com/QwenLM/Qwen-Image-Layered`, workflow ComfyUI
+   chính thức tại `docs.comfy.org/tutorials/image/qwen/qwen-image-layered`) — đã verify
+   qua tra cứu HuggingFace thật: `qwen_image_layered_fp8mixed.safetensors` (diffusion
+   model, bản FP8 nhẹ nhất) = **20.5GB**, `qwen_2.5_vl_7b_fp8_scaled.safetensors` (text
+   encoder bắt buộc đi kèm) = **9.38GB** — tổng ~30GB, gấp ~2.5 lần ước tính của spec gốc
+   ("~10.5GB + 1.5GB VAE ≈ 12GB, vừa trong 16GB"). Máy dev có 16GB VRAM (RTX 5060 Ti,
+   xem mục 15) — **bản thân diffusion model MỘT MÌNH (20.5GB) đã vượt TOÀN BỘ VRAM**, dù
+   không chạy cùng gì khác. Không phải vấn đề tranh chấp tài nguyên như các trường hợp
+   VRAM chật trước đây (mục 22, 5195) — model này đơn giản KHÔNG THỂ load trên phần cứng
+   này.
+   - Cũng phát hiện: workflow chính thức của Qwen-Image-Layered là **ComfyUI node graph**
+     (`Empty Qwen Image Layered Latent` → `LatentCutToBatch` → `VAE Decode`), KHÔNG phải
+     LocalAI như spec giả định ("đăng ký vào LocalAI YAML như model khác") — nếu VRAM đủ,
+     đường đúng sẽ là `app/providers/image_comfy_sdxl.py`/`video_comfy_wan.py` (pattern
+     gọi ComfyUI qua workflow JSON) chứ không phải `image_localai.py`. Không cần xử lý gì
+     thêm vì đã đổi hướng M1 hoàn toàn.
+3. **`§6 tự gợi ý preset theo emotional beat` không có dữ liệu nguồn** — field `anchor:
+   true/false` trên dòng script (`specs/04_data_schemas.md:203`) là cờ nhị phân "điểm neo
+   giữ chân người xem" cho Retention Guardrail (Anchor Gap), KHÔNG phải phân loại kiểu
+   beat (giới thiệu nhân vật/hành quân/cao trào/chuyển tiêu điểm) mà spec §6 cần. Không
+   có field nào phân loại beat theo nghĩa này ở bất kỳ đâu — bỏ tự-gợi-ý khỏi scope (xây
+   bộ phân loại beat riêng là việc lớn ngoài phạm vi, vi phạm "không over-engineer"),
+   preset mặc định Cinematic Push-in, người dùng tự đổi qua dropdown.
+
+**Quyết định kỹ thuật thay thế (hỏi người dùng qua AskUserQuestion, chọn phương án khuyến
+nghị)**: đổi M1 từ "bóc ảnh N lớp RGBA bằng AI" sang **depth-map + ffmpeg `displace`
+filter** — kỹ thuật "3D Photo" thật (cùng nguyên lý LeiaPix/Facebook 3D Photos dùng),
+KHÔNG cắt lớp, KHÔNG cần inpaint nền (né hẳn rủi ro #1 lớn nhất mà chính spec gốc nêu ra
+— chất lượng inpaint nền trên ảnh phong cách tranh/sơn dầu), gần như không tốn VRAM. 2
+phương án khác đã cân nhắc và bị loại: (a) rembg + ComfyUI SDXL inpaint có sẵn (2 lớp
+thay N lớp) — vẫn giữ nguyên rủi ro inpaint nền, tốn thêm VRAM/thời gian GPU mỗi shot;
+(b) vẫn build đúng Qwen-Image-Layered chấp nhận chậm/rủi ro OOM — không khuyến nghị trên
+phần cứng hiện tại.
+
+**Kiến trúc đã build**:
+```
+[Ảnh shot tĩnh] → [Depth estimation: onnxruntime + depth-anything-v2-small int8, ~27MB]
+  → depth_map.png (cache theo sha256 ảnh gốc)
+  → [Displacement synthesis: numpy thuần, KHÔNG AI, <1s]
+  → xmap.mp4/ymap.mp4 (hoặc animated mask cho Focus Reveal)
+  → [ffmpeg -filter_complex displace/maskedmerge] → scene_XXXX_parallax.mp4
+  → [_build_segment() hiện có] — coi như 1 video input bình thường (color grade/grain/
+    scale/tpad/setsar dùng lại NGUYÊN nhánh video đã có, không viết compositor riêng)
+```
+
+**Model depth — verify thật trước khi code**: tải `onnx-community/depth-anything-v2-small`
+bản `model_int8.onnx` (27.26MB, xác nhận qua HTTP HEAD + tải thật), kiểm tra input/output
+tensor thật qua `session.get_inputs()/get_outputs()` (input `pixel_values`
+(batch,3,H,W) — H/W ĐỘNG, output `predicted_depth` tự động `14*floor(dim/14)`) thay vì
+tin theo tài liệu web (khớp — nhưng vẫn verify theo đúng kỷ luật "không tin tài liệu
+100%"). Test suy luận thật trên ảnh thật: 0.314s CPU, depth min/max/mean hợp lý (không
+phẳng). Preprocessing (ImageNet mean/std, resize giữ tỷ lệ khung hình bội số 14 — KHÔNG
+ép vuông 518×518 như `preprocessor_config.json` gợi ý, vì ảnh không vuông sẽ méo) verify
+qua đúng 1 lần chạy thật trước khi viết vào `depth_parallax.py`.
+
+**4 preset displacement — mỗi cái verify riêng bằng đo pixel thật (không suy đoán filter
+tương đương, đúng kỷ luật mục 84)**:
+- **Parallax Drift**: dịch ngang tỉ lệ theo depth. Verify: ảnh test có nửa trái depth=0.1
+  (xa), nửa phải depth=0.9 (gần), đo cross-correlation pixel giữa frame đầu/cuối — nửa xa
+  dịch ~1px, nửa gần dịch ~12px (đúng tỉ lệ kỳ vọng ~9:1, sai lệch nhỏ do làm tròn pixel).
+- **Cinematic Push-in**/**Dolly Zoom**: dịch chuyển hướng tâm/ra tâm theo depth, render
+  thật không lỗi — đã có test đo pixel riêng cho Drift làm đại diện xác nhận công thức
+  displacement đúng, 2 preset còn lại dùng CHUNG cơ chế `_displacement_grid` (khác công
+  thức toán, cùng pipeline đã verify).
+- **Focus Reveal** (khác cơ chế — KHÔNG dùng `displace`): lúc đầu code SAI — dùng
+  `maskedmerge=weight_expr=...`, chạy THẬT mới phát hiện `maskedmerge` **KHÔNG có tham số
+  `weight_expr`** (`ffmpeg -h filter=maskedmerge` xác nhận filter này CHỈ có option
+  `planes`, mask PHẢI là 1 stream video thật, không có biểu thức động) — con giống lỗi
+  từng gặp với các filter ffmpeg khác trong session, xác nhận lại giá trị của việc LUÔN
+  chạy thật thay vì suy đoán tham số filter. Fix: sinh mask animate bằng numpy (cùng
+  pattern với xmap/ymap), `mask(x,y,t) = (1-depth(x,y))·(1-progress(t))·255`. Verify đo
+  bằng biến thiên Laplacian (chỉ số độ nét chuẩn): vùng xa sharpness 102.6 (mờ) ở frame
+  đầu → 8432.2 (sắc nét) ở frame cuối; vùng gần giữ ổn định 7303→9038 suốt clip — đúng ý
+  đồ "chuyển tiêu cự".
+
+**Tích hợp `assembly.py::_build_segment`**: khi `camera_motion` là 1 trong 4 preset
+parallax VÀ ảnh (không phải video) — chạy `depth_parallax.render_parallax_clip` ra 1 file
+mp4 trung gian TRƯỚC, gán `visual_path`/`is_video=True`, để phần còn lại hàm chạy ĐÚNG
+nhánh video hiện có (không viết nhánh mới) — dọn file trung gian sau khi ghép xong (tránh
+rò rỉ file, có test riêng xác nhận không còn `*_parallax_src.mp4` sót lại).
+
+**Schema**: `BrandProfile.parallax_intensity_default: float = 0.8` (kênh sử "điềm tĩnh"),
+`Shot.parallax_intensity: Optional[float] = None` (null = kế thừa), `camera_motion` mở
+rộng 4 giá trị mới trong `CAMERA_MOTIONS` dict (`app/render/camera_motion.py`) — KHÔNG
+thêm field `motion_type` mới (đúng quyết định đã áp dụng nhất quán từ mục 85).
+
+**Backend mới**: `app/render/depth_parallax.py` (estimate_depth/get_or_compute_depth_map/
+render_parallax_clip — cache depth map theo sha256 NỘI DUNG ảnh gốc, đổi preset/intensity/
+duration sau đó chỉ chạy numpy+ffmpeg, không gọi lại AI — đúng ý đồ caching spec §8, áp
+dụng cho depth map thay vì N layer PNG). `app/routers/pipeline.py`: `ShotPatchBody` thêm
+`parallax_intensity`; endpoint mới `POST .../visual/shots/apply-parallax-all` ("Convert
+All", CHỈ ghi metadata `camera_motion` hàng loạt — KHÔNG có job nền/tiến trình per-shot
+như spec gốc giả định, vì trong kiến trúc app này `camera_motion` chỉ thực sự áp dụng LÚC
+`render/assemble` chạy ffmpeg, giống 9 giá trị camera_motion cũ); endpoint mới `GET
+.../render/shots/{shot_id}/depth-preview` (thay "Layer Breakdown Preview" gốc — trả PNG
+depth map, cache luôn cho bước render thật dùng lại).
+
+**Dependency mới**: `onnxruntime==1.28.0` (bản CPU — model quá nhỏ để cần GPU, tránh tranh
+chấp VRAM với OmniVoice/Ollama/ComfyUI đang có). KHÔNG thêm Pillow/huggingface_hub — dùng
+`cv2`/`numpy` (đã có sẵn qua `scenedetect[opencv]` từ mục 85) + `httpx` (đã có sẵn) để tải
+model 1 lần. Model file (~27MB) KHÔNG commit git (`backend/app/render/models/`, thêm vào
+`.gitignore`).
+
+**Frontend**: `VisualStudio.tsx` — 4 option mới trong dropdown "Chuyển động camera" hiện
+có (không dropdown riêng); Depth Intensity slider (0.5-2.0x, hiện khi chọn preset
+parallax, mặc định đọc `BrandProfile.parallax_intensity_default` qua 1 lần fetch chung
+cho CẢ block thay vì mỗi ShotCard tự fetch riêng); nút "Xem depth map" (tái dùng
+`Lightbox` component có sẵn); "Chuyển tất cả shot ảnh sang 2.5D Parallax" gộp vào menu
+"⋯ Tuỳ chọn khác" đã có (đúng pattern các hành động hàng loạt khác). `ChannelDialog.tsx`:
+field `parallax_intensity_default` cạnh `motion_tone` đã có.
+
+**Verify đã làm**: `depth_parallax.py` có 9 test riêng (`test_depth_parallax.py`) dùng
+ffmpeg/ảnh/model ONNX THẬT (không mock) — đo pixel/Laplacian thật cho từng preset, test
+tích hợp đầu-cuối qua `_build_segment` xác nhận color-grade vẫn áp dụng + file trung gian
+được dọn sạch, cộng 4 test HTTP cho 2 endpoint mới (`apply-parallax-all`/`depth-preview`,
+bao gồm case lỗi 400 khi preset không hợp lệ/shot chưa có ảnh). Sửa 1 test cũ
+(`test_build_camera_motion_filter_covers_every_real_motion`) để loại trừ 4 preset parallax
+(đúng hành vi mới — chúng KHÔNG xử lý bởi `build_camera_motion_filter`, không phải thiếu
+sót). Full `pytest`: **465 passed** (452 cũ + 13 mới). `tsc --noEmit` sạch. Verify UI thật
+qua Chrome DevTools Protocol trên app đang chạy thật (không phải TestClient cô lập): xác
+nhận cả 4 option parallax hiện đúng trong dropdown thật, chọn 1 option làm Depth Intensity
+slider + nút "Xem depth map" xuất hiện đúng với giá trị kế thừa BrandProfile hiển thị
+chính xác ("0.80x · kế thừa từ hồ sơ thương hiệu").
+
+**CHƯA verify**: chất lượng depth map thật trên ảnh phong cách tranh/sơn dầu/tư liệu lịch
+sử thật của kênh (chỉ test bằng ảnh tổng hợp có cấu trúc rõ + 1 ảnh testsrc ffmpeg — chưa
+có ảnh AI-gen/upload thật của kênh để đánh giá chất lượng ước lượng độ sâu chủ quan bằng
+mắt); tham số biên độ displacement (`_PUSH_IN_MAX_PERCENT` v.v., hiện chọn nhỏ/thận trọng
+theo brand DNA "điềm tĩnh") có thể cần tinh chỉnh sau khi xem video thật; hiệu năng
+`onnxruntime` CPU trên ảnh độ phân giải cao thật (1920×1080+, test mới ở 640×480/320×240).
+
+## 88. 4 phản hồi người dùng sau khi test thật: 2 entry point riêng cho ChannelDialog, bug OmniVoice do hibernate, nút sinh video Parallax NGAY cho từng shot, xác nhận "Video từ Kho" không lỗi ở short-form (2026-08-27)
+
+**1. ChannelDialog vẫn mở giao diện cũ khi bấm "Sửa kênh"** — thay vì tiếp tục điều tra
+sâu thêm cơ chế tab-switcher nội bộ (đã tốn nhiều công sức debug ở mục 86 mà vẫn có thể
+tái phát do Vite HMR/restart), theo đúng yêu cầu người dùng: bỏ hẳn phụ thuộc vào việc
+bấm chuyển tab BÊN TRONG dialog — **2 icon riêng biệt trên Dashboard** ("Sửa BrandProfile"
+/ "Kho Tài nguyên"), mỗi icon mở 1 dialog MỚI đã đúng tab ngay từ đầu qua prop
+`ChannelDialog.initialTab`. Verify thật qua CDP: click icon "Kho Tài nguyên" mở thẳng vào
+"VIDEO GỐC (RAW LIBRARY)", click icon "Sửa BrandProfile" mở thẳng vào form "Tên kênh" —
+không còn phụ thuộc trạng thái switcher nội bộ nào có thể lệch.
+
+**2. OmniVoice lỗi "HTTP 500: Internal Server Error"** — tái hiện được thật bằng
+`curl -X POST http://127.0.0.1:8199/synthesize`, server (PID cũ) trả 500 dù `/health`
+báo `model_loaded: true`. Restart server (`omnivoice_server.py`) rồi thử lại → THÀNH
+CÔNG, trả về WAV thật. **Kết luận: hibernate máy (mục 86 cuối phiên trước) đã làm hỏng
+CUDA context của tiến trình OmniVoice đang giữ model trên GPU** — tiến trình sống sót qua
+hibernate (không crash) nhưng context GPU không hợp lệ nữa, gây lỗi ở lần suy luận đầu
+tiên sau khi máy thức dậy. Ollama (cũng giữ model trên GPU) sống sót qua đúng cùng lần
+hibernate KHÔNG lỗi — không phải MỌI service GPU đều bị ảnh hưởng, có thể do khác cách
+Ollama tự quản lý context/tự nạp lại model per-request. **Bài học cho các phiên sau: sau
+khi hibernate/resume máy, nếu 1 service local giữ model trên GPU báo lỗi lạ dù health
+check vẫn "ok", THỬ RESTART SERVICE ĐÓ TRƯỚC khi điều tra sâu hơn** — khả năng cao là
+CUDA context bị hỏng bởi hibernate, không phải lỗi code.
+
+**3. Thêm nút "Tạo video Parallax 2.5D" cho từng shot** — trước đó (mục 87) preset
+`camera_motion=parallax_*` CHỈ là metadata áp dụng LÚC `render/assemble` ghép toàn bộ
+video — người dùng không thấy kết quả cho tới tận bước Output, vi phạm nguyên tắc
+human-gate "duyệt từng shot trước khi ghép MP4" mà mọi asset khác (ảnh/giọng đọc/video từ
+Kho) đều tuân theo. Thêm hành động sinh video NGAY, khớp UX "Tạo ảnh"/"Tạo giọng đọc" đã
+có.
+- **Ràng buộc kiến trúc phải tôn trọng**: `render.py` chỉ ĐỌC pack.json, không bao giờ
+  ghi lại (nguyên tắc đã có từ đầu dự án, `assign_vault_clip` cũng tuân theo — yêu cầu
+  `shot.visual_type=="video"` SẴN thay vì tự đổi). Vì cần đổi `visual_type` từ "image"
+  sang "video" (thứ SỐNG trong pack.json, thuộc quyền `pipeline.py`), endpoint mới KHÔNG
+  tự làm việc này — **frontend gọi 2 API tuần tự**: (1) `PATCH .../visual/shots/{id}`
+  (pipeline.py) đổi `visual_type` sang "video", (2) `POST .../render/shots/{id}/
+  generate-parallax` (render.py, mới) — đọc ẢNH NGUỒN từ `render.json` (path ảnh cũ vẫn
+  còn nguyên vì bước (1) không đụng render.json), chạy
+  `depth_parallax.render_parallax_clip` (tái dùng NGUYÊN module mục 87, không viết logic
+  mới), ghi đè asset của shot thành video thật. Lỗi ở bước (2) → frontend tự PATCH
+  `visual_type` VỀ LẠI "image" (rollback), tránh kẹt shot ở trạng thái nửa vời (đánh dấu
+  video trong pack.json nhưng file thật vẫn là ảnh cũ).
+- Dùng lại `_shot_base_duration` (assembly.py, đã có — ưu tiên độ dài giọng đọc thật) cho
+  duration, `RESOLUTION_MAP`/`RESOLUTION_MAP_VERTICAL` (đã có, chọn theo `project.format`)
+  cho độ phân giải — không phát minh lại quy ước duration/resolution cho use-case
+  single-shot này.
+- Frontend: nút "Tạo video Parallax 2.5D" (btn-primary) đặt cạnh "Xem depth map", CHỈ hiện
+  khi đã chọn 1 trong 4 preset parallax VÀ shot có ảnh sẵn sàng (`visual_status=="ready"`)
+  — dùng NGUYÊN preset/intensity đang chọn trong dropdown/slider đã có (mục 87), không
+  cần picker riêng trong nút.
+- **Verify đã làm**: 3 test mới HTTP end-to-end (đầy đủ đúng luồng frontend thật: PATCH
+  rồi POST) — xác nhận asset cuối là mp4 THẬT (`ffprobe` đọc được `codec_type=video`),
+  `visual_provider="parallax"`, `approved=False`; 2 test lỗi (chưa đổi type / preset sai).
+  Verify UI thật qua CDP trên app đang chạy thật: chọn "Parallax Drift" → bấm nút → đợi
+  ~15s → shot chuyển hẳn sang video, hiện player phát được thật (ảnh bản đồ lịch sử động,
+  đúng ~23s khớp giọng đọc, có điều khiển play/pause/scrubber) — không phải suy đoán từ
+  test cô lập.
+
+**4. "Video từ Kho" báo thiếu ở short-form — đã kiểm tra: KHÔNG PHẢI BUG.** Đọc code xác
+nhận `VaultClipPicker` dùng CHUNG 1 `ShotCard` component cho CẢ long-form lẫn short-form
+(`isVertical` chỉ đổi tỷ lệ khung preview, không rẽ nhánh component khác) — điều kiện hiện
+nút DUY NHẤT là `shot.visual_type === "video"`, không có logic loại trừ theo `format`.
+Verify thật qua CDP trên 1 project short-form thật: `hasCameraMotionSelect: true`,
+`hasParallaxOption: true`, nhưng `hasVideoFromVault: false` — ĐÚNG NHƯ KỲ VỌNG vì mọi shot
+trong project đó đang là kiểu ẢNH (chưa có shot nào đổi sang "video"). Sau khi thêm nút
+"Tạo video Parallax 2.5D" (mục 3), 1 khi shot chuyển sang video (qua nút đó HOẶC tag
+Image/Video thủ công), "Video từ Kho" tự xuất hiện — ĐÚNG cơ chế chung, không cần sửa gì
+thêm riêng cho short-form. Không có thay đổi code nào cho mục này ngoài việc xác nhận.
+
+**Verify tổng**: full `pytest` **468 passed** (465 cũ + 3 mới generate-parallax endpoint),
+`tsc --noEmit` sạch. Restart toàn bộ app + verify LIVE qua Chrome DevTools Protocol cho cả
+4 mục (không chỉ tin test cô lập) — đúng kỷ luật "verify thật" xuyên suốt dự án.
+
+## 89. Dashboard — "Local Services & GPU Monitor" (bật/tắt Ollama/OmniVoice/ComfyUI + tổng quan GPU) (2026-08-27)
+
+**Yêu cầu người dùng**: 1 khu vực ở cuối trang Dashboard hiện trạng thái bật/tắt các local
+model/server + tình trạng dùng GPU + nút bật/tắt từng service — suốt phiên làm việc mọi
+thao tác này đều phải làm thủ công qua terminal.
+
+**Đã verify thật đường dẫn/lệnh khởi động từng service TRƯỚC khi code (không suy đoán)**:
+`C:\Tools\Ollama\ollama.exe serve` (11434), `C:\Tools\OmniVoice\.venv\Scripts\python.exe
+backend/local_servers/omnivoice_server.py --port 8199` (8199),
+`C:\Tools\ComfyUI_extract\ComfyUI_windows_portable\python_embeded\python.exe -s
+ComfyUI\main.py --windows-standalone-build` (8188, đọc trực tiếp từ `run_nvidia_gpu.bat`
+có sẵn trong bản cài). `nvidia-smi` xác nhận chạy được thật trên máy, nhưng
+`--query-compute-apps=pid,used_memory` trả `[N/A]` cho MỌI PID — **xác nhận giới hạn thật
+của Windows WDDM driver mode: không báo VRAM per-process tin cậy được** (khác Linux/TCC)
+— panel chỉ hiện tổng VRAM dùng/tổng + service nào đang giữ GPU context (đối chiếu PID),
+không hứa hẹn breakdown MB/từng service.
+
+**2 bug thật bắt được lúc verify tay từng hàm với service THẬT** (trước khi tin bất kỳ
+unit test mock nào — đúng kỷ luật "verify thật" xuyên suốt dự án):
+1. **Đường dẫn thực thi tương đối không được `subprocess.Popen` tự resolve theo `cwd=`
+   trên Windows** — `start_service("comfyui")` (dùng `start_cmd=["python_embeded\\
+   python.exe", ...]` tương đối, đúng như `run_nvidia_gpu.bat` viết) lỗi thật
+   `[WinError 2] The system cannot find the file specified` dù hàm tự kiểm tra
+   `exe_path.exists()` (đã tự resolve đúng) vẫn qua — vì kết quả resolve đó KHÔNG được
+   dùng lại cho chính lệnh `Popen`, vẫn truyền `svc.start_cmd` gốc (tương đối). Fix: xây
+   `resolved_cmd = [str(exe_path), *svc.start_cmd[1:]]`, dùng biến này cho `Popen`.
+2. **Bản Ollama trên máy này là bản "portable", KHÔNG dùng thư mục model mặc định**
+   (`~/.ollama/models`) — dữ liệu model thật (`moondream`/`nomic-embed-text`/`qwen3`) nằm
+   ở `C:\Tools\Ollama\data`. Tiến trình `ollama.exe serve` gốc (khởi động từ trước, ngoài
+   app) hẳn có biến môi trường `OLLAMA_MODELS` trỏ đúng chỗ này qua 1 wrapper/profile nào
+   đó — `subprocess.Popen` mặc định KHÔNG kế thừa biến này (chỉ kế thừa env của tiến
+   trình backend Python). Verify thật: sau khi `stop_service`+`start_service` mà THIẾU
+   biến này, `curl .../api/tags` trả `{"models":[]}` dù blob model vẫn nguyên trên đĩa —
+   chỉ khi thêm `env={**os.environ, "OLLAMA_MODELS": "C:\\Tools\\Ollama\\data"}` vào
+   `Popen` mới thấy lại đủ 3 model. Thêm field `ServiceDef.extra_env` để xử lý ca này
+   (chỉ Ollama cần, 2 service kia không).
+
+**Backend**: `app/local_services.py` (module mới) — `SERVICES` registry (3 entry cố định,
+HARDCODE đường dẫn theo đúng cách cài trên máy này, khớp cách toàn bộ app đã giả định 1
+máy dev cụ thể — `base_url` mặc định `127.0.0.1:PORT` ở mọi provider local cũng vậy),
+`check_status`/`get_all_statuses` (health check HTTP, không parse body — mỗi service trả
+format khác hẳn nhau), `start_service` (kiểm tra file thực thi tồn tại + CHƯA chạy trước,
+`subprocess.Popen` với `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` để sống sót độc lập
+khỏi backend/Electron, log ra `workspace/service_logs/{name}.log`, KHÔNG đợi health check
+thành công mới trả response — model nạp chậm, trả ngay rồi để frontend tự poll),
+`stop_service` (dùng `psutil` tìm PID đang LISTEN đúng port — KHÔNG dựa vào PID tự lưu,
+vì service có thể được khởi động NGOÀI app, đúng thực tế đã gặp suốt phiên — `terminate()`
+cả tiến trình lẫn `children(recursive=True)` vì Ollama có thể có runner con, `kill()` dự
+phòng nếu còn sống sau 5s), `get_gpu_stats` (2 lệnh `nvidia-smi`, best-effort
+`available:False` nếu không có `nvidia-smi` trên PATH). Mở rộng `app/routers/system.py`
+có sẵn (KHÔNG tạo router mới) — `GET /system/local-services`,
+`POST /system/local-services/{name}/start`, `POST .../stop`.
+`backend/requirements.txt`: ghim tường minh `psutil==7.2.2` (trước chỉ có mặt gián tiếp).
+
+**Frontend**: `frontend/src/components/LocalServicesPanel.tsx` (mới), gắn ở CUỐI
+`Dashboard.tsx` (sau bảng project) — poll `GET /system/local-services` mỗi 5s (dọn
+interval lúc unmount), card GPU (thanh progress VRAM dùng/tổng, utilization%, nhiệt độ,
+hoặc thông báo "không đọc được" nếu `available:false`), 1 hàng/service (chấm trạng thái +
+nhãn "đang giữ GPU" nếu có + nút "Bật"/"Tắt"). Nút "Tắt" có `confirm()` cảnh báo có thể
+làm gián đoạn tiến trình đang chạy (cùng pattern `handleDelete` xoá kênh đã dùng ở
+Dashboard.tsx).
+
+**Verify đã làm**: 15 test mock (`test_local_services.py`) — 2 test là REGRESSION TEST
+trực tiếp cho 2 bug thật vừa bắt được ở trên (xác nhận `Popen` nhận đúng đường dẫn tuyệt
+đối đã resolve, xác nhận `env` truyền đúng `extra_env`). **Trước đó đã verify TAY từng
+hàm với CHÍNH 3 service thật đang chạy trên máy** (không chỉ tin mock): stop+start thật
+Ollama (xác nhận cả 3 model hiện lại đúng sau khi thêm `OLLAMA_MODELS`), stop+start thật
+OmniVoice (2 lượt, bắt được cả hiện tượng OmniVoice tự die ngẫu nhiên đã ghi nhận ở mục
+88), start thật ComfyUI lần đầu tiên trong toàn bộ phiên làm việc (trước đó chưa từng kiểm
+tra được vì luôn tắt) — xác nhận `/system_stats` trả về đúng sau ~15s khởi động.
+Sau đó verify UI thật qua Chrome DevTools Protocol trên app đang chạy: panel hiện đúng cả
+3 service + GPU thật (2.8/15.9GB, 0% util, 35°C), bấm "Tắt" OmniVoice → nút đổi thành
+"Bật" + VRAM giảm, bấm "Bật" lại → "Đang xử lý..." → server sống lại thật (`curl
+.../health` trả `model_loaded:true`) — vòng lặp đầy đủ, không suy đoán từ test cô lập.
+Full `pytest` **483 passed** (468 cũ + 15 mới), `tsc --noEmit` sạch.
+
+**Giới hạn đã biết, ghi rõ không giấu**: đường dẫn `SERVICES` hardcode theo máy dev này,
+đổi máy cần sửa code; không có breakdown VRAM theo từng service (giới hạn thật Windows
+WDDM); "Tắt" dừng HẲN process (không chỉ unload model khỏi VRAM) — đơn giản hơn, khớp
+nghĩa đen yêu cầu, đánh đổi là "Bật" lại chậm hơn vài giây/chục giây do nạp lại model.
+
+## 90. Bug thật: mất ~2s giọng đọc ở SHOT CUỐI CÙNG khi ghép video nhiều transition — `_xfade_chain` cộng dồn thời lượng LÝ THUYẾT thay vì đo thật (2026-08-27)
+
+**Người dùng báo**: video ghép cho project "Nguyễn Trãi và án Lệ Chi Viên..." (29 shot,
+16 run/15 ranh giới transition — dissolve/fade rải khắp video) bị mất khoảng 2 giây giọng
+đọc ở shot cuối cùng (B29) sau khi ghép.
+
+**Verify thật, không suy đoán**: dùng cross-correlation (numpy, tự viết — không có scipy
+trong `.venv`) giữa audio nguồn `B29.wav` (12.66s) và audio trong `final.mp4` đã ghép
+(bản người dùng đã xem, `renders/final.mp4` mtime 2026-08-26 01:12) — LẦN ĐẦU dùng
+correlation "full" (không giới hạn lag hợp lệ) cho kết quả GIẢ (match yếu ở rìa cửa sổ,
+dễ hiểu lầm "còn nguyên") — sửa lại giới hạn `lag ∈ [0, len(haystack)-len(needle)]` mới
+lộ ra: vị trí ĐÚNG của 3s cuối narration (tính từ vị trí khớp mạnh của 3s đầu, score 0.34)
+sẽ nằm NGOÀI đoạn 25s cuối file đã trích — tức file thật sự KẾT THÚC SỚM hơn ĐÚNG lúc
+narration còn ~2.4s nữa mới xong. Xác nhận thêm: dựng lại (re-run) `assemble_video()` cho
+CHÍNH project này (giữ nguyên code, `Path.unlink` monkeypatch thành no-op để giữ lại toàn
+bộ file trung gian `_xfade_chain` sinh ra) — đo trực tiếp `body_xblend15.mp4` (bước merge
+CUỐI, gộp shot B29 vào phần thân đã ghép) dài **15.336s** thay vì 13.26s lý thuyết
+(`narration_floor 12.66s + lead_in 0.6s`) — lệch **+2.08s**, đúng cỡ với phần bị mất.
+
+**Root cause**: `_xfade_chain` (mỗi lần merge 2 run bằng `xfade`/`acrossfade`) theo dõi độ
+dài phần đã ghép (`current_duration`) bằng CÁCH CỘNG DỒN LÝ THUYẾT
+(`current_duration += run_durations[i] - t`) từ `durations[]` — giá trị DỰ ĐỊNH tính từ
+kịch bản/giọng đọc/reflow, KHÔNG PHẢI đo thật từ file `current_path` sau mỗi bước
+`_concat_fast`/`_build_segment`/`xfade` trước đó. Mỗi bước encode/stream-copy có thể lệch
+NHẸ so với lý thuyết (làm tròn frame ở `-t`, GOP/keyframe alignment của encoder, hành vi
+nội bộ filter `acrossfade`/`xfade` khi 1 input ngắn hơn hẳn input kia) — sai số NHỎ nhưng
+CỘNG DỒN qua nhiều lần merge (project này: 15 lần). Khi `current_duration` (lý thuyết)
+VƯỢT quá thời lượng THẬT của `current_path`, `head_keep = current_duration - t` tính ra
+LỚN HƠN nội dung thật sẵn có — `-ss head_keep` ở lệnh `blend_cmd` SEEK QUÁ điểm đó, ăn mất
+1 phần cuối (kể cả đệm lặng bảo vệ giọng đọc `narration_lead_out_sec`, rồi tới cả narration
+thật) của run TRƯỚC ranh giới. Rõ nhất ở LẦN MERGE CUỐI CÙNG (gộp shot cuối) vì không còn
+run nào phía sau để "che" phần đã mất — mọi lần merge giữa video vẫn lệch y hệt nhưng ít
+ai để ý vì nội dung mất nằm giữa 2 đoạn liền mạch, không lộ ra thành "hụt cuối video" rõ
+rệt như shot cuối.
+
+Test lại NHIỀU LẦN với ĐÚNG project + code cũ cho kết quả KHÔNG ổn định (1 lần dựng lại
+KHÔNG tái hiện bug — trôi lệch đi hướng ngược lại, vô hại) — xác nhận đây là lỗi CỘNG DỒN
+SAI SỐ (không phải lỗi logic cứng luôn-luôn-sai), giải thích vì sao chỉ project nhiều
+transition + video dài mới lộ rõ, và vì sao không tái hiện được 100% mỗi lần thử.
+
+**Fix**: đo lại `current_duration` THẬT bằng `_probe_audio_duration_sec` (ffprobe,
+`format=duration`) ngay ĐẦU mỗi vòng lặp `_xfade_chain`, TRƯỚC khi tính `t`/`head_keep` —
+tự sửa sai số tích luỹ ở MỌI bước thay vì chỉ tin phép cộng lý thuyết, loại bỏ khả năng
+trôi lệch bất kể nguyên nhân gốc (làm tròn/encoder/filter) là gì. Fallback về giá trị lý
+thuyết nếu ffprobe lỗi/thiếu binary (không chặn luồng ghép, cùng nguyên tắc
+`probe_duration_sec` mọi nơi khác trong `assembly.py`). Chỉ sửa `app/render/assembly.py`
+(`_xfade_chain`), không đổi API/schema nào.
+
+**Verify sau fix**: dựng lại THẬT project của người dùng (`assemble_video()` trực tiếp,
+không qua mock) — `body_xblend15.mp4`/tương đương giờ đúng lý thuyết, cross-correlation
+(cùng script, giới hạn lag hợp lệ) xác nhận TOÀN BỘ 12.66s narration B29 có mặt, đúng vị
+trí, kết thúc ĐÚNG lúc file kết thúc (sai lệch <40ms, trong ngưỡng làm tròn codec) — thay
+final.mp4 cũ (thiếu ~2s) bằng bản đã ghép lại đúng cho project thật của người dùng. Full
+`pytest tests/test_render.py` **109 passed**, không regression.
+
+## 91. Kho Tài Nguyên — tách thành màn riêng ở sidebar, gắn nhiều kênh dạng tag, thanh tiến trình thật (CHANGE_Semantic_BRoll_Asset_Vault.md, 2026-08-27)
+
+**Yêu cầu người dùng**: Asset Vault (trước đây là 1 TAB bên trong dialog "Sửa BrandProfile"
+của từng kênh, kho RIÊNG mỗi kênh) đổi thành 1 MÀN RIÊNG có entry point ở sidebar (dưới
+Dashboard), hiện TẤT CẢ video/clip đã cắt từ MỌI kênh, lọc theo kênh; vẫn cho nhập video
+gốc như cũ nhưng phải gắn tên Kênh (dạng TAG, 1 video gắn được nhiều kênh) TRƯỚC khi cắt
+cảnh; có thanh tiến trình thật khi tải video và khi cắt cảnh.
+
+### Data model — bảng m2m đầu tiên của dự án
+
+`raw_video_channel` (`raw_video_id`, `channel_id`, cả 2 PK) — THAY THẾ cột `channel_id`
+đơn trước đây trên `raw_video`. `processed_clip` bỏ hẳn `channel_id` riêng — kênh của 1
+clip = kênh của `raw_video` cha, lấy qua JOIN (`asset_vault/matching.py::_clips_for_channel`).
+Migration 1 lần lúc backend khởi động (`app/asset_vault/migration.py`, gọi từ `main.py`
+ngay sau `create_all()`) — **bug thật gặp lúc build**: `ALTER TABLE raw_video DROP COLUMN
+channel_id` bị SQLite từ chối (`unknown column "channel_id" in foreign key definition`) vì
+cột đó nằm trong 1 `FOREIGN KEY` constraint — SQLite (xác nhận bản 3.45.3, trên ngưỡng hỗ
+trợ DROP COLUMN từ 3.35) có giới hạn RIÊNG cho cột thuộc FK. Fix bằng pattern "12-step"
+chuẩn của SQLite: rename bảng cũ → `create_all()` tạo bảng mới đúng schema ORM → copy dữ
+liệu qua bằng danh sách cột tường minh (loại `channel_id`) → `INSERT OR IGNORE` vào
+`raw_video_channel` → xoá bảng cũ. Verify thật trên chính DB dev (không phải DB test) đã có
+sẵn dữ liệu — xác nhận dữ liệu + file thật được giữ nguyên qua 3 lần chạy lại liên tiếp
+(idempotent).
+
+### Storage + Chroma — chuyển từ theo-từng-kênh sang TOÀN CỤC
+
+`asset_vault_raw_dir()`/`asset_vault_clips_dir()`/`asset_vault_chroma_dir()` (trong
+`config.py`) bỏ tham số `channel_id`, dời sang `workspace/asset_vault/` (sibling của
+`LIBRARY_DIR`, tiền lệ đã có cho `CreativeAsset`). Chroma đổi từ 1 `PersistentClient`/kênh
+sang 1 client TOÀN CỤC — scoping-theo-kênh chuyển hẳn từ "tách vật lý DB Chroma" sang
+"filter SQL sau khi overfetch" (`query_similar_clips(embedding, top_k*10)` — tăng hệ số
+overfetch từ `*3` lên `*10` vì Chroma không còn tự lọc theo kênh, cần dư nhiều hơn để lọc
+lại qua JOIN `raw_video_channel`).
+
+### Tiến trình thật (trước đây chỉ có 4 trạng thái thô, không có %)
+
+- **Tải URL** (`ingest.py::download_raw_video_from_url`): dùng `yt_dlp` `progress_hooks`
+  (tính năng có sẵn của yt-dlp, trước đây chưa từng dùng) — hook đọc `downloaded_bytes`/
+  `total_bytes`, ghi vào `progress_current`/`progress_total`, throttle commit DB (chỉ ghi
+  cách nhau ≥0.4s, không phải mỗi callback — tránh spam ghi). Đổi từ chạy ĐỒNG BỘ trong
+  request sang chạy nền qua `BackgroundTasks` (`create_raw_video_placeholder_for_url` tạo
+  hàng NGAY, `download_raw_video_from_url` tải THẬT trong task nền) — để frontend poll
+  được tiến trình giữa chừng thay vì phải đợi cả request.
+- **Cắt cảnh tự động** (`ingest.py::auto_detect_scenes`): 2 giai đoạn báo riêng — (1) PHÁT
+  HIỆN cảnh dùng `SceneManager.detect_scenes(callback=...)` (đã verify thật API này gọi
+  MỖI FRAME lúc quét với `(frame_ndarray, FrameTimecode)`, không suy đoán từ tài liệu),
+  đọc `timecode.frame_num`/`video.duration.frame_num` làm current/total; (2) CẮT từng clip,
+  cập nhật `progress_current=i, progress_total=n_scenes` SAU MỖI clip. Verify thật bằng
+  video test 3 cảnh màu tách biệt (ffmpeg concat) — bắt snapshot progress thật qua
+  monkeypatch `db.commit`, xác nhận đúng `current=74/total=218` (frame) ở giai đoạn phát
+  hiện và đúng `0/3→1/3→2/3→3/3` ở giai đoạn cắt.
+
+### Backend router — API TOÀN CỤC (`/asset-vault/...`, bỏ tiền tố `/channels/{channel_id}/`)
+
+`GET /asset-vault/raw?channel_id=` (lọc tuỳ chọn), `POST /asset-vault/raw/upload`
+(`channel_ids` JSON-string bắt buộc ≥1 phần tử qua `Form`), `POST .../import-url`
+(`channel_ids: list[str]` bắt buộc trong body), `PATCH /asset-vault/raw/{id}/channels`
+(mới — sửa lại tag kênh sau khi đã tạo, ghi đè toàn bộ danh sách), `GET /asset-vault/clips
+?channel_id=` (lọc qua JOIN `raw_video_channel` khi có). `render.py::assign_vault_clip` và
+`guardrail.py::_check_rights_warnings` (2 chỗ NGOÀI router `asset_vault.py` trực tiếp dùng
+`ProcessedClip.channel_id`/`RawVideo.channel_id`) được sửa theo — tìm bằng
+`grep -rn "ProcessedClip\.channel_id\|RawVideo\.channel_id" backend/app` NGAY sau khi đổi
+model, sửa trước khi chạy test (không đợi test tự lộ ra).
+
+### Frontend
+
+`frontend/src/screens/AssetVault.tsx` (mới, top-level, mirror `Library.tsx`) thay cho
+`AssetVaultTab.tsx` (xoá hẳn) — dropdown lọc kênh, multi-select checkbox kênh bắt buộc
+≥1 trong form upload/import-url, chip hiển thị kênh đã gắn trên mỗi raw video (+ nút "Sửa
+tag kênh" gọi PATCH), thanh `<progress>` thật đọc `progress_current`/`progress_total`/
+`progress_label` (tái dùng đúng interval poll 2.5s có sẵn khi status đang xử lý).
+`AppContext.tsx` thêm `View="asset_vault"` + `goAssetVault()`; `Sidebar.tsx` thêm entry
+"Kho Tài nguyên" NGAY DƯỚI "Dashboard" (icon riêng — hộp+tam giác kiểu ổ băng, KHÔNG dùng
+lại glyph lưới-4-ô của Dashboard để tránh 2 icon giống hệt nhau); `App.tsx` thêm route.
+**Dọn dẹp đường vào cũ** (đã lỗi thời sau khi có màn riêng): `ChannelDialog.tsx` bỏ hẳn cơ
+chế tab (`activeTab`/`initialTab`, thêm ở mục 88) — chỉ còn ĐÚNG "Sửa BrandProfile" như
+trước; `Dashboard.tsx` bỏ icon "Kho Tài nguyên" thứ 2 ở channel card (cũng thêm ở mục 88),
+chỉ giữ icon "Sửa BrandProfile" — theo đúng yêu cầu "Kho tài nguyên CẦN LÀ 1 màn riêng"
+(thay thế, không phụ thêm cạnh dialog cũ).
+
+### Bug thật bắt được lúc verify UI qua CDP (KHÔNG phải test mock)
+
+Verify sống bằng cách chạy 2 Electron instance song song (`--remote-debugging-port=9222`,
+KHÔNG đụng cửa sổ chính người dùng đang mở — Electron app này không khoá single-instance)
+trỏ vào ĐÚNG workspace DB thật: upload 1 video test thật, gắn 2 kênh, cắt cảnh tự động ra
+2 clip đúng kế thừa cả 2 tag kênh, đổi dropdown lọc kênh xác nhận đúng danh sách lọc, sửa
+tag kênh (bỏ bớt 1 kênh) xác nhận video biến mất khỏi bộ lọc kênh vừa bỏ — toàn bộ luồng
+chính hoạt động đúng.
+
+Lúc dọn dữ liệu test (bấm "Xoá" trên video gốc — CỐ Ý không cascade xoá `ProcessedClip`
+con, xem `specs/02_database.md`), phát hiện **`GET /asset-vault/clips` crash 500**
+(`AttributeError: 'NoneType' object has no attribute 'channels'`) — `_clip_out` gọi
+`_channels_out(c.raw_video)` nhưng `c.raw_video` là `None` cho clip mồ côi (raw_video cha
+đã bị xoá, tình huống HOÀN TOÀN hợp lệ theo thiết kế, không phải edge case hiếm). Fix:
+`_channels_out` trả `[]` khi `r is None` thay vì crash. Thêm regression test
+`test_list_clips_survives_orphaned_clip_after_raw_video_deleted` (tạo raw video thật, xoá,
+xác nhận list clip vẫn 200 với `channels: []`). Restart lại Electron debug instance
+(backend launch qua `backend-launcher.ts` KHÔNG có `--reload`, cần restart để nạp code
+mới), verify lại đúng luồng gây lỗi (xoá raw video → list clip) không còn crash.
+
+**Verify**: 45 test `test_asset_vault.py` (viết lại HOÀN TOÀN cho API toàn cục — helper
+seed mới tạo `RawVideo.channels=[...]` rồi `ProcessedClip` trỏ qua `raw_video_id`, không
+còn kwarg `channel_id` trực tiếp), full `pytest` **493 passed** (không regression ngoài
+file này), `tsc --noEmit` sạch. Dữ liệu test tạo ra lúc verify UI đã dọn sạch khỏi DB thật
+(qua API, không xoá tay file/DB).
+
+## 92. Revert HOÀN TOÀN tính năng "2.5D Depth-Parallax" (CHANGE_2.5D_Parallax_Synthesizer.md) theo yêu cầu người dùng (2026-08-27)
+
+Người dùng yêu cầu bỏ hẳn tính năng 2.5D Depth-Parallax đã build ở mục 87 (đổi kỹ thuật từ
+đề xuất gốc Qwen-Image-Layered sang depth-map ONNX nhẹ) + phần mở rộng ở mục 88/91 (nút
+"Tạo video Parallax 2.5D" riêng từng shot, cường độ mặc định theo BrandProfile). Xoá TOÀN
+BỘ code + model liên quan, KHÔNG chỉ tắt tính năng:
+
+**Backend**: xoá hẳn `app/render/depth_parallax.py` (module ước lượng depth map ONNX +
+displacement/xfade compositing) và `tests/test_depth_parallax.py` (16 test). Xoá model đã
+tải về `app/render/models/depth_anything_v2_small_int8.onnx` (~27MB, `onnxruntime`/
+`opencv-python` VẪN giữ trong `requirements.txt` — xác nhận vẫn cần cho Piper TTS
+(`tts_piper.py`, ONNX runtime cho model VITS) và PySceneDetect Asset Vault, KHÔNG phải
+dependency riêng của parallax, tránh xoá nhầm). `app/render/camera_motion.py` bỏ 4 preset
+`parallax_*` khỏi `CAMERA_MOTIONS`, bỏ `PARALLAX_MOTIONS`, bỏ `eased_progress_numeric`
+(chỉ dùng bởi depth_parallax). `app/render/assembly.py::_build_segment` bỏ nhánh rẽ
+`PARALLAX_MOTIONS`/tham số `parallax_cache_dir`/`parallax_intensity`; `assemble_video` bỏ
+tính `parallax_intensity` per-shot. `app/routers/render.py` xoá hẳn endpoint `POST
+.../generate-parallax` (`GenerateParallaxBody`). `app/routers/pipeline.py` xoá field
+`ShotPatchBody.parallax_intensity`, endpoint `POST .../apply-parallax-all`, endpoint `GET
+.../depth-preview`. `app/schemas/__init__.py` xoá `BrandProfile.parallax_intensity_default`
+và `Shot.parallax_intensity`.
+
+**Frontend**: `VisualStudio.tsx` xoá 4 option `parallax_*` khỏi `CAMERA_MOTION_OPTIONS`,
+xoá `PARALLAX_MOTIONS` set, state `parallaxIntensityDefault`/hiệu ứng fetch từ
+BrandProfile, hàm `generateParallaxVideo`/`convertAllToParallax`, nút "Chuyển tất cả shot
+ảnh sang 2.5D Parallax" (OverflowMenu), slider "Depth Intensity" + nút "Tạo video Parallax
+2.5D"/"Xem depth map" trong `ShotCard`. `ChannelDialog.tsx` xoá field
+`parallaxIntensityDefault` (Draft) + ô nhập "Cường độ mặc định 2.5D Depth-Parallax".
+`api/types.ts`/`api/client.ts` xoá `parallax_intensity_default`/`parallax_intensity` khỏi
+type `BrandProfile`/`Shot`, xoá `applyParallaxAll`/`generateParallax`/`depthPreviewUrl`.
+
+**Docs**: `specs/04_data_schemas.md` thay đoạn mô tả `parallax_intensity_default`/
+`Shot.parallax_intensity` bằng ghi chú "đã REVERT" (không xoá hẳn mục IMPLEMENTATION_
+REPORT.md mục 87 — giữ làm lịch sử build/lý do đổi kỹ thuật, đúng quy ước append-only đã
+dùng xuyên suốt tài liệu này). `.gitignore` bỏ dòng ignore riêng cho
+`backend/app/render/models/` (thư mục không còn được tạo ra nữa).
+
+**Verify**: `grep -rli parallax` toàn repo (trừ `.claude/worktrees/` — agent worktree
+riêng, không thuộc phạm vi) xác nhận sạch (chỉ còn 1 dòng comment vô hại ở
+`camera_motion.py` dùng chữ "parallax" mô tả hiệu ứng "orbit" chung chung, không liên quan
+tính năng đã xoá). Full `pytest` **477 passed** (493 cũ − 16 test đã xoá cùng module,
+KHÔNG có test nào khác fail). `tsc --noEmit` sạch.
+
+## 93. Bug thật: `GET /asset-vault/clips` crash khi raw_video lỗi gắn nhãn không có nút thử lại (2026-08-27)
+
+**Người dùng báo**: video gốc `raw_1787841423521` báo "Lỗi gắn nhãn clip
+clip_1787841553477: [WinError 10061]" (Vision/Embedding provider — Ollama — chưa chạy lúc
+đó) — sau khi bật lại Ollama, KHÔNG có nút nào để thử gắn nhãn lại, chỉ thấy dòng lỗi tĩnh.
+
+**Fix UI**: `AssetVault.tsx::RawLibrarySection` — khi `status==="error"`, kiểm tra raw
+video ĐÃ có clip nào chưa (nghĩa là cắt cảnh thành công, chỉ gắn nhãn lỗi) để hiện ĐÚNG nút
+— "Gắn nhãn lại" (gọi lại `caption-all`) nếu đã có clip, "Cắt cảnh lại" (gọi lại
+`detect-scenes`) nếu chưa có clip nào (nghĩa là chính bước cắt cảnh mới là bước lỗi).
+
+**Fix backend đi kèm** (`ingest.py`): cả `caption_all_pending_clips` VÀ `auto_detect_scenes`
+trước đây chỉ GHI `error_message` khi lỗi, KHÔNG XOÁ khi thử lại thành công — retry thành
+công vẫn để lại thông báo lỗi CŨ (chỉ không hiện ra UI vì gate theo `status==="error"`,
+nhưng vẫn là dữ liệu sai, tiềm ẩn hiện lại nếu logic hiển thị đổi sau này). Sửa: xoá
+`error_message` khi retry thành công ở CẢ 2 hàm.
+
+**Verify sống ngay trên project thật của người dùng** (không phải test giả lập) — dựng lại
+đúng lỗi qua backend đang chạy thật của họ (tìm cổng thật qua `Get-CimInstance
+Win32_Process`, không đoán), xác nhận Ollama đã reachable (`curl 11434/v1/models` → 200),
+gọi lại `caption-all` trực tiếp — cả 34 clip của video đó gắn nhãn thành công thật (đọc lại
+caption qua API, không suy đoán), `status` chuyển `indexed`, dọn `error_message` cũ còn sót.
+Full `pytest` **477 passed**, không regression.
+
+## 94. Bảng "Clip đã cắt" (Processed Clip Library) — đổi từ card-grid sang table đầy đủ cột + bộ lọc mở rộng + bulk gắn nhãn AI + panel xem trước (2026-08-27)
+
+**Yêu cầu người dùng**: đổi phần "Clip đã cắt" ở Kho Tài nguyên từ dạng thẻ (card) sang
+bảng (table) đầy đủ cột thông tin + tên video nguồn; thêm điều kiện lọc (kênh/chưa gắn
+nhãn/trạng thái); cho phép select all/tick từng clip để BULK gắn nhãn; cho phép thêm tag
+kênh (retag) ngay tại bảng; nút Play mở sidebar xem trước; vẫn gắn nhãn được từng clip.
+
+### Backend — `ProcessedClip.caption_error` (cột mới) + bulk gắn nhãn theo lựa chọn tự do
+
+Thêm `caption_error: TEXT, nullable` vào `ProcessedClip` (migrate qua `_add_missing_columns`
+đã tổng quát hoá — trước chỉ xử lý `raw_video`, giờ nhận dict `{table: {cột: kiểu}}` cho cả
+`processed_clip`) — cần vì bulk gắn nhãn theo LỰA CHỌN TỰ DO có thể trải NHIỀU `raw_video`
+khác nhau, không có 1 hàng RawVideo chung để gắn cờ lỗi như luồng "Gắn nhãn"/"Gắn nhãn lại"
+cũ (scope theo đúng 1 raw_video). `ingest.py` thêm `caption_clips(db, clips) -> (ok, err)`
+— hàm dùng chung, lỗi/thành công ghi thẳng vào `caption_error` của TỪNG clip; refactor
+`caption_all_pending_clips` gọi lại hàm này thay vì lặp tay. Router mới `POST
+/asset-vault/clips/caption-batch` (`clip_ids: list[str]`, 400 nếu rỗng/chứa id không tồn
+tại) — chạy nền qua `BackgroundTasks`, frontend poll `GET .../clips` như thường lệ (mỗi
+clip tự commit ngay khi xong, không đợi cả batch). `GET /asset-vault/clips` thêm 2 filter
+mới: `unlabeled=true` (caption rỗng) và `raw_status=` (JOIN lọc theo trạng thái raw_video
+cha). `_clip_out` thêm `raw_video_name` (ưu tiên `import_note`, rồi tên file cuối của
+`source_url`, cuối cùng `id`), `raw_video_status`, `caption_error`. `PATCH
+/asset-vault/clips/{id}` xoá `caption_error` khi người dùng tự sửa caption tay (lỗi AI lần
+trước không còn ý nghĩa).
+
+### Frontend — bảng đầy đủ + filter bar riêng + panel xem trước
+
+`AssetVault.tsx::ProcessedClipLibrarySection` viết lại hoàn toàn:
+- **Bảng** (không còn grid card) — cột: checkbox, Play, Video nguồn, Kênh (chip + nút "Sửa
+  tag kênh" tái dùng `RawChannelRetag` đã có, tra `RawVideo` qua `raw_video_id`), Caption
+  (click-to-edit tại chỗ), Tags/Mood, Rights (dropdown), Thời lượng, Độ phân giải, Dùng,
+  Trạng thái (badge trạng thái raw_video cha + chỉ báo "Đang gắn nhãn.../Lỗi gắn nhãn" khi
+  có), Ngày tạo, Hành động (Tắt/Bật, Xoá). Bọc `overflow-x:auto` (nhiều cột, tránh vỡ layout
+  ngang trên màn hẹp).
+- **Filter bar riêng, ĐỘC LẬP khỏi dropdown kênh Ở ĐẦU TRANG** (dropdown đầu trang giờ chỉ
+  còn scope cho "Video gốc (Raw Library)") — kênh, trạng thái rights (đã có), trạng thái
+  video gốc (mới), video gốc (đã có, giờ hiện tên thay vì id kỹ thuật), checkbox "Chưa gắn
+  nhãn" (mới). Lọc HOÀN TOÀN client-side (mọi field cần đã có sẵn trên `ProcessedClip` từ
+  BE — `channels`/`raw_video_status`/`caption` — không cần round-trip riêng cho từng filter,
+  đơn giản hơn, đúng tinh thần CLAUDE.md "không over-engineer" cho quy mô dữ liệu 1 người
+  dùng). Đổi luôn cách `AssetVault` cha fetch `clips` — bỏ hẳn tham số `channel_id` khi gọi
+  `listProcessedClips()` (fetch TOÀN BỘ, không còn lệ thuộc dropdown đầu trang).
+- **Select all / tick từng clip** (đã có) — nút bulk MỚI "Gắn nhãn (AI)" gọi
+  `api.captionClipsBatch`, tự thêm các clip vừa gửi vào `pendingCaptionIds` rồi POLL nhẹ
+  (2s/lần, tái dùng `onChanged` của cha) tới khi MỌI id trong đó đã có `caption` hoặc
+  `caption_error` mới — suy tiến trình TRỰC TIẾP từ dữ liệu clip đã có, KHÔNG cần thêm 1
+  field trạng thái job riêng ở BE (đơn giản hơn, đủ dùng cho single-user).
+- **Panel xem trước** (`ClipPreviewPanel`, mới) — trượt vào từ MÉP PHẢI màn hình khi bấm
+  nút Play (icon tam giác) ở 1 hàng, hiện `<video controls autoPlay>` + caption đầy đủ +
+  kênh + rights + metadata. Tự chứa (không dùng chung `RightPanel.tsx` — component đó gắn
+  chặt vào layout `ProjectView`, không hợp với màn top-level). Dựng từ `.dialog-backdrop`/
+  `.dialog` có sẵn nhưng ĐÈ `display:flex;justifyContent:flex-end` (class gốc dùng CSS Grid
+  `place-items:center` — `justify-content` không có tác dụng thật trên grid 1-item, phải ép
+  hẳn `display:flex` mới định vị được sát mép phải).
+
+**Verify**: 7 test backend mới (`caption_clips` trải nhiều raw_video + lỗi riêng từng clip,
+endpoint `caption-batch` 400 khi rỗng/id lạ + thành công thật qua `respx` mock, filter
+`unlabeled`/`raw_status`, `raw_video_name`/`raw_video_status` xuất hiện đúng trong response)
+— bắt được 1 lỗi test tự gây (dimension embedding lệch giữa các test dùng CHUNG 1 Chroma
+collection session-scoped, Chroma từ chối thật "expecting dimension of 2, got 1"), sửa
+khớp dimension các test khác. Full `pytest` **484 passed**, `tsc --noEmit` sạch.
+
+**Verify UI SỐNG qua CDP trên đúng dữ liệu thật** (35 clip thật của `raw_1787841423521`,
+không phải data giả lập) — mở bảng, xác nhận đủ cột + dữ liệu thật hiện đúng; bấm Play →
+panel xem trước trượt vào từ phải, hiện đúng video/caption/kênh; tick "Chưa gắn nhãn" → lọc
+đúng còn 4 clip rỗng caption; chọn tất cả 4 + bấm "Gắn nhãn (AI)" → xác nhận qua API TRỰC
+TIẾP cả 4 đều được gắn caption thật (không suy đoán, đọc lại nội dung caption thật của model
+Vision); đổi dropdown kênh RIÊNG của bảng clip (độc lập dropdown đầu trang) sang kênh không
+có clip nào → đúng 0 kết quả, dropdown đầu trang KHÔNG bị ảnh hưởng (xác nhận tách biệt 2
+bộ lọc đúng như thiết kế).
+
+## 95. 3 phản hồi người dùng: xác nhận cắt cảnh/gắn nhãn KHÔNG tự động, nút "Mở thư mục" lưu trữ thật, fix bảng bị che khi thu hẹp cửa sổ + audit toàn app (2026-08-27)
+
+**Câu hỏi 1 — trả lời, không phải bug**: cắt cảnh (`auto_detect_scenes`) và gắn nhãn
+(`caption_all_pending_clips`/`caption_clips`) KHÔNG bao giờ tự chạy ngay sau khi upload/tải
+video — xác nhận qua đọc code (`import_raw_video_upload`/`download_raw_video_from_url` chỉ
+đặt `status`, không gọi 2 hàm trên) — đúng nguyên tắc #3 CLAUDE.md ("mỗi bước là hành động
+rõ ràng người dùng tự bấm"). Người dùng LUÔN phải tự bấm "Cắt cảnh tự động" rồi "Gắn nhãn"
+(hoặc bulk "Gắn nhãn (AI)" mới ở mục 94) cho từng video.
+
+### Nút "Mở thư mục" lưu trữ thật (video gốc + clip đã cắt)
+
+Backend: `GET /asset-vault/folders` trả `{raw_dir, clips_dir}` (đường dẫn tuyệt đối THẬT,
+`asset_vault_raw_dir()`/`asset_vault_clips_dir()` tự đảm bảo thư mục tồn tại). Electron: IPC
+mới `open-folder` (`main.ts`, dùng `shell.openPath` — trả chuỗi lỗi thay vì throw, convert
+thành `Error` để renderer bắt bằng try/catch quen thuộc), expose qua `preload.ts::
+studioflowNative.openFolder` (cùng bridge với `chooseFolder` có sẵn — chỉ tồn tại khi chạy
+Electron thật, ẩn nút khi chạy dev server thuần trình duyệt, cùng pattern `hasNativePicker`
+đã dùng ở OutputCenter.tsx). Frontend: `OpenFolderButton` (mới, `AssetVault.tsx`) — 2 nút
+nhỏ cạnh tiêu đề "Video gốc"/"Clip đã cắt", lấy đường dẫn LƯỜI (lúc bấm, không fetch sẵn mỗi
+lần mở màn — hành động hiếm dùng).
+
+**Verify sống qua CDP** — click thật cả 2 nút, xác nhận qua `Shell.Application` COM
+(PowerShell) rằng Explorer THẬT ĐÃ MỞ đúng 2 thư mục (`workspace/asset_vault/raw` và
+`workspace/asset_vault/clips`), không chỉ suy đoán từ code — đóng lại 2 cửa sổ test sau khi
+xác nhận. 1 test backend mới xác nhận cả 2 đường dẫn tồn tại thật trên đĩa.
+
+### Bug thật: bảng "Clip đã cắt" bị che/cắt mất khi thu hẹp cửa sổ, không trượt ngang được
+
+**Root cause** (xác nhận thật qua CDP, không suy đoán) — `AssetVault.tsx`'s root container
+là 1 flex ITEM của Shell (`App.tsx`, `display:flex` hàng ngang chứa Sidebar + màn hiện tại)
+nhưng KHÔNG có `min-width:0` — mặc định flex item không co xuống dưới kích thước nội dung
+tối thiểu ("min-content"), nên bảng nhiều cột (bảng Clip đã cắt mới ở mục 94) ép RỘNG RA cả
+container cha thay vì kích hoạt cuộn ngang CỤC BỘ đã có sẵn (`overflowX:"auto"` bọc
+`<table>`) — đúng triệu chứng người dùng báo ("bị che mất, không trượt ngang được").
+
+Verify bằng CDP `Emulation.setDeviceMetricsOverride` (thu hẹp viewport còn 900px) — TRƯỚC
+fix: `document.documentElement.scrollWidth` (900) so với `clientWidth` (900) khớp nhau tại
+mức container ngoài cùng NHƯNG cột cuối bảng bị cắt mất, không có cách nào cuộn tới; SAU
+fix (thêm `minWidth:0` vào root `AssetVault.tsx`): đo trực tiếp — `table` wrapper có
+`scrollWidth:1173` vs `clientWidth:590` (đúng như kỳ vọng, bảng RỘNG hơn khung nhìn) +
+`overflowX:"auto"` hoạt động — cuộn `wrapper.scrollLeft=400` bằng script thật, chụp lại,
+xác nhận các cột trước đó bị ẩn (TAGS/MOOD, RIGHTS, THỜI LƯỢNG...) hiện ra đúng, còn
+`document.documentElement.scrollWidth` vẫn khớp `clientWidth` (900) — trang KHÔNG bị vỡ
+layout, chỉ bảng cuộn cục bộ đúng ý đồ thiết kế.
+
+**Audit toàn app** (theo yêu cầu người dùng) — grep mọi `<table` trong `frontend/src` (6
+chỗ: `AssetVault.tsx` đã fix, `Dashboard.tsx`, `Trash.tsx` ×2, `settings/AuditLogSettings.
+tsx`, `settings/BillingSettings.tsx`) — KHÔNG chỗ nào có wrapper `overflowX:auto` trước đó.
+Bọc lại toàn bộ + thêm `minWidth:0` vào root của MỌI màn top-level còn thiếu (`Dashboard.
+tsx`, `Library.tsx`, `Trash.tsx`, `settings/SettingsShell.tsx` — cả 2 tầng flex row của
+riêng màn Cài đặt). `ProjectView.tsx` đã có sẵn `minWidth:0` đúng chỗ từ trước (không cần
+sửa) — có thể là bài học đã áp dụng khi build màn đó, chỉ chưa lan ra các màn sau này.
+
+**Verify**: `tsc --noEmit` sạch cả frontend lẫn electron (`main.ts`/`preload.ts` biên dịch
+qua `tsc -p tsconfig.json`). Full `pytest` **485 passed**.
+
+## 96. Bảng "Video gốc" (Raw Library) đầy đủ tính năng + module xoá watermark tái dùng được (Florence-2 + LaMa, tham khảo github.com/D-Ogi/WatermarkRemover-AI) (2026-08-27)
+
+Yêu cầu người dùng: đổi "Video gốc (Raw Library)" từ list sang bảng như "Clip đã cắt" (mục
+94) — bỏ filter kênh ở header chung của cả màn (mỗi bảng tự có filter riêng), giữ đủ action
+hiện có, chọn nhiều để xử lý batch, upload nhiều file 1 lúc (giữ được tên file gốc để biết
+đã upload file nào), tag nhiều kênh 1 lúc, play preview, và **xoá watermark trước khi cắt
+cảnh** — module riêng, tái dùng được cho Visual Studio sau này (xoá watermark ảnh/video user
+upload cho từng shot).
+
+### Module `app/watermark/` (mới, độc lập, không phụ thuộc Asset Vault)
+
+Kiến trúc tham khảo đúng repo người dùng chỉ định (Florence-2 phát hiện vùng + LaMa
+inpaint lấp lại): `detector.py::detect_watermark_bboxes` (Florence-2 `<OPEN_VOCABULARY_
+DETECTION>`, model cache theo tiến trình) + `remover.py` (LaMa qua `simple-lama-inpainting`,
+`inpaint_regions_full_frame` cho ảnh đơn — dành cho Visual Studio sau này — và
+`inpaint_region_cropped` cho video, chỉ chạy LaMa trên VÙNG NHỎ quanh bbox thay vì cả khung
+hình để đủ nhanh cho video nhiều nghìn frame) + `pipeline.py` (2 hàm cấp cao:
+`remove_watermark_from_image`, `remove_watermark_from_video` — video: tách frame bằng
+ffmpeg, detect bbox 1 LẦN trên frame đại diện ở 20% thời lượng, inpaint từng frame theo bbox
+đó, ghép lại giữ nguyên fps/audio).
+
+**3 bug môi trường THẬT bắt được lúc cài đặt** (không phải bug logic, nhưng đều sẽ chặn
+đứng `npm run dev:backend` nếu không phát hiện):
+1. `pip install -r requirements.txt` crash `UnicodeDecodeError` (cp1252) — comment tiếng
+   Việt không dấu BOM/khai báo encoding làm `pip._internal.utils.encoding.auto_decode()` rơi
+   về `locale.getpreferredencoding()` (cp1252 trên máy Windows này), không đọc được UTF-8.
+   Đây là bug ẨN CÓ SẴN từ trước (đã xác nhận qua `git show HEAD:...requirements.txt` — bản
+   đã commit trước đó chưa có tiếng Việt), chỉ lộ ra khi thêm comment mới cho watermark. Fix:
+   thêm `# coding: utf-8` làm DÒNG ĐẦU TIÊN của file.
+2. `pip install transformers einops timm simple-lama-inpainting` (không kèm CUDA index) làm
+   pip re-resolve và ÂM THẦM hạ `torch==2.8.0+cu129` xuống `torch==2.13.0+cpu` — không lỗi,
+   không cảnh báo, chỉ `torch.cuda.is_available()` trả `False`. Bắt được nhờ CHỦ ĐỘNG kiểm
+   tra lại sau khi cài (không chỉ tin exit code). Fix: cài lại đúng bản CUDA đã verify khớp
+   ComfyUI đang dùng (`--index-url .../cu129 --force-reinstall --no-deps`), thêm
+   `--extra-index-url https://download.pytorch.org/whl/cu129` vào đầu `requirements.txt` để
+   `pip install -r` sau này luôn resolve đúng.
+3. `transformers` mới nhất lúc cài (5.16.1) làm code remote của Florence-2 (viết cho API 4.x)
+   crash `AttributeError: 'Florence2LanguageConfig' object has no attribute
+   'forced_bos_token_id'` — ghim `transformers==4.49.0`.
+
+**Bug thật quan trọng nhất — phát hiện qua test A/B trên CHÍNH 1 frame video thật**: prompt
+nhiều khái niệm `"watermark, logo, text overlay"` làm Florence-2 trả bbox SAI (nguyên cả
+khung hình), trong khi 1 từ đơn `"watermark"` cho bbox ĐÚNG (sai lệch <5px so với watermark
+thật vẽ vào ảnh test). Kết luận và fix: giữ mặc định `text_input="watermark"` (1 từ đơn),
+ghi lại đầy đủ trong docstring `detector.py` để không ai vô tình "cải thiện" thành câu dài
+hơn mà không verify lại.
+
+Verify tay end-to-end với model THẬT (không mock) trên cả ảnh tổng hợp lẫn video tổng hợp có
+NỀN DI CHUYỂN dưới watermark TĨNH (crop+inpaint từng frame đúng theo bbox cố định, không bị
+lẫn theo nền) — xác nhận bằng mắt qua các frame input/output. Test tự động (`test_watermark.
+py`, 5 test) MOCK detect/inpaint (model thật ~90s nạp lần đầu, quá chậm cho suite chạy mỗi
+commit) — chỉ test đúng luồng điều phối (cắt frame, gọi đúng thứ tự, dọn file tạm, xử lý lỗi).
+
+### Backend — Raw Library: tên file gốc, batch tag/xoá, preview, tích hợp watermark
+
+`RawVideo.original_filename` (cột mới, giữ NGUYÊN tên file user upload để hiển thị — tên
+trên đĩa vẫn có tiền tố `{raw_id}_` + tên đã sanitize để tránh ký tự nguy hiểm, giữ dấu tiếng
+Việt). `_raw_video_name`/`rawVideoLabel` ưu tiên field này trước `import_note`/`source_url`.
+4 endpoint mới: `GET /asset-vault/raw/{id}/file` (preview, mirror endpoint clip có sẵn),
+`POST /asset-vault/raw/batch-tag-channels` (UNION kênh, không ghi đè), `POST /asset-vault/
+raw/batch-delete`, `POST /asset-vault/raw/{id}/remove-watermark` (chạy nền — poll qua field
+progress có sẵn, KHÔNG đổi `status` khi xong để người dùng bấm "Cắt cảnh tự động" ngay sau
+đó; đổi `file_path` sang bản `_nowm.mp4` đã xoá watermark, xoá file cũ).
+
+### Frontend — `AssetVault.tsx`: bảng "Video gốc" mirror bảng "Clip đã cắt"
+
+Bỏ filter kênh ở header toàn màn (mục cũ) — mỗi bảng con giờ có filter riêng. `RawLibrarySe
+ction` viết lại hoàn toàn thành `<table>` (checkbox chọn/chọn tất cả, cột Tên file/Kênh/Trạng
+thái/Ghi chú/Ngày tạo/Hành động, nút Play mở panel xem trước). Input upload thêm `multiple`,
+xử lý TUẦN TỰ từng file (lỗi 1 file không chặn các file còn lại, giống pattern gắn nhãn hàng
+loạt clip). Thanh bulk action khi có video được chọn: "+ Thêm kênh" (gọi batch-tag-channels),
+"Cắt cảnh tự động (N)"/"Gắn nhãn (N)" (không có endpoint batch riêng — lặp gọi endpoint đơn
+từng video, cô lập lỗi từng video), "Xoá watermark (N)", "Xoá" (batch-delete), "Bỏ chọn".
+`PreviewPanelShell` (tách ra từ `ClipPreviewPanel` cũ) — khung panel trượt-từ-phải dùng
+CHUNG cho cả preview clip lẫn preview video gốc mới (`RawVideoPreviewPanel`), chỉ phần
+metadata hiển thị khác nhau truyền qua `children`.
+
+**Verify sống qua CDP** (launch Electron thật với `--remote-debugging-port=9222`, phải
+`env -u ELECTRON_RUN_AS_NODE` trước — biến này bị kế thừa từ tiến trình Claude Code, đã gặp
+đúng bug này ở mục 86, khiến `electron.exe` chạy như Node thuần thay vì app thật): upload 2
+file THẬT tên khác nhau ("Great Wall drone footage.mp4", "watermark_test_clip.mp4") cùng
+lúc qua `DOM.setFileInputFiles` nhiều file — xác nhận cả 2 xuất hiện đúng tên trong bảng;
+chọn cả 2 bằng checkbox — xác nhận thanh bulk hiện đúng "2 video đã chọn" + đủ nút; bấm
+"+ Thêm kênh" gắn thêm 1 kênh — xác nhận UNION đúng (giữ kênh cũ, thêm kênh mới) trên cả 2
+hàng; bấm Play trên 1 video gốc — panel xem trước mở đúng, phát được video, hiện đúng tên
+file/kênh/trạng thái; bấm "Xoá" hàng loạt — xác nhận 2 video test biến mất khỏi bảng, chỉ
+còn video gốc từ trước. `tsc --noEmit` sạch. Backend `pytest` **498 passed** (66/66 riêng
+`test_asset_vault.py` + `test_watermark.py`).
+
+**Chưa verify sống**: click nút "Xoá watermark" với model THẬT qua UI (model Florence-2/LaMa
+mất ~90s nạp lần đầu — đã verify riêng pipeline này bằng script trực tiếp, xem phần module ở
+trên, chỉ chưa lặp lại qua đúng nút bấm trên UI vì giới hạn thời gian phiên làm việc).
+
+## 97. Bug thật (user tự test 2 video cùng lúc) + tăng tốc xoá watermark bằng batch inference GPU (2026-08-28)
+
+Người dùng tự test tính năng xoá watermark (mục 96) với 2 video khác nhau chạy CÙNG LÚC —
+báo 2 hiện tượng: (1) cả 2 video báo CÙNG số lượng frame (sai — 2 video khác nhau, số frame
+phải khác), (2) dừng/xong tiến trình 1 video làm video kia LỖI theo.
+
+### Bug thật: `tmp_dir` dùng chung 1 tên CỐ ĐỊNH cho MỌI video — 2 lượt song song ghi đè/xoá nhầm frame của nhau
+
+**Root cause** (đọc code, không suy đoán): `ingest.py::remove_watermark_from_raw_video` xây
+`tmp_dir = asset_vault_raw_dir() / "_watermark_tmp"` — KHÔNG có thành phần nào phân biệt
+theo từng video, nên `remove_watermark_from_video`'s `frames_dir = tmp_dir / "wm_frames"`
+(pipeline.py) là CÙNG 1 thư mục cho mọi lượt gọi. 2 video chạy song song (2 BackgroundTasks
+khác nhau) cùng ghi frame vào đúng 1 thư mục (`frame_000001.jpg` video A và B ghi đè lẫn
+nhau) → đếm frame ra cùng 1 con số sai; và `finally: shutil.rmtree(frames_dir)` của lượt
+XONG TRƯỚC (dù thành công hay lỗi) xoá mất frame của lượt CHƯA XONG đang xử lý dở → lượt đó
+crash `FileNotFoundError` khi mở frame kế tiếp — đúng khớp cả 2 hiện tượng người dùng báo.
+
+**Fix**: cô lập `tmp_dir` theo `raw_video.id` (`.../​_watermark_tmp/{raw_video.id}/`) —
+mỗi video có thư mục tạm RIÊNG, chạy song song bao nhiêu video cũng không đụng nhau. Thêm
+dọn `shutil.rmtree(tmp_dir, ...)` ở cả nhánh thành công lẫn lỗi (trước chỉ dọn
+`frames_dir` con bên trong `pipeline.py`, để lại thư mục cha rỗng theo từng id tích tụ dần).
+
+**Verify thật** (`wm_bench.py`, script scratch, KHÔNG chỉ chạy pytest mock): dựng 2 video
+tổng hợp số frame KHÁC NHAU rõ rệt (30 và 50 frame), chạy `remove_watermark_from_video`
+thật (model thật, không mock) trên 2 thread SONG SONG với `tmp_dir` theo pattern mới, xác
+nhận: video A báo đúng `(30, 30)`, video B báo đúng `(50, 50)`, không video nào lỗi. Trước
+fix, chạy lại kịch bản tương tự sẽ tái hiện đúng cả 2 bug đã báo (không chạy lại bản lỗi để
+đối chứng vì tốn thời gian — root cause đã đọc code xác nhận chắc chắn, không cần thực
+nghiệm âm tính). Thêm test tự động
+`test_remove_watermark_from_raw_video_uses_isolated_tmp_dir_per_video` (spy giá trị
+`tmp_dir` thật truyền cho 2 raw video khác nhau, xác nhận khác nhau) để chặn regression.
+
+### Tăng tốc: vá watermark THEO LÔ (batch) qua GPU thay vì tuần tự từng frame
+
+Người dùng hỏi có cách nào chạy song song/dùng GPU nhanh hơn — GPU **đã** được dùng từ mục
+96 (`device = "cuda" if torch.cuda.is_available() else "cpu"` ở cả Florence-2 lẫn LaMa),
+nhưng vòng lặp vá từng frame gọi `SimpleLama` (thư viện `simple-lama-inpainting`) tuần tự
+TỪNG ẢNH MỘT — crop nhỏ (~220×200px) nên 1 lượt forward đơn không tận dụng hết GPU, phần
+lớn thời gian là overhead Python/khởi chạy kernel per-call, không phải tính toán thật.
+
+**Giải pháp**: đọc source `simple-lama-inpainting` cài trên máy xác nhận model là 1
+`torch.jit.load(...)` FCN thuần — bản thân model NHẬN batch dim bất kỳ bình thường, chỉ có
+wrapper `SimpleLama.__call__` ép cứng batch=1. Thêm `remover.py::inpaint_regions_batch_
+cropped` — bypass wrapper, tự dựng batch qua `prepare_img_and_mask` (hàm nội bộ của chính
+thư viện đó) + `torch.cat`, chạy LaMa 1 lượt cho N frame (mọi frame video cùng độ phân
+giải → cùng bbox/context_pad → cắt ra cùng kích thước crop, ghép batch trực tiếp được).
+`pipeline.py`'s vòng lặp đổi từ 1 frame/lần sang lô 8 frame/lần (`_INPAINT_BATCH_SIZE`).
+`inpaint_region_cropped` (đơn) giữ lại làm ca N=1 của hàm batch, không lặp code, không phá
+API cũ.
+
+**Đo thật** (`wm_bench.py`, GPU RTX 5060 Ti, video 640×480, 64 frame): tuần tự 3.14s
+(49ms/frame) → batch=8 1.54s (24ms/frame) — nhanh gấp **~2 lần** (không phải suy đoán —
+docstring ban đầu định ghi "4-6 lần" theo trực giác, SỬA lại đúng số đo thật sau khi
+benchmark, đúng kỷ luật "verify thật, không suy đoán" của session này). Chưa thử batch
+size khác 8 hoặc video/crop lớn hơn — có thể còn dư địa tăng thêm nếu cần, chưa đo.
+
+**Verify**: sửa `test_watermark.py`'s test video (đổi mock từ `inpaint_region_cropped` cũ
+sang `inpaint_regions_batch_cropped` mới, chữ ký nhận/trả list) — vẫn PASS không đổi hành
+vi assert. Full `pytest` **499 passed** (498 trước + 1 test regression mới cho bug tmp_dir).
+
+## 98. Bug thật (user tự phát hiện): xoá video gốc làm MẤT tag kênh của clip đã cắt + clip biến mất khỏi mọi kết quả matching + bulk gán tag kênh cho clip (2026-08-28)
+
+Người dùng báo: xoá video gốc làm clip đã cắt từ video đó mất tag kênh. Đọc lại thiết kế
+gốc (mục 91) xác nhận đây đúng là bug thiết kế, không phải hiển thị sai đơn thuần —
+`ProcessedClip` TỪNG KHÔNG có tag kênh riêng, kênh CHỈ suy ra qua JOIN `raw_video_id` →
+`raw_video` → `raw_video_channel`. `delete_raw_video` CỐ Ý không cascade xoá clip con
+(clip đã cắt dùng độc lập, có thể đã gán vào shot project khác) — nhưng hệ quả là clip mất
+SẠCH thông tin kênh, và (hệ quả NẶNG hơn, ẩn, không thấy ngay trên UI) `asset_vault/
+matching.py::_clips_for_channel` INNER JOIN qua `RawVideo` nên clip mồ côi biến mất khỏi
+MỌI kết quả matching B-roll Render Studio của MỌI kênh, dù file/caption/embedding vẫn còn
+nguyên vẹn — 1 bug từng được "vá" một nửa ở mục 93 (chặn crash 500, trả `channels: []`)
+nhưng chưa xử lý gốc rễ mất dữ liệu.
+
+### Fix: `ProcessedClip` có tag kênh RIÊNG (`processed_clip_channel`, bảng m2m thứ 2 của dự án)
+
+`models.py` — bảng `processed_clip_channel` mới + `ProcessedClip.channels`/`Channel.
+processed_clips` relationship, SAO CHÉP từ `raw_video.channels` NGAY lúc cắt cảnh
+(`ingest.py::_make_clip_row`, dùng chung cho cả `manual_cut_clip`/`auto_detect_scenes`) —
+clip độc lập thật sự với raw_video cha từ đó, kể cả sau khi raw_video bị xoá.
+
+`asset_vault/migration.py::_backfill_processed_clip_channel` (mới) — bảng mới hoàn toàn
+nên `create_all()` tự tạo, hàm chỉ BACKFILL: clip nào chưa có dòng nào trong bảng mới VÀ
+raw_video cha CÒN TỒN TẠI, sao chép kênh hiện tại của raw_video sang. Clip đã mồ côi TỪ
+TRƯỚC (raw_video cha đã mất trước khi bản vá này chạy) — dữ liệu kênh gốc THẬT SỰ ĐÃ MẤT,
+không có nguồn nào khác để khôi phục, cần người dùng tự gắn lại tay (endpoint mới bên dưới
+chính là chỗ làm việc đó).
+
+`asset_vault/matching.py::_clips_for_channel` — đổi từ INNER JOIN qua `RawVideo`/
+`raw_video_channel` sang JOIN thẳng `processed_clip_channel` (tag riêng của clip) — không
+còn phụ thuộc raw_video cha còn tồn tại hay không. Verify trực tiếp ở tầng này (không chỉ
+qua router `/clips`) vì đây là nơi Render Studio THẬT SỰ gọi tới lúc gợi ý clip cho 1 shot.
+
+`routers/asset_vault.py`:
+- `_clip_out` đọc `c.channels` trực tiếp (không còn `_channels_out(c.raw_video)`).
+- `GET /asset-vault/clips?channel_id=` lọc qua `processed_clip_channel` thay vì JOIN
+  `RawVideo`.
+- `PATCH /asset-vault/raw/{id}/channels` và `POST /asset-vault/raw/batch-tag-channels`
+  (đã có từ mục 96) — thêm CASCADE: sửa/gắn thêm kênh ở mức raw video giờ ĐỒNG BỘ xuống
+  MỌI clip con hiện có, giữ nguyên UX "1 control edit cả nhóm" người dùng đã quen.
+- **Mới**: `PATCH /asset-vault/clips/{clip_id}/channels` (ghi đè tag RIÊNG của 1 clip,
+  KHÔNG đụng raw_video cha — đường DUY NHẤT gắn lại tag cho clip đã mồ côi) và `POST
+  /asset-vault/clips/batch-tag-channels` (bulk gán tag kênh cho NHIỀU clip đã chọn cùng
+  lúc, union không ghi đè — đúng yêu cầu thứ 2 của người dùng trong cùng phản hồi này).
+
+### Verify
+
+7 test mới + 2 test cũ bổ sung assertion (`test_asset_vault.py`): cascade từ raw video
+xuống clip (đơn + batch), 2 endpoint clip-level mới (đơn + batch, cả 2 nhánh input rỗng
+400), clip cắt tự động/thủ công kế thừa đúng kênh raw_video cha, VÀ quan trọng nhất — viết
+lại `test_list_clips_survives_orphaned_clip_after_raw_video_deleted` (từng assert
+`channels: []` là ĐÚNG — giờ assert kênh ĐƯỢC GIỮ NGUYÊN sau khi xoá raw_video, cả qua
+`GET /clips` lẫn qua filter `?channel_id=`) + test mới gọi thẳng `matching.py::
+_clips_for_channel` sau khi xoá raw_video xác nhận clip vẫn được tìm thấy (hệ quả nặng
+nhất của bug, trước đây không có test nào phủ tới tầng matching). Cập nhật `_seed_clip`
+helper (dùng bởi rất nhiều test khác trong file) để gán đúng `clip.channels` — nếu không
+sửa, hàng loạt test filter/matching theo kênh khác sẽ fail SAI (do giờ đọc tag riêng của
+clip thay vì suy ra qua raw_video). Full `pytest` **506 passed** (499 trước + 7 mới).
+`specs/02_database.md` cập nhật bảng `processed_clip`/`processed_clip_channel` mới.
+
+**Frontend** (đã làm ngay sau, cùng lượt) — `AssetVault.tsx`: tách `RawChannelRetag` cũ
+thành `ChannelRetag` DÙNG CHUNG (nhận `channels` + `onRetag` bất kỳ, không còn ép kiểu
+`RawVideo`) — hàng "Clip đã cắt" giờ gọi `api.patchClipChannels` (sửa RIÊNG clip đó,
+không cascade sang clip anh em/raw_video cha, hoạt động cả với clip mồ côi) thay vì
+`api.patchRawVideoChannels` cũ. Thêm nút "+ Thêm kênh" bulk cho bảng "Clip đã cắt" (gọi
+`POST /asset-vault/clips/batch-tag-channels` mới), cùng UI pattern nút bulk đã có ở bảng
+"Video gốc" (mục 96). `tsc --noEmit` sạch.
+
+## 99. Xoá watermark cho từng shot + toàn bộ block ở Visual Studio (tái dùng app/watermark/) (2026-08-28)
+
+Theo yêu cầu người dùng: tự động phát hiện + xoá watermark trên ảnh/video từng shot ở
+Visual Studio, cộng 1 nút xoá cho TOÀN BỘ slot, báo rõ ràng khi 1 ảnh không phát hiện
+watermark. Đúng đúng ý đồ ban đầu của module `app/watermark/` (mục 96) — docstring lúc
+build đã ghi "dự kiến từ Visual Studio sau này" — không cần đổi gì trong module đó,
+CHỈ nối dây vào M2 Production Layer (render/engine.py, render/schemas.py, routers/render.py).
+
+### Backend
+
+`render/schemas.py` — `ShotRenderStatus.visual_watermark_note` (mới) — "không phát hiện
+watermark" KHÔNG dùng `visual_error` (field đó gắn UI báo lỗi ĐỎ, dành cho lỗi thật như
+model crash/ffmpeg thiếu) — tách field riêng để UI hiện thông báo trung tính, rõ ràng,
+đúng yêu cầu người dùng "có thông báo rõ ràng" mà không đánh đồng với lỗi. `RenderState.
+watermark_scan_summary` (mới, `WatermarkScanSummary{scanned,cleaned,no_watermark,failed,
+finished_at}`) — tóm tắt 1 lượt xoá HÀNG LOẠT, vì rải `visual_watermark_note` riêng từng
+shot dễ bị bỏ sót khi quét nhiều shot cùng lúc.
+
+`render/engine.py` — `_remove_watermark_for_status` (dùng chung cho đơn lẻ/hàng loạt): xác
+định ảnh/video qua `shot.get("visual_type")` (đọc pack.json, cùng cách `upload_shot_visual`
+đã làm — module render CHỈ ĐỌC pack.json, không ghi lại, giữ đúng ranh giới script core ⟂
+render đã có từ đầu dự án), gọi `remove_watermark_from_image`/`remove_watermark_from_video`
+(y hệt chữ ký `app/watermark/pipeline.py` — KHÔNG sửa module đó), ghi kết quả TẠI CHỖ vào
+`status` (path mới `_nowm`, hoặc `visual_watermark_note`, hoặc `visual_error`), trả về
+`"cleaned"|"no_watermark"|"failed"`. `remove_shot_watermark`/`remove_all_shots_watermark`
+(2 hàm mới, dùng cho BackgroundTasks) DÙNG CHUNG cờ `_mark_in_progress`/`is_generation_in_
+progress` với sinh asset thường (`run_asset_generation`) — cố ý tái dùng ĐÚNG cơ chế chống
+chạy chồng đã có (không tự chế lớp khoá riêng), vì đây CHÍNH LÀ lớp bug vừa sửa cho Kho Tài
+Nguyên ở mục 97 (2 tiến trình cùng đụng file/state của cùng 1 project ghi đè lẫn nhau) —
+tránh tái diễn ngay trong cùng phiên làm việc bằng cách bám đúng pattern đã có sẵn thay vì
+nghĩ ra cách mới. `remove_all_shots_watermark` bỏ qua thầm lặng shot chưa `visual_status==
+"ready"` (cùng nguyên tắc `approve_all_shots`), lỗi 1 shot không dừng cả batch (cùng
+nguyên tắc `run_asset_generation`), check cờ huỷ trước mỗi shot (tái dùng `is_cancel_
+requested` có sẵn — nút "⏹ Dừng" ở header đã hoạt động luôn cho cả thao tác này).
+
+`routers/render.py` — 2 endpoint mới: `POST .../shots/{shot_id}/remove-watermark` (400 nếu
+shot chưa `visual_status=="ready"`, set "generating" đồng bộ trước khi mở BackgroundTasks —
+cùng pattern `regenerate-visual`) và `POST .../render/remove-watermark-all`. Cả 2 đều qua
+`_require_not_in_progress` (409 nếu đang có tiến trình khác chạy) như mọi endpoint sinh
+asset khác.
+
+### Frontend (`VisualStudio.tsx`)
+
+Nút "Xoá watermark" ở mỗi `ShotCard` (cạnh nút "Duyệt") — disable khi `visual_status!=
+"ready"` hoặc có tiến trình khác đang chạy cho project. `status.visual_watermark_note`
+hiện thành dòng chữ nhỏ, màu trung tính (KHÁC `uploadError`/lỗi đỏ) ngay dưới hàng nút.
+Nút hàng loạt "Xoá watermark toàn bộ slot" gộp vào menu "⋯ Tuỳ chọn khác" (cùng nhóm các
+hành động ít dùng/tốn thời gian như "Sinh lại TOÀN BỘ") — sau khi chạy xong, banner
+`WatermarkSummaryBanner` mới (màu accent trung tính, chỉ chuyển đỏ nếu có shot lỗi thật)
+tóm tắt "Đã quét N shot — X đã xoá watermark, Y không phát hiện watermark, Z lỗi", có nút
+đóng (chỉ ẩn local, không gọi API xoá — lượt quét kế tiếp tự ghi đè summary mới). Tái dùng
+ĐÚNG pattern polling/cache-bust đã có (`window.setTimeout(loadRenderStatus, 1200/3000)`
+sau mỗi action nền, vì response POST phản ánh trạng thái TRƯỚC khi BackgroundTasks chạy —
+bug thật bắt được lúc viết TEST cho tính năng này, xem bên dưới) — không thêm cơ chế mới.
+
+**Bug thật bắt được lúc viết test (không phải sai ở code sản phẩm)**: test ban đầu assert
+thẳng vào body của response POST `remove-watermark` để kiểm `visual_status`/`visual_
+watermark_note` — LUÔN thấy `"generating"` dù mock chạy đồng bộ thành công, vì FastAPI
+serialize `state.model_dump()` ở CÂU LỆNH `return` (bắt trạng thái TRƯỚC khi background
+task chạy), không phải sau. Đối chiếu lại các test cũ (`test_regenerate_visual_resets_
+approval`) xác nhận pattern ĐÚNG luôn phải là `POST` rồi `GET /render/status` RIÊNG để lấy
+trạng thái mới nhất — sửa lại theo đúng pattern đó, không phải bug thật ở endpoint.
+
+**Verify**: 7 test mới (`test_render.py`) — xoá thành công (đổi `visual_asset_path` sang
+`_nowm`, xoá file cũ, dọn `visual_watermark_note`/`visual_error`), không phát hiện
+watermark (giữ `visual_status=="ready"`, KHÔNG "error", asset gốc không đổi), lỗi thật
+(set "error" + `visual_error`, không lẫn `visual_watermark_note`), 404 khi chưa có
+`ShotRenderStatus`, 400 khi có state nhưng chưa `ready`, 409 khi có tiến trình khác đang
+chạy, và hàng loạt với kết quả TRỘN (thành công/không tìm thấy/lỗi xen kẽ) xác nhận tổng
+`watermark_scan_summary` khớp đúng từng loại + từng shot cập nhật đúng `visual_status`
+tương ứng. Full `pytest` **513 passed** (506 trước + 7 mới). `tsc --noEmit` sạch.
+`specs/03_api.md` cập nhật 2 endpoint mới.
+
+**Chưa verify sống qua UI thật** — cùng lý do mục 96 (model Florence-2/LaMa thật ~90s nạp
+lần đầu, giới hạn thời gian phiên làm việc) — logic điều phối đã verify đầy đủ qua test
+tự động với model MOCK, chưa lặp lại bằng click thật trên Visual Studio với model thật.
+
+## 100. Bug thật (user tự test với video Gemini/Veo thật): xoá watermark làm "mất hình ảnh" + làm rõ nguyên nhân lỗi "not found" ở Visual Studio (2026-08-28)
+
+Người dùng báo 2 hiện tượng: (1) xoá watermark ở Kho Tài Nguyên cho video sinh bằng Gemini
+(`L3B01.mp4`) làm video output MẤT HÌNH ẢNH; (2) bấm "Xoá watermark" ở Visual Studio báo
+lỗi "not found", dẫn tới nhầm tưởng cần cấu hình Provider AI.
+
+### Bug #1 — Florence-2 trả bbox GẦN NHƯ FULL-FRAME cho watermark dạng icon nhỏ (LaMa vá gần hết khung hình = phá huỷ nội dung)
+
+**Root cause verify THẬT trên đúng file người dùng báo lỗi** (không suy đoán): tìm thấy
+`workspace/asset_vault/raw/raw_1788341279704_L3B01.mp4` (video Gemini/Veo thật — cảnh bút
+lông viết thư pháp chữ Hán, watermark thật là 1 icon NGÔI SAO LẤP LÁNH nhỏ ở góc dưới phải,
+kiểu watermark chuẩn Gemini/Veo — khác hẳn watermark chữ/logo của video test tổng hợp trước
+đây, mục 96). Trích đúng frame đại diện (20% thời lượng, giống pipeline thật dùng) rồi gọi
+`detect_watermark_bboxes` thật: prompt mặc định `"watermark"` trả bbox `(1, 0, 1278, 719)`
+— **99.6% diện tích khung hình**; `"logo"` cũng sai (78%). LaMa sau đó được giao vá gần hết
+khung hình (mask phủ gần toàn bộ) → không còn đủ context thật để tham chiếu → sinh ảnh
+NHOÈ/HALLUCINATE gần như xoá sạch nội dung gốc — đúng khớp "mất hình ảnh" người dùng báo.
+Xác nhận thêm bằng CHÍNH file output THẬT còn sót lại trên máy dev (`..._L3B01_nowm.mp4`,
+374KB — nhỏ bất thường so với gốc 3MB, dấu hiệu nội dung đã bị đồng nhất hoá/nén tốt hơn
+hẳn) — trích frame từ file đó XÁC NHẬN BẰNG MẮT: cuộn giấy + chữ Hán biến mất hoàn toàn,
+thay bằng 1 màu xám-xanh có vân sọc đều — đúng dấu hiệu LaMa hallucinate trên mask gần
+full-frame, không phải suy đoán.
+
+**Fix**: `detector.py::detect_watermark_bboxes_robust` (mới) — lọc bỏ MỌI bbox chiếm > 35%
+diện tích khung hình (ngưỡng AN TOÀN, thấp hơn hẳn 2 lần đo sai 99.6%/78% nhưng đủ rộng cho
+watermark to như dải chữ credit choán 1 góc lớn), rồi tự thử LẦN LƯỢT các prompt dự phòng
+(`"logo"`, `"small icon in the corner"`) nếu prompt chính không cho bbox nào đủ nhỏ để tin
+cậy. Verify lại THẬT trên ĐÚNG frame đã dùng để đo bug: prompt dự phòng `"small icon in the
+corner"` (thử trực tiếp cả `"star icon"`/`"white star"`/`"four pointed star icon"` — đều
+cho kết quả khớp) định vị ĐÚNG icon thật, bbox `(1130, 570, 1191, 629)` — chỉ 0.39% diện
+tích, khít sát icon. Chạy `inpaint_region_cropped` thật trên bbox đúng này — kết quả ẢNH
+GIỮ NGUYÊN TOÀN BỘ nội dung cuộn giấy/chữ Hán, chỉ mất đúng icon ngôi sao ở góc — xác nhận
+bằng mắt qua ảnh output thật, không phải mock. `pipeline.py` (`remove_watermark_from_image`/
+`remove_watermark_from_video`) đổi sang gọi `detect_watermark_bboxes_robust` thay vì
+`detect_watermark_bboxes` trực tiếp — áp dụng cho CẢ Kho Tài Nguyên lẫn Visual Studio (mục
+99, dùng chung `pipeline.py`) mà không cần sửa gì ở 2 nơi gọi đó.
+
+**Verify**: 4 test mới (`test_watermark.py`) — mock `detect_watermark_bboxes` (cấp thấp,
+gọi model) bằng bảng tra THEO PROMPT, dùng ĐÚNG giá trị bbox đã đo thật ở trên (không phải
+số bịa) để verify logic lọc/fallback: bbox full-frame bị loại, tự chuyển sang prompt dự
+phòng đúng, trả rỗng nếu MỌI prompt đều không đáng tin, và KHÔNG lãng phí gọi thêm prompt dự
+phòng khi prompt chính đã đủ tin cậy (tránh chậm thêm không cần thiết cho trường hợp bình
+thường). Full `pytest` **517 passed**.
+
+**File dữ liệu thật của người dùng bị hỏng do bug NÀY** — `raw_1788341279704_L3B01_nowm.mp4`
+hiện là bản THẬT ĐÃ HỎNG còn sót lại trên máy (dùng để chẩn đoán ở trên), file gốc có
+watermark đã bị `remove_watermark_from_raw_video` XOÁ THẬT sau khi rename (không giữ bản
+gốc) — người dùng cần tải/sinh lại `L3B01.mp4` từ Gemini rồi thử lại xoá watermark bằng
+code đã vá; KHÔNG có cách khôi phục nội dung gốc từ file hỏng hiện có.
+
+### Bug #2 — Không phải bug code: tiến trình backend do Electron spawn KHÔNG tự nạp lại code mới
+
+Verify trực tiếp (không suy đoán): `electron/src/backend-launcher.ts::startBackend` chạy
+`uvicorn app.main:app` KHÔNG có `--reload` — MỌI thay đổi code backend chỉ có hiệu lực sau
+khi **tắt hẳn rồi mở lại app** (không phải chỉ điều hướng lại màn hình). Xác nhận đúng tiến
+trình backend THẬT của app đang chạy trên máy người dùng lúc báo lỗi (`curl .../openapi.
+json` tới đúng port tiến trình Electron con đang giữ) — tổng số route ÍT HƠN hẳn code hiện
+tại, và **hoàn toàn không có** `POST /projects/{id}/render/shots/{shot_id}/remove-watermark`
+(mục 99, viết SAU lần app này khởi động) — khớp chính xác lỗi "not found" (404 mặc định của
+FastAPI khi không route nào khớp, không phải lỗi từ code endpoint). Tiến trình đó VẪN đang
+chạy tính tới lúc điều tra, nghĩa là nếu người dùng thử lại NGAY (chưa khởi động lại app) sẽ
+còn gặp lỗi này, VÀ vẫn dính bug #1 (chưa có bản vá `detect_watermark_bboxes_robust`).
+
+**Không sửa code cho bug này** — đây là hành vi vốn có của kiến trúc dev hiện tại (uvicorn
+không `--reload` khi Electron tự spawn), không phải lỗi logic. Đã cân nhắc thêm `--reload`
+cho nhánh dev nhưng KHÔNG làm — uvicorn `--reload` trên Windows spawn thêm 1 tiến trình con
+qua watcher, `backendProcess.kill()` hiện tại (Electron `main.ts`) chỉ kill tiến trình con
+TRỰC TIẾP, rủi ro để lại tiến trình backend mồ côi mỗi lần tắt app (đổi 1 bug hiếm gặp lấy 1
+rủi ro rò rỉ tiến trình thường trực) — báo lại người dùng: **tắt hẳn app (không chỉ đóng cửa
+sổ/chuyển màn) rồi mở lại** mỗi khi có bản vá backend mới, thay vì đổi kiến trúc.
+
+## 101. Thanh tiến trình THẬT khi xoá watermark ở Visual Studio (dùng chung component với Kho Tài Nguyên) (2026-09-02)
+
+Người dùng xác nhận bug mục 100 đã hết (S3-01 xoá watermark thành công), đề xuất UX: hiện
+thanh tiến trình khi xử lý xoá watermark ở Visual Studio, giống hệt thanh đã có ở Kho Tài
+Nguyên (`RawVideo.progress_current/total/label`) — trước đó Visual Studio chỉ hiện chữ tĩnh
+"Đang xử lý..." trên nút, không có % hay số frame.
+
+### Backend
+
+`render/schemas.py::ShotRenderStatus` — 3 field mới `visual_watermark_progress_current/
+total/label` (Optional int/int/str) — CHỈ có giá trị cho shot VIDEO (ảnh vá 1 lượt Florence-
+2+LaMa duy nhất, quá nhanh để cần %); null khi không có lượt xoá watermark nào đang chạy.
+Không cần migration (Pydantic model sống trong `render.json`, không phải bảng SQL).
+
+`render/engine.py::_remove_watermark_for_status` — thêm tham số `on_progress`, truyền
+THẲNG vào `remove_watermark_from_video(..., on_progress=on_progress)` (hàm này đã tự gọi
+callback mỗi ~8 frame từ mục 97, không cần sửa gì ở `watermark/pipeline.py`). Dọn 3 field
+progress về `None` trong `finally` — chạy ở MỌI nhánh thoát (thành công/lỗi/không tìm
+thấy), nút quay lại đúng trạng thái tĩnh thay vì kẹt hiện % cũ. `remove_shot_watermark`/
+`remove_all_shots_watermark` mỗi hàm tự đóng 1 closure `_on_progress` ghi field vào đúng
+`status` của shot đang xử lý RỒI `save_render_state` NGAY (cùng đơn vị "mỗi lần gọi
+callback = 1 lần ghi file" như `ingest.py`'s `RawVideo` — file `render.json` nhỏ, ghi mỗi
+~8 frame không đáng lo hiệu năng).
+
+### Frontend
+
+Tách `ProgressBar` (trước đây định nghĩa RIÊNG trong `AssetVault.tsx`) thành component dùng
+chung `components/ProgressBar.tsx` — giữ NGUYÊN style/logic, Kho Tài Nguyên đổi sang import
+từ đây (không đổi hành vi). `VisualStudio.tsx::ShotCard` hiện `<ProgressBar>` ngay dưới hàng
+nút action khi `visual_watermark_progress_total` có giá trị — đúng vị trí/kiểu dáng người
+dùng yêu cầu ("tương tự thanh tiến trình ở Kho Tài Nguyên"), tự động ẩn/hiện theo poll 3s có
+sẵn (`hasInFlight`), không cần thêm cơ chế polling riêng.
+
+**Verify**: test mới `test_remove_shot_watermark_reports_progress_then_clears_it` — spy
+`save_render_state` (TestClient chạy BackgroundTasks đồng bộ, không polling HTTP giữa
+chừng được) xác nhận progress ĐƯỢC GHI THẬT vào file mỗi lần callback gọi (khớp giá trị
+10/20 rồi 20/20), VÀ trạng thái cuối cùng đã dọn sạch về `None` cả 3 field. Full `pytest`
+**518 passed** (517 trước + 1 mới). `tsc --noEmit` sạch.
+
+## 102. Bulk xoá clip đã cắt ở Kho Tài Nguyên (2026-09-02)
+
+Bảng "Clip đã cắt" đã có multi-select (dùng cho bulk gắn nhãn/tag kênh từ mục 94/98) nhưng
+chưa có hành động XOÁ hàng loạt — chỉ xoá được từng clip 1. Thêm `POST /asset-vault/clips/
+batch-delete` (mirror `batch_delete_raw_videos` — lặp qua từng clip gọi `ingest.
+delete_processed_clip` thay vì 1 câu SQL DELETE hàng loạt, vì cần dọn file trên đĩa + vector
+Chroma cho từng clip, không chỉ xoá hàng DB). Frontend: nút "Xoá" (màu đỏ) trong thanh bulk
+action, cùng vị trí/kiểu dáng các nút bulk khác, có `confirm()` trước khi xoá thật. 2 test
+mới (`test_batch_delete_clips_removes_files_and_rows`, `..._rejects_empty_list`). Full
+`pytest` **520 passed**. `tsc --noEmit` sạch.
+
+## 103. "Method Not Allowed" ở bulk-xoá clip (backend chưa restart) + bug thật phát hiện lúc kiểm tra: `assign_vault_clip` lọc kênh SAI query sau khi clip có tag riêng (mục 98) (2026-09-02)
+
+Người dùng báo bấm bulk-xoá clip (mục 102) ra lỗi "Method Not Allowed", và hỏi liệu xoá
+clip có làm shot ĐÃ GÁN clip đó ở Visual Studio hết dùng được không.
+
+**"Method Not Allowed" — xác nhận lại KHÔNG phải bug code**: check trực tiếp tiến trình
+backend app đang chạy (`curl .../openapi.json`) — vẫn là tiến trình CŨ (122 route, không
+có `/asset-vault/clips/batch-delete`), cùng nguyên nhân "chưa tắt hẳn app rồi mở lại" đã
+gặp ở mục 100. Giải thích thêm TẠI SAO lỗi cụ thể là 405 (không phải 404 như mục 100) —
+Starlette khớp `POST /asset-vault/clips/batch-delete` với path pattern
+`/asset-vault/clips/{clip_id}` (khớp "PARTIAL" — coi "batch-delete" là 1 giá trị `clip_id`
+hợp lệ) của 2 route PATCH/DELETE đã có sẵn — path khớp nhưng method không khớp route nào =
+405, khác hẳn path không khớp gì cả = 404.
+
+**Trả lời câu hỏi về matching**: xoá 1 clip KHÔNG làm hỏng shot ĐÃ GÁN clip đó trước đó —
+verify qua đọc code `assign_vault_clip` (`render.py`): lúc gán, file được COPY hẳn vào
+`assets/{shot_id}.<ext>` RIÊNG của project (`shutil.copy2`), không tham chiếu sống tới file
+trong Kho — xoá clip sau đó không đụng tới bản copy này. `linked_clip_id` (ID tham chiếu
+còn lại trong `render.json`) trở thành tham chiếu "chết" vô hại — `guardrail.py` đã tự xử
+lý `clip is None` (bỏ qua cảnh báo rights, không crash). Hệ quả ĐÚNG duy nhất: clip đã xoá
+không còn được GỢI Ý/GÁN cho shot MỚI nữa — đúng ý nghĩa của việc xoá.
+
+**Bug thật phát hiện lúc kiểm tra kỹ câu hỏi này** — `assign_vault_clip` (`render.py`)
+lọc kênh của clip khi gán qua JOIN `raw_video_channel` (kênh của `raw_video` CHA) — sót lại
+TỪ TRƯỚC khi `ProcessedClip` có tag kênh RIÊNG (mục 98, lúc đó chỉ sửa `matching.py::
+_clips_for_channel` cho danh sách GỢI Ý, quên mất hàm GÁN THẬT này cũng cần đổi tương tự).
+Hệ quả: (1) clip mồ côi (raw_video cha đã bị xoá) VẪN hiện đúng trong danh sách gợi ý
+(matching.py đã fix) nhưng KHÔNG BAO GIỜ gán được — JOIN `RawVideo` không còn hàng nào để
+khớp, 404 "Không tìm thấy clip"; (2) clip đã tự sửa tag kênh riêng (khác kênh của
+raw_video cha) bị lọc SAI theo kênh CŨ. Fix: đổi sang JOIN `processed_clip_channel` (tag
+riêng của clip), khớp đúng `matching.py`. Test mới `test_assign_vault_clip_works_for_clip_
+whose_raw_video_was_deleted` (xoá raw_video cha rồi gán clip mồ côi vào shot — trước fix sẽ
+404, sau fix 200) tái hiện đúng bug #1 ở trên. Full `pytest` **521 passed**.
+
+## 104. Bug thật: xoá trắng `motion_tone`/`cultural_lock_negative` ở Sửa BrandProfile rồi lưu — mở lại vẫn còn giá trị cũ + kênh mới tạo không trống hẳn (2026-09-02)
+
+Người dùng tự test: xoá trắng 2 field "Tông chuyển động video AI local (motion_tone)" và
+"Loại trừ văn hoá ngoại lai (cultural_lock_negative)" rồi lưu — mở lại dialog vẫn thấy giá
+trị cũ, như chưa lưu được. Đồng thời yêu cầu: kênh MỚI TẠO nên có các trường trống hẳn.
+
+**Root cause verify thật (đọc code, không suy đoán) — bug nằm HOÀN TOÀN Ở FRONTEND, backend
+lưu/đọc đúng**: `PUT /channels/{id}/brandprofile` (`routers/channels.py`) là full-replace,
+`body.model_dump()` KHÔNG có `exclude_unset`/`exclude_none`/truthy-check nào — chuỗi rỗng
+gửi lên được ghi đúng nguyên văn vào `brandprofile.json`. Bug thật ở `ChannelDialog.tsx::
+draftFromProfile` — 2 field NÀY (khác MỌI field khác trong cùng hàm, vốn đều `|| ""`) dùng
+`bp.motion_tone || "chuyển động chậm, tinh tế..."` / `bp.cultural_lock_negative || "japanese
+kimono..."` — chuỗi rỗng THẬT SỰ đã lưu (falsy trong JS) bị coi giống hệt "chưa có giá trị",
+form tự điền lại đúng cụm gợi ý cũ (trùng khớp default cũ của SCHEMA, mục 58 file schemas),
+trông y hệt "chưa lưu được" dù backend đã lưu đúng chuỗi rỗng. `emptyDraft()` (form kênh
+MỚI TẠO) cũng ghim cứng 2 cụm gợi ý này làm giá trị THẬT thay vì để trống — cộng thêm
+`BrandProfile` Pydantic schema (`schemas/__init__.py`) TỪNG có default không rỗng cho cả 2
+field — kênh mới tạo (`BrandProfile(channel_id=cid, niche=...)`, không truyền 2 field này)
+tự nhận default không rỗng đó.
+
+### Fix
+
+`schemas/__init__.py` — đổi default `motion_tone`/`cultural_lock_negative` về `""`. `Channel
+Dialog.tsx`: `emptyDraft()` đổi 2 field về `""`; `draftFromProfile()` đổi `|| "<gợi ý cũ>"`
+thành `|| ""` (khớp mọi field khác trong hàm) — sửa ĐÚNG gốc rễ bug xoá-không-lưu-được. Gợi ý
+cũ KHÔNG mất hẳn — chuyển thành `placeholder` (chữ mờ trong ô nhập, không phải giá trị thật)
+ở JSX, cùng pattern `motionTone`'s input đã có sẵn placeholder từ trước (chỉ `culturalLock
+Negative`'s textarea là thiếu, đã thêm). `render/engine.py` đọc 2 field này qua `brand.get(
+...) or ""` rồi CHỈ nối vào prompt nếu non-empty (`if motion_tone: ...`) — đã tự xử lý rỗng
+gracefully từ trước, không cần sửa gì (kênh không tuỳ biến field này sẽ không có ràng buộc
+chuyển động/loại trừ văn hoá trong prompt — đánh đổi CÓ CHỦ Ý, đúng yêu cầu "trống hẳn"
+người dùng, không âm thầm áp default ẩn nữa).
+
+**Verify**: 2 test mới (`test_channels.py`) — kênh mới tạo có `motion_tone`/`cultural_lock_
+negative` rỗng đúng qua API thật; PUT ghi giá trị rồi PUT lại chuỗi rỗng, GET lại xác nhận
+rỗng (verify riêng phần BACKEND đã đúng từ trước, phân biệt rõ với bug thật ở frontend).
+Full `pytest` **523 passed**. `tsc --noEmit` sạch.
+
+## 105. Visual Studio: tắt hẳn overlay khi đang kế thừa kênh + chuyển Thumbnail sang Output Center (2026-09-02)
+
+Theo yêu cầu người dùng (1 trong 4 cải tiến Visual Studio đề xuất cùng lúc — 2 mục dưới đây
+đã làm, 2 mục còn lại xem phần hỏi thêm ở cuối phiên làm việc).
+
+### Cho phép tắt hẳn overlay khi đang kế thừa từ kênh
+
+Trước đây `DELETE /projects/{id}/render/overlay` chỉ xoá ASSET RIÊNG của project rồi quay
+về dùng overlay mặc định cấp kênh (fallback ngầm) — không có cách nào tắt hẳn overlay khi
+project ĐANG kế thừa (không có override riêng để mà xoá). Đổi hành vi giống hệt
+`delete_intro`/`enable_intro_inherit` đã có sẵn cho shot mở đầu: `OverlayEffectOverride`
+thêm field `disabled: bool` (mới) — `DELETE .../overlay` giờ LUÔN set `disabled=True` (xoá
+file riêng nếu có), `PATCH .../overlay/inherit` (endpoint mới) đặt lại `False`. `overlay.py::
+resolve_overlay_source` kiểm `disabled` TRƯỚC TIÊN — bỏ qua cả brand default nếu `True`.
+Upload overlay mới tự đặt lại `disabled=False` (chắc chắn muốn DÙNG). Frontend
+`OverlayEffectCard`: nút "Bỏ hiệu ứng lớp phủ" giờ hiện CẢ khi đang kế thừa (trước chỉ hiện
+khi đã có asset riêng), thêm nút "Dùng lại mặc định thương hiệu" khi đã tắt, thêm tag "Đã
+tắt — không dùng overlay". 8 test mới (`test_overlay.py`, mirror các test tương ứng của
+intro). Full `pytest` **527 passed** (1 fail/1 error không liên quan — flaky do state SQLite
+chia sẻ giữa module test, PASS khi chạy riêng, không phải do thay đổi này).
+
+### Chuyển block Thumbnail từ Visual Studio sang đầu Output Center
+
+`ThumbnailCard` (không phụ thuộc state riêng của Visual Studio, chỉ cần `project`/`pack`/
+`refresh` — cả 3 đều có sẵn qua `StepProps`) — di chuyển nguyên component + hằng số
+`DEFAULT_YOUTUBE_META` từ `VisualStudio.tsx` sang đầu `OutputCenter.tsx` (trước cả
+`PackExportCard`/`RenderStudio`/`RetentionCard`) — đúng ngữ cảnh "dùng lúc xuất video lên
+YouTube" hơn là Visual Studio (nơi tập trung sinh ảnh/video/giọng đọc từng shot). Không đổi
+logic/API nào, chỉ đổi VỊ TRÍ render. `tsc --noEmit` sạch.
+
+**2 mục còn lại của yêu cầu 4 cải tiến**: "hiệu ứng chuyển cảnh cho shot mở đầu" hoá ra ĐÃ
+CÓ SẴN đầy đủ từ trước (cả FE dropdown lẫn BE áp dụng qua `_xfade_chain`, y hệt shot-to-shot
+— xem `IntroShotCard`/`assembly.py:1167`), không cần sửa gì — đã báo lại người dùng xác
+nhận. "Video nền chung cho toàn bộ block, per-shot visual đè lên trên khi tới slot đó" là
+tính năng KIẾN TRÚC MỚI, có nhiều điểm mơ hồ về hành vi (shot không cấu hình visual có được
+BỎ QUA validation hiện tại không, video nền có SLICE liên tục theo timeline hay loop riêng
+từng slot...) — đã hỏi lại người dùng làm rõ trước khi thiết kế, chưa triển khai trong mục
+này.
+
+## 106. Video nền chung cho toàn bộ block ở Visual Studio (mục cuối trong 4 cải tiến người dùng yêu cầu) (2026-09-02)
+
+Sau khi hỏi lại 2 điểm mấu chốt còn mơ hồ (xem mục 105) — người dùng chọn: (1) shot CHƯA
+cấu hình visual riêng được phép BỎ TRỐNG (không còn bắt buộc mọi shot phải có ảnh/video),
+đoạn thời gian đó tự hiện đúng đoạn video nền tương ứng trên timeline CHUNG (không loop
+riêng từng shot); (2) shot ĐÃ có visual riêng THAY THẾ TOÀN MÀN HÌNH (không phải chồng
+mờ/PiP) trong đúng khoảng thời gian của nó.
+
+### Data model + endpoint (mirror bg_music/overlay, đơn giản hơn — không có cấp kênh)
+
+`render/schemas.py::BackgroundVideoOverride` (mới, field DUY NHẤT `asset_path`) —
+`RenderState.background_video`. KHÁC bg_music/overlay: KHÔNG có field volume/opacity (chỉ
+lấy HÌNH, audio luôn bỏ qua — giọng đọc/nhạc nền vẫn là nguồn audio duy nhất, đúng nguyên
+tắc mọi visual video khác trong app), và KHÔNG có cấp kênh mặc định để "inherit" (đúng
+phạm vi yêu cầu, tránh over-engineer thêm 1 lớp kế thừa không ai hỏi tới). 3 endpoint mới
+(`routers/render.py`): `POST .../background-video/upload`, `DELETE .../background-video`,
+`GET .../background-video/asset` — mirror `upload_project_overlay`/`delete_project_bg_
+music` gần như nguyên vẹn.
+
+### Assembly (`app/render/assembly.py::assemble_video`) — phần việc chính
+
+**Pass 1 (validate)** — đổi từ chặn cứng MỌI shot phải `visual_status=="ready"` sang: shot
+CÓ visual riêng vẫn giữ NGUYÊN yêu cầu `ready`+`approved` (human-gate không đổi cho nội
+dung ĐÃ cấu hình); shot KHÔNG có visual chỉ raise lỗi khi `background_video_source` KHÔNG
+được cấu hình (giữ nguyên hành vi gốc cho project chưa dùng tính năng này). Phát hiện hữu
+ích lúc đọc code: `_shot_base_duration`/`_reflow_video_durations` ĐÃ SẴN hoạt động đúng
+cho shot trống (chỉ đọc `narration_duration_sec`, không đụng `visual_asset_path`) — không
+cần sửa gì ở 2 hàm đó, tiết kiệm đáng kể công sức so với dự tính ban đầu.
+
+**2 hàm ffmpeg mới** — `_build_background_video_master` (dựng 1 bản loop `-stream_loop -1`
+đúng nguồn upload, cắt đủ `sum(durations)` SAU khi đã cộng đệm lead-in/out transition,
+scale/color-grade CHỈ 1 LẦN ở đây — tránh lặp lại xử lý cho mỗi chunk) rồi `_extract_
+background_video_chunk` (cắt ĐÚNG `[offset_cộng_dồn, offset+duration)` cho từng shot
+trống — `-ss` TRƯỚC `-i` + RE-ENCODE, không stream-copy, để seek CHÍNH XÁC theo khung
+hình, tránh hở/đè giữa các chunk nối tiếp). Offset cộng dồn tính theo ĐÚNG thứ tự shot
+trên timeline — khớp yêu cầu "không phân biệt cảnh/slot" (video nền như đang chạy LIÊN
+TỤC phía sau suốt cả video, shot có visual riêng chỉ "che" tạm 1 đoạn rồi trả lại đúng
+chỗ nền đang ở).
+
+**Pass 2 (build segment)** — TÁI DÙNG NGUYÊN `_build_segment` cho shot trống (truyền
+đường dẫn CHUNK đã cắt sẵn làm `visual_path` thay vì `status.visual_asset_path`) — không
+cần viết pipeline song song riêng, tự động thừa hưởng mọi xử lý sẵn có (scale/crop, color
+grade, ghép narration, đệm transition) mà không cần code thêm.
+
+### Frontend
+
+`BackgroundVideoCard` (mới, `VisualStudio.tsx`) — mirror `OverlayEffectCard`/`BgMusicCard`
+nhưng đơn giản hơn (không có volume/opacity slider, không trạng thái "kế thừa"), đặt ngay
+sau "Hiệu ứng lớp phủ riêng". Copy chú thích rõ KHÁC overlay: "thay THẾ HẲN cho slot chưa
+cấu hình" thay vì "đè mờ liên tục".
+
+### Verify
+
+**Test end-to-end THẬT với ffmpeg thật** (`test_background_video.py`, mới) — dựng project
+2 shot: shot A có video ĐỎ thuần + narration riêng, shot B HOÀN TOÀN TRỐNG (không visual)
+chỉ có narration để biết thời lượng; video nền XANH DƯƠNG thuần, cố tình NGẮN hơn hẳn
+tổng timeline (1s so với tổng ~4s) để verify luôn cả việc LOOP hoạt động đúng. Gọi
+`assemble_video()` thật — xác nhận: (1) KHÔNG bị chặn dù shot B chưa có visual, (2) tổng
+thời lượng khớp tổng 2 narration, (3) trích frame giữa khoảng shot A ra ĐÚNG màu đỏ (giữ
+visual riêng), (4) trích frame giữa khoảng shot B ra ĐÚNG màu xanh dương (lấp đúng đoạn
+nền tương ứng, không lệch). Cộng 5 test CRUD endpoint đơn giản. Full `pytest` **534
+passed**. `tsc --noEmit` sạch. `specs/03_api.md`/`specs/04_data_schemas.md` cập nhật đầy
+đủ endpoint + field mới (bao gồm cả `overlay.disabled`/`render/overlay/inherit` của mục
+105 mà lượt trước chưa kịp đồng bộ vào specs).
+
+## 107. Visual Studio: cho phép xoá ảnh/video từng shot + bỏ gate "duyệt" trước khi ghép video (2026-09-02)
+
+Theo yêu cầu người dùng: "Cho phép remove video/image ở từng shot/block sau khi đã add" +
+"Bỏ luồng duyệt block, ko cần phải có thì mới render được video".
+
+### Xoá ảnh/video của 1 shot
+
+Trước đây CHỈ có 2 cách đổi visual của shot: sinh lại (AI) hoặc upload/gán clip Kho —
+CẢ HAI đều THAY THẾ, không có cách nào XOÁ về trạng thái trống mà không phải thay ngay
+bằng cái khác. Endpoint mới `DELETE /projects/{id}/render/shots/{shot_id}/visual`
+(`routers/render.py`) — mirror pattern `delete_intro`/`delete_project_overlay`: xoá file
+trên đĩa (`unlink_retrying`), reset `ShotRenderStatus` về `visual_status="pending"`
+(`visual_asset_path`/`visual_provider`/`linked_clip_id`/`visual_watermark_note` = `null`,
+`approved=false`). 404 nếu chưa từng có render.json entry cho shot (khác `upload-visual`
+tự tạo entry — ở đây không có gì để xoá nên báo lỗi thẳng thay vì tạo entry rỗng vô
+nghĩa). `_require_not_in_progress` chặn chồng lên batch/regenerate khác đang chạy, cùng
+nguyên tắc mọi endpoint mutate render.json khác.
+
+Frontend: nút "Xoá ảnh/video" (màu cảnh báo, `color: var(--color-danger)`) ở mỗi
+`ShotCard` — CHỈ hiện khi `status?.visual_asset_path` có giá trị (không có gì để xoá thì
+không hiện nút). `api.removeShotVisual` (client.ts, dùng `del<RenderState>`).
+
+### Bỏ gate "duyệt" trước khi ghép video
+
+Yêu cầu rõ ràng, không mơ hồ — bỏ HẲN, không giữ dạng "tuỳ chọn nhưng vẫn nhắc nhở". Xoá
+gate ở **3 lớp** (bỏ sót 1 lớp là tính năng coi như chưa xong — phát hiện lúc rà lại code,
+xem "Phát hiện thêm lúc rà soát" bên dưới):
+
+1. **`assembly.py::assemble_video` Pass 1`** — xoá khối `if not status.approved: raise
+   RuntimeError(...)`, chỉ còn giữ `visual_status != "ready"` là điều kiện chặn.
+2. **`routers/render.py::start_assemble`** — xoá biến `not_approved`/check tương ứng (400
+   "chưa được duyệt"). Đồng thời sửa LUÔN check `not_ready` cho khớp `assembly.py` (bug có
+   sẵn từ mục 106, chưa ai phát hiện ra: router chưa hề trừ trường hợp shot KHÔNG có visual
+   riêng NHƯNG project có `background_video` — trước đây LUÔN 400 "chưa sinh xong visual"
+   dù `assemble_video()` thực ra CHO PHÉP trường hợp này, tức tính năng video nền chung mục
+   106 chưa từng dùng được qua HTTP thật, chỉ chạy qua test gọi thẳng `assemble_video()`).
+3. **`RenderStudio.tsx` (Output Center) — nút "Ghép video"** — đây là chỗ CHẶN THẬT SỰ mà
+   người dùng nhìn thấy: `disabled={!allApproved || assembling}` (tính từ
+   `approvedCount === shots.length`). Nếu chỉ sửa 2 lớp backend ở trên mà bỏ sót lớp này,
+   backend đã cho phép ghép không cần duyệt nhưng nút bấm trên UI vẫn khoá — coi như CHƯA
+   sửa gì từ góc nhìn người dùng. Đổi sang `canAssemble` tính từ `notReadyCount` (chỉ còn
+   xét `visual_status`, có tính luôn ngoại lệ shot trống khi có `background_video`, khớp
+   logic router ở lớp 2). Xoá dòng hiển thị "X/Y đã duyệt" + hint "bấm Duyệt" khỏi card
+   "Tình trạng shot".
+
+**Xoá UI "Duyệt" khỏi Visual Studio** — giữ nút "Duyệt" vô hiệu (không còn chặn gì) sẽ gây
+hiểu lầm là vẫn cần bấm. Xoá HẲN khỏi `VisualStudio.tsx`: nút header "Duyệt toàn bộ block
+(N)", nút per-shot "Duyệt"/"Đã duyệt" ở `ShotCard`, tag "Đã duyệt", state
+`pendingApprovalCount`/`approvingAll`, hàm `approveAsset`/`approveAllAssets`. **Backend giữ
+nguyên** `POST .../approve`, `POST .../approve-all`, field `ShotRenderStatus.approved` —
+xoá hẳn field/endpoint tốn công dọn nhiều chỗ (export pack, mọi test dựng
+`ShotRenderStatus(approved=True)` sẵn có) mà không mang lại lợi ích thật (field không gây
+hại gì khi không ai đọc để gate nữa) — giữ lại làm cờ tuỳ chọn, không có UI nào gọi tới.
+`client.ts` cũng giữ nguyên `approveShotAsset`/`approveAllShots` (không dùng, không hại).
+
+### Test
+
+Sửa `test_assemble_requires_all_shots_ready_and_approved` (kỳ vọng cũ: 400 khi chưa duyệt)
+thành 2 test: `test_assemble_requires_all_shots_ready` (400 khi CHƯA sinh asset — vẫn còn
+gate hợp lệ) + `test_assemble_does_not_require_approval` (200 dù không shot nào được
+duyệt — xác nhận đúng hành vi mới). Thêm 6 test mới cho `DELETE .../visual`: xoá thành
+công (reset đúng field + xoá file đĩa), xoá clip Kho tư liệu đã gán (`linked_clip_id` về
+`null`, clip KHÔNG bị xoá khỏi Kho), 404 khi chưa có render.json entry, 404 shot không tồn
+tại, 409 khi có tiến trình khác đang chạy, và 1 test xác nhận xoá visual của shot (không
+có background_video) làm shot đó CHẶN LẠI được `render/assemble` (400) — không phải lỗi
+500 bất ngờ ở tầng ffmpeg. Full `pytest` **541 passed**. `tsc --noEmit` sạch.
+`specs/03_api.md`/`specs/04_data_schemas.md` cập nhật endpoint mới + ghi rõ `approved`
+không còn được kiểm.
+
+## 108. Progress bar lúc ghép video hiện SAI khi có dùng video nền chung (2026-09-02)
+
+Theo yêu cầu người dùng: "Phần progress bar khi render video cần điều chỉnh để hiển thị
+phù hợp trong trường hợp có sử dụng video nền chung."
+
+### Bug thật
+
+`assemble_video` (`assembly.py`) đặt `assembly_progress = AssemblyProgress(stage=
+"segments", current=0, total=len(shots))` NGAY ĐẦU hàm (có `total` sớm để UI hiện số
+ngay) — nhưng khi project CÓ cấu hình video nền chung (mục 106), bước dựng video nền
+(`_build_background_video_master` — re-encode LOOP phủ hết TOÀN BỘ tổng thời lượng
+timeline, có thể mất VÀI PHÚT với video dài, LÀ BƯỚC CHẬM NHẤT trong cả assembly nếu có
+dùng tính năng này) chạy NGAY SAU đó, TRƯỚC Pass 2 (segment thật) — nhưng KHÔNG hề cập
+nhật lại `assembly_progress` trong suốt bước này. Kết quả: `RenderStudio.tsx` hiện
+"Đang ghép cảnh 0/N..." SUỐT thời gian dựng video nền — trông y hệt bị treo ở segment
+đầu tiên, dù thực ra chưa có segment nào bắt đầu. Phát hiện lúc đọc lại code theo yêu cầu
+người dùng (không phải bug người dùng tự report trước, dù đúng là nguyên nhân cảm giác
+"progress bar hiển thị không đúng" họ mô tả).
+
+### Fix — stage riêng + mốc thời gian riêng cho từng stage
+
+`AssemblyProgress` (`schemas.py`) thêm:
+- `stage` thêm giá trị `"background_video"` (cùng `"segments"`/`"concat"` cũ).
+- `stage_started_at: str | null` — mốc STAGE HIỆN TẠI bắt đầu, KHÁC `RenderState.
+  assembly_started_at` (mốc TOÀN BỘ assembly, vẫn giữ nguyên vai trò hiện "Đã chạy: X").
+
+`assembly.py::assemble_video` — trước khi gọi `_build_background_video_master`, set
+`stage="background_video", current=0, total=1+len(blank_indices)` (đơn vị tự nhiên: 1
+cho bước dựng master + 1 cho mỗi chunk cắt riêng từng shot trống), lưu `render.json`
+NGAY (không đợi ffmpeg chạy xong mới ghi). Sau khi master xong → `current=1`. Sau MỖI
+chunk cắt xong (`_extract_background_video_chunk`, trong vòng lặp theo shot trống) →
+`current += 1`, lưu lại. Ngay TRƯỚC KHI Pass 2 (ThreadPoolExecutor build segment thật)
+bắt đầu — reset LẠI `AssemblyProgress(stage="segments", current=0, total=len(shots))`
+với `stage_started_at` MỚI (biến `segments_stage_started_at`, capture 1 lần, dùng lại
+cho MỌI lần cập nhật `current` trong vòng lặp Pass 2 — không phải mốc mới mỗi lần 1
+segment xong). Nếu không reset mốc này, ước lượng "còn lại" ở FE (`remainingSec =
+elapsed/current * (total-current)`) sẽ TÍNH GỘP luôn thời gian đã tốn ở bước dựng video
+nền vào "elapsed", thổi phồng sai lệch ETA ngay từ segment đầu tiên hoàn thành (VD dựng
+nền tốn 3 phút, 1 segment đầu xong sau 5s nữa → công thức cũ tưởng "trung bình 3 phút
+5s/segment", ước lượng còn lại sai theo cấp số nhân).
+
+`RenderStudio.tsx`: `stageElapsedSec` (mới) tính từ `progress.stage_started_at` thay vì
+`elapsedSec` (từ `assembly_started_at`) khi tính `remainingSec` — chỉ áp dụng
+`stage==="segments"` (giữ nguyên guard cũ, `background_video`/`concat` vẫn hiện "Đang ước
+lượng..." như trước, đúng vì KHÔNG có cách tính ETA đáng tin cho 2 stage này). Label
+riêng cho `stage==="background_video"`: "Đang dựng video nền chung (X/Y)... — video dài
+có thể mất vài phút" — thay vì mượn nhầm label "Đang ghép cảnh" của stage segments.
+`current`/`total` mới của stage này (không phải hằng số 0) cũng làm thanh progress nhích
+dần thay vì đứng yên tuyệt đối.
+
+### Test
+
+Test mới `test_assemble_reports_background_video_stage_progress_before_segments`
+(`test_background_video.py`, ffmpeg thật) — spy quanh CẢ 3 hàm ffmpeg liên quan
+(`_build_background_video_master`, `_extract_background_video_chunk`, `_build_segment`),
+đọc LẠI `render.json` NGAY TRƯỚC mỗi lần gọi (không suy đoán từ log) — xác nhận: (1) lúc
+gọi dựng master, `assembly_progress` ĐÃ LÀ `stage="background_video", current=0,
+total=2`; (2) lúc cắt chunk, `current=1`; (3) lúc Pass 2 gọi `_build_segment` lần đầu,
+`stage` đã chuyển hẳn `"segments"` VÀ `stage_started_at` là mốc MỚI, khác hẳn mốc của
+stage `background_video` (xác nhận ETA không bị gộp elapsed sai). Full `pytest` **542
+passed**. `tsc --noEmit` sạch. `specs/04_data_schemas.md` bổ sung mô tả đầy đủ
+`assembly_progress`/`AssemblyProgress` (trước đây field này chưa từng được liệt kê chi
+tiết trong schema doc, dù đã tồn tại từ mục 43 — tiện thể bổ sung luôn khi đang sửa khu
+vực này).
+
+## 109. Chuyển batch giọng đọc từ Visual Studio sang Script Studio + thêm chỉnh tốc độ giọng đọc (2026-09-02)
+
+Theo yêu cầu người dùng:
+- "Bỏ Chức năng Sinh giọng đọc cho toàn bộ block ở màn visual."
+- "Nút sinh giọng đọc cho toàn bộ block (kể cả đã có) chuyển sang bước Script Studio."
+- "Bổ sung nút điều chỉnh tốc độ giọng đọc cho toàn bộ block ở bước Script Studio."
+
+### Chuyển batch giọng đọc — không đổi API, chỉ đổi UI
+
+Script Studio (`ScriptStudio.tsx`) đã CÓ SẴN nút "Sinh giọng đọc cho toàn bộ block" (bản
+`force=false`, gọi `POST render/start?kind=narration`, tồn tại từ mục 30) — chỉ THIẾU bản
+`force=true` ("kể cả đã có", tốn phí sinh lại toàn bộ). Việc cần làm: (1) xoá 2 nút
+narration-batch khỏi `VisualStudio.tsx` — header "Sinh giọng đọc cho toàn bộ block"
+(`kind="narration"`) và mục "Sinh lại TOÀN BỘ giọng đọc (kể cả đã có)" trong OverflowMenu
+"⋯ Tuỳ chọn khác" (`kind="narration", force=true`); (2) thêm bản `force=true` tương ứng
+vào Script Studio, cạnh nút không-force đã có sẵn (nút màu cảnh báo, cùng cách trình bày
+đã dùng cho "Sinh lại TOÀN BỘ Visual" ở Visual Studio). `startAssetGeneration` (Visual
+Studio) đơn giản hoá lại — bỏ tham số `kind` (giờ CHỈ còn sinh "visual"), chỉ còn nhận
+`force: boolean`. Nút "Tạo giọng đọc" RIÊNG từng shot (cả 2 màn — `ShotCard` ở Visual
+Studio, list block ở Script Studio) KHÔNG đổi, chỉ batch bị dời.
+
+Bug thật phát hiện lúc sửa: `startNarrationBatch` (Script Studio) trước đây được gán
+THẲNG làm `onClick={startNarrationBatch}` — thêm tham số `force = false` cho hàm này rồi
+gọi y hệt sẽ khiến React truyền THẲNG `SyntheticEvent` (click event) làm giá trị `force`
+(luôn truthy) thay vì `false` mặc định, biến nút "an toàn" thành force ÂM THẦM mỗi lần
+bấm. Sửa bằng cách bọc `onClick={() => startNarrationBatch()}` (và `startNarrationBatch(true)`
+cho nút force) — cùng lớp bug đã từng gặp ở nơi khác trong React (truyền thẳng hàm nhận
+tham số tuỳ chọn làm handler).
+
+### Chỉnh tốc độ giọng đọc — post-process file audio, KHÔNG phải tham số provider
+
+Người dùng làm rõ khi được hỏi: "điều chỉnh tốc độ giọng đọc cho toàn bộ block ở bước
+Script Studio là điều chỉnh tốc độ của file giọng đọc được tạo ra từ omnivoice" — tức
+time-stretch FILE audio ĐÃ SINH, không phải 1 tham số API riêng của provider TTS. Quyết
+định quan trọng vì rà soát trước đó cho thấy các provider TTS hỗ trợ speed RẤT KHÁC NHAU
+(ElevenLabs có `voice_settings.speed`, Piper hỗ trợ qua `length_scale` nhưng adapter hiện
+tại gọi overload đơn giản không nhận config, Gemini TTS không có tham số speed thật,
+OmniVoice chưa rõ) — nếu làm theo hướng "tham số provider" sẽ phải sửa RIÊNG từng adapter
+với hành vi khác nhau, có provider phải giả lập qua prompt (không đáng tin). Hướng
+post-process file giải quyết GỌN toàn bộ vấn đề này 1 lần, hoạt động ĐỒNG NHẤT bất kể
+provider nào.
+
+**Backend**: `RenderState.narration_speed: float = 1.0` (mới, `schemas.py`) — field mức
+PROJECT (không phải BrandProfile cấp kênh, không có khái niệm "kế thừa" — đơn giản đúng
+phạm vi yêu cầu). `engine.py::_apply_narration_speed(path, speed)` (mới) — chạy ffmpeg
+`filter:a atempo=<speed>` NGAY TẠI FILE trên đĩa, ghi ra file tạm CÙNG ĐUÔI gốc (`_speed_
+tmp.<ext>`, không phải `.tmp` — ffmpeg suy muxer output từ đuôi file, đuôi lạ sẽ không tự
+chọn được format) rồi `Path.replace()` đè lên file gốc. `speed==1.0` bỏ qua HOÀN TOÀN
+(không tốn re-encode, không gọi `shutil.which`); thiếu ffmpeg hoặc lệnh lỗi — bỏ qua ÂM
+THẦM, giữ file gốc CHƯA điều chỉnh (cùng nguyên tắc `media_probe.py::probe_duration_sec`:
+xử lý phụ trợ không được chặn luồng generate chính). Gọi hàm này trong `generate_
+narration_asset` NGAY SAU `write_bytes(path, data)`, TRƯỚC `_probe_audio_duration_sec` —
+nhờ vậy `narration_duration_sec` tự động phản ánh ĐÚNG thời lượng đã điều chỉnh, mọi logic
+downstream (segment duration lúc ghép, transcript .srt) không cần biết gì về "speed".
+Endpoint mới `PATCH /projects/{id}/render/narration-speed` (body `{speed: float}`,
+validate 0.5–2.0, 400 nếu ngoài khoảng — phạm vi giữ trong ngưỡng ffmpeg `atempo` 1 lần
+filter xử lý tốt, không cần chain).
+
+**Frontend**: Script Studio — thanh trượt "Tốc độ giọng đọc" (range 0.5–2.0, step 0.05,
+lưu lúc `onMouseUp`/`onTouchEnd` — cùng pattern `BgMusicCard`/`OverlayEffectCard` đã dùng
+cho volume/opacity), hiện giá trị hiện tại + ghi chú rõ "chỉ áp dụng cho giọng đọc SINH
+MỚI sau khi chỉnh" (đúng nguyên tắc "không tự chạy ngầm" — đổi tốc độ KHÔNG tự sinh lại
+narration đã có, người dùng tự bấm 1 trong 2 nút batch để áp dụng).
+
+### Test
+
+Backend: file mới `test_narration_speed.py` (14 test) — CRUD endpoint (lưu giá trị, 400
+ngoài khoảng [0.5, 2.0], chấp nhận biên), `_apply_narration_speed` với ffmpeg THẬT (verify
+duration đổi ĐÚNG tỷ lệ khi speed=2.0/0.5, no-op khi speed=1.0 — assert `shutil.which`
+KHÔNG được gọi, bỏ qua an toàn khi thiếu ffmpeg), và 1 test tích hợp gọi thẳng
+`generate_narration_asset()` với provider TTS giả (`_FakeOmniVoiceProvider`, trả WAV THẬT
+sinh bằng ffmpeg — không phải bytes rác — để `atempo` thật sự chạy được) xác nhận
+`narration_duration_sec` ghi lại ĐÚNG thời lượng file ĐÃ điều chỉnh. Full `pytest` **556
+passed**. `tsc --noEmit` sạch. `specs/03_api.md`/`specs/04_data_schemas.md` cập nhật
+endpoint mới + field `narration_speed` + ghi rõ UI narration-batch đã chuyển màn.
+
+## 110. Nút "Dừng" sinh giọng đọc ở Script Studio + video nền chung hỗ trợ nhiều video/random loop/transition (2026-09-02)
+
+Theo yêu cầu người dùng:
+- "Khi bấm sinh giọng đọc toàn bộ ở màn Script Studio, cho phép user dừng chu trình sinh
+  giọng đọc bất cứ khi nào. Hiện tại nút dừng vẫn đang ở màn Visual Studio... Nếu đúng
+  [nút dùng chung cho sinh visual] thì cần tách riêng ra."
+- "Ở bước visual studio, Block video nền chung: Cho phép upload nhiều video làm nền, cho
+  phép set random loop (on/off), cho phép set hiệu ứng chuyển cảnh transition giữa các
+  video."
+
+### Nút "Dừng" ở Script Studio — KHÔNG cần tách backend, chỉ thiếu UI
+
+Rà lại `engine.py` trước khi sửa: cờ "đang chạy"/"đã yêu cầu huỷ" (`_in_progress`/
+`_cancel_requested`) là PER-PROJECT, KHÔNG tách theo `kind` — `run_asset_generation`
+kiểm `is_cancel_requested(project_id)` TRƯỚC MỖI shot bất kể đang sinh visual hay
+narration, và `_require_not_in_progress` (router) vốn đã chặn 2 batch chạy chồng (chỉ 1
+batch/project tại 1 thời điểm). Nghĩa là giả thuyết người dùng nêu ("có thể nút này đang
+dùng chung") đúng ở mức Ý NGHĨA (chỉ có 1 khái niệm "đang chạy" cho cả project) nhưng
+KHÔNG có gì để "tách" ở tầng backend — không tồn tại 2 tiến trình visual+narration chạy
+song song cần phân biệt. Vấn đề THẬT SỰ thuần là thiếu UI: Script Studio (quản lý CHÍNH
+batch giọng đọc từ mục 109) chưa từng có nút gọi `POST render/cancel`, buộc người dùng
+rời sang Visual Studio mới dừng được. Thêm nút "⏹ Dừng" vào `ScriptStudio.tsx` — gọi
+ĐÚNG `api.cancelRender` y hệt Visual Studio, chỉ khác vị trí hiện (theo `hasInFlight`,
+đã tính sẵn từ trước). Không đổi gì ở backend.
+
+### Video nền chung — nhiều video, random loop, transition
+
+**Schema** (`schemas.py::BackgroundVideoOverride`) — đổi `asset_path: str | null` (1 video)
+thành `asset_paths: list[str]` (nhiều video, thứ tự = thứ tự upload) + 2 field mới
+`random_order: bool` (mặc định `False`) và `transition: str` (mặc định `"cut"`, cùng
+danh sách `TRANSITIONS` dùng cho shot-to-shot). KHÔNG giữ tương thích ngược — tính năng
+gốc (mục 106) vừa build CÙNG NGÀY, chưa có dữ liệu thật cần migrate.
+
+**Endpoint** (`routers/render.py`) — `POST .../upload` đổi từ "thay tại chỗ" sang "THÊM
+vào danh sách" (tên file gắn mốc mili-giây + độ dài danh sách hiện tại làm hậu tố, tránh
+đè file nếu 2 lần upload rơi trùng mili-giây). Thêm `DELETE .../background-video/{index}`
+(bỏ đúng 1 video), `PATCH .../background-video` (`{random_order?, transition?}`, validate
+`transition` theo `TRANSITIONS`, 400 nếu sai). `GET .../background-video/asset` đổi
+thành `.../asset/{index}`. `DELETE .../background-video` (không kèm index) giữ nguyên ý
+nghĩa cũ — bỏ HẲN toàn bộ.
+
+**Assembly** (`assembly.py`) — hàm mới `_build_background_video_playlist`: nối NHIỀU
+video thành 1 "playlist" TRƯỚC khi đưa vào `_build_background_video_master` (loop, KHÔNG
+đổi) — scale/grade TỪNG clip rồi nối bằng filter `concat` (`transition=="cut"`) hoặc
+`xfade` THẬT (video-only, không audio — khác `_xfade_chain` của pipeline chính vốn phải
+blend cả audio track, nên viết hàm riêng đơn giản hơn thay vì tái dùng). Xfade chain
+GỘP TRONG 1 LỆNH FFMPEG DUY NHẤT (khác `_xfade_chain`'s kỹ thuật "cắt head/blend tách
+riêng" — không cần thiết ở quy mô video nền, thường chỉ vài clip B-roll, không phải
+video tích luỹ dài hàng chục phút qua nhiều bước merge như pipeline chính). CHỈ gọi bước
+playlist khi có ≥2 video — 1 video (case phổ biến nhất) bỏ qua hẳn, dùng thẳng video đó
+làm nguồn cho `_build_background_video_master`, giữ NGUYÊN 100% hành vi/test mục 106,
+không tốn thêm re-encode. `random_order=true` — `random.shuffle()` 1 bản COPY của
+`asset_paths` mỗi lượt `assemble_video()` (không mutate thứ tự gốc hiện trên UI, không
+xáo lại mỗi vòng lặp `-stream_loop -1` — đơn giản đúng yêu cầu, tránh dựng playlist động
+phức tạp mỗi chu kỳ lặp).
+
+**Progress** (mục 108, `AssemblyProgress`) — `bg_total` cộng thêm 1 đơn vị "playlist" khi
+có ≥2 video (`2 (playlist + master) + số shot trống`, so với `1 + số shot trống` khi chỉ
+1 video) — vẫn đúng nguyên tắc "đơn vị tự nhiên sẵn có", không cần ước lượng % giả.
+
+**Frontend** (`VisualStudio.tsx::BackgroundVideoCard`) — viết lại hoàn toàn: danh sách
+video (mỗi video 1 preview + nút "Bỏ video này" riêng), input `multiple` cho phép chọn
+nhiều file cùng lúc (upload TUẦN TỰ, không `Promise.all` — mỗi lần APPEND vào render.json
+qua đọc-sửa-ghi, song song thật sự có thể ghi đè nhau), checkbox "Random loop" + dropdown
+"Chuyển cảnh giữa các video" (tái dùng `TRANSITION_OPTIONS` đã có sẵn cho shot-to-shot) —
+2 control này CHỈ hiện khi có ≥2 video (không ý nghĩa với 0-1 video). `client.ts` thêm
+`deleteProjectBackgroundVideoItem`/`patchProjectBackgroundVideoSettings`, đổi
+`projectBackgroundVideoUrl` nhận thêm `index`.
+
+### Test
+
+Viết lại HẲN `test_background_video.py` (7 → 16 test, theo API mới): CRUD (upload append,
+xoá theo index, xoá toàn bộ, xem theo index, 404, PATCH settings + validate transition),
+2 unit test `_build_background_video_playlist` với ffmpeg THẬT (`"cut"` nối đúng thứ tự +
+đúng tổng thời lượng; transition thật làm tổng NGẮN HƠN tổng thô, xác nhận có blend thật
+— không phải giả định), 1 test end-to-end MỚI với 2 video nền thật (xanh lá + vàng) qua
+`assemble_video()` xác nhận đúng thứ tự xuất hiện, và 2 test progress (case 1 video giữ
+nguyên `bg_total = 1 + blank`, case nhiều video xác nhận `bg_total = 2 + blank` VÀ bước
+playlist được spy đúng lúc). Full `pytest` **565 passed**. `tsc --noEmit` sạch.
+`specs/03_api.md`/`specs/04_data_schemas.md` cập nhật đầy đủ schema/endpoint mới + ghi
+chú rõ cơ chế "Dừng" là per-project (giải thích tại sao KHÔNG cần tách backend).
+
+## 111. Điều tra + xử lý bug thật: project bị kẹt "assembling" mãi mãi + phòng tránh/UI xử lý (2026-09-02)
+
+Người dùng báo: bấm ghép video cho project dài (~28 phút, 61 shot, dùng video nền chung
+mục 106/110) nhưng không thấy progress chạy. Điều tra TRỰC TIẾP trên backend đang chạy
+thật của người dùng (tìm đúng port qua `wmic`/`tasklist` — cổng mặc định 8756 tình cờ bị
+1 service KHÔNG LIÊN QUAN chiếm, backend thật của StudioFlow nằm ở cổng Electron cấp phát
+động), tìm đúng project qua `GET /channels` → `GET /channels/{id}/projects`, đọc `GET
+.../render/status` thật:
+
+- `assembly_status="assembling"`, `assembly_progress={stage: "background_video",
+  current: 0, total: 62}`, đứng yên SUỐT ~4 phút.
+- `tasklist` xác nhận KHÔNG có tiến trình `ffmpeg.exe` nào đang chạy — nhưng
+  `renders/segments/_bg_master.mp4` (file dựng video nền chung) đã tồn tại THẬT, 3.4GB,
+  mtime CÁCH ~2 phút sau lúc bắt đầu ghép và ĐỨNG YÊN từ đó — bằng chứng: bước dựng video
+  nền đã DỰNG XONG THÀNH CÔNG, nhưng thread xử lý nó "chết lặng" NGAY SAU ĐÓ, trước khi
+  kịp lưu tiến độ tiếp theo hay ghi lỗi. `assembly_status` bị KẸT vĩnh viễn — vì `start_
+  assemble` (router) TRƯỚC ĐÂY chỉ tin field `assembly_status` ĐÃ LƯU, người dùng KHÔNG
+  BẤM GHÉP LẠI ĐƯỢC NỮA (409) kể cả sau khi khởi động lại app (field nằm trong file, không
+  phải bộ nhớ). Fix TẠM THỜI ngay lúc điều tra: reset thủ công qua chính module `engine.py`
+  của backend (không sửa tay JSON) để người dùng bấm ghép lại được ngay.
+
+Người dùng hỏi tiếp: "có cách nào để tránh lỗi tương tự xảy ra, hoặc giải pháp để xử lý ở
+tầng UI cho user biết và làm" — 4 phần việc:
+
+### 1. Khả nghi nguyên nhân gốc — encoding console Windows
+
+Lúc thao tác reset thủ công, gặp NGAY `UnicodeEncodeError: 'charmap' codec can't encode
+character...` khi in tiếng Việt ra console (mặc định cp1252 trên máy Windows này, không
+phải UTF-8). `electron/src/backend-launcher.ts::startBackend` spawn Python KHÔNG set
+`PYTHONIOENCODING`/`PYTHONUTF8` — nghĩa là `sys.stdout`/`stderr` của backend thừa hưởng
+NGUYÊN codepage console mặc định của máy. Toàn bộ app dùng tiếng Việt (thông điệp lỗi,
+docstring runtime...) — nếu BẤT KỲ đâu trong 1 luồng nền có in/log ra console 1 chuỗi có
+dấu, `UnicodeEncodeError` có thể xảy ra NGOÀI phạm vi try/except Python thông thường (VD
+trong chính cơ chế in traceback mặc định của interpreter khi 1 exception thật sự thoát ra
+ngoài), khiến thread chết mà KHÔNG chạy tới được `except Exception` đang bọc sẵn trong
+`assemble_video`. KHÔNG chứng minh được 100% đây là nguyên nhân THẬT của lần crash cụ
+thể này (không có log lịch sử để đối chiếu), nhưng là rủi ro CÓ THẬT, chi phí sửa gần như
+0, và đóng hẳn 1 lớp khả năng — thêm `PYTHONIOENCODING: "utf-8"` + `PYTHONUTF8: "1"` vào
+`env` lúc spawn backend.
+
+### 2. Tự phục hồi — `_assembly_in_progress` (cờ trong bộ nhớ, giống `_in_progress` đã có)
+
+Root gap thật sự: `start_assemble` gate hoàn toàn dựa vào `state.assembly_status` ĐÃ LƯU
+trong render.json — KHÁC `run_asset_generation` (dùng `_in_progress`, set TRONG BỘ NHỚ,
+tự về rỗng khi backend khởi động lại — "tự phục hồi" đã có sẵn cho asset generation từ
+trước, chỉ assembly chưa có). Thêm `engine.py::_assembly_in_progress`/`is_assembly_in_
+progress`/`_mark_assembly_in_progress`/`_mark_assembly_done` (y hệt pattern cũ). `assembly.
+py::assemble_video` tách thân hàm gốc thành `_assemble_video_impl` (giữ NGUYÊN 100% logic,
+không re-indent 400 dòng) rồi bọc `_mark_assembly_in_progress`/`_mark_assembly_done` (try/
+finally) NGOÀI CÙNG — cờ LUÔN được dọn khi hàm chạy xong dù thành công/lỗi/timeout mới
+(mục 3), TRỪ KHI tiến trình bị kill cứng (trường hợp đó khởi động lại app cũng tự dọn vì
+cờ nằm trong bộ nhớ tiến trình cũ). `start_assemble`: `if assembly_status=="assembling"
+AND is_assembly_in_progress(): 409` — nếu field lưu nói "assembling" nhưng cờ bộ nhớ đã
+`False` (đúng kịch bản kẹt vừa gặp), tự cho ghép lại, KHÔNG cần can thiệp tay nữa.
+
+### 3. Timeout ffmpeg cho 2 lệnh "nặng nhất" — `_build_background_video_master`/`_playlist`
+
+Phát hiện PHỤ lúc viết test cho mục 2: gọi `_build_segment` thật với bytes ảnh/video GIẢ
+(test fixture) khiến ffmpeg treo >120s không đoán trước được — cho thấy KHÔNG có
+`subprocess.run(...)` nào trong `assembly.py` (15 chỗ) từng có `timeout=`. Với ĐA SỐ lệnh
+(build từng segment/run/concat...) rủi ro treo thấp (input do chính app tự sinh, đã qua
+nhiều lớp validate) nên KHÔNG đổi hết 15 chỗ (tránh chọn timeout quá chặt gây fail oan cho
+project dài hợp lệ). Ưu tiên ĐÚNG 2 hàm rủi ro cao nhất và liên quan trực tiếp tới sự cố
+này — `_build_background_video_master`/`_build_background_video_playlist` (mục 106/110):
+chạy 1 LỆNH FFMPEG DUY NHẤT xử lý CẢ project, KHÔNG có checkpoint/tiến trình con nào để tự
+báo giữa chừng (khác Pass 2 — mỗi shot 1 lệnh riêng, dù 1 lệnh treo cũng không kẹt CẢ
+project). Thêm `_BACKGROUND_VIDEO_FFMPEG_TIMEOUT_SEC = 7200` (2 giờ — rộng rãi, project
+thật ~28 phút chỉ mất ~2 phút để dựng master, vẫn đặt 1 TRẦN cuối thay vì vô hạn). Except
+mới `subprocess.TimeoutExpired` trong `assemble_video` — set `assembly_status="error"`
+với thông điệp rõ ràng thay vì để `CalledProcessError`/`Exception` chung xử lý mơ hồ.
+
+### 4. Giải pháp UI — nút "Đặt lại tiến trình bị treo"
+
+Endpoint mới `POST /projects/{id}/render/assemble/reset` — đặt `assembly_status="error"`
+kèm thông điệp rõ, 409 nếu `is_assembly_in_progress` vẫn `True` (chặn đặt lại nhầm 1 tiến
+trình đang chạy bình thường), 400 nếu không có gì để đặt lại. KHÔNG xoá file trung gian đã
+dựng dở (`renders/segments/`) — lần ghép lại tự ghi đè (`-y`), không cần dọn tay.
+
+`RenderStudio.tsx` — nút "Đặt lại tiến trình bị treo" LUÔN hiện suốt lúc đang ghép (KHÔNG
+gắn ngưỡng thời gian tự động cảnh báo) — cân nhắc kỹ: bước "background_video" với video
+dài có thể ĐỨNG YÊN THẬT SỰ ở 0/N rất lâu (chính bản chất bug mục 108 đã mô tả, không phải
+dấu hiệu treo), nên KHÔNG có ngưỡng "bao lâu là treo" đáng tin cậy để tự động báo mà không
+báo nhầm cho project dài hợp lệ — thay vào đó luôn cho người dùng QUYỀN TỰ QUYẾT ngay khi
+họ nghi ngờ, chỉ thêm gợi ý text SAU 5 phút ("có thể đặt lại nếu nghi treo"), backend tự
+chối (409) nếu bấm nhầm lúc đang chạy thật.
+
+### Test
+
+`test_render.py` — 6 test mới: tự phục hồi khi status kẹt mà KHÔNG có cờ thật (không còn
+409), vẫn chặn 409 khi cờ thật đang giữ, reset endpoint (thành công/409/400), và 1 test
+spy xác nhận `_assembly_in_progress` đúng `True` lúc Pass 2 chạy + LUÔN `False` sau khi
+xong (kể cả nhánh lỗi) — bài học viết test: dùng bytes ảnh/video GIẢ cho ffmpeg THẬT xử lý
+dễ treo khó đoán, sửa bằng cách cho `_build_segment` raise NGAY sau khi ghi nhận cờ thay
+vì gọi hàm thật. `test_background_video.py` — 1 test mới verify nhánh `TimeoutExpired`
+(monkeypatch `subprocess.run` raise timeout) → `assembly_status="error"` với thông điệp rõ
++ cờ `_assembly_in_progress` vẫn được dọn đúng. `tsc -p electron/tsconfig.json` sạch.
+Full `pytest` **572 passed**. `tsc --noEmit` (frontend) sạch. `specs/03_api.md` cập nhật
+2 endpoint mới + ghi rõ cơ chế tự phục hồi.
+
+## 112. Layer video định vị theo lưới 3x3 (VD voice wave) ở Visual Studio (2026-09-02)
+
+Theo yêu cầu người dùng: "Tôi muốn có 1 tính năng cho phép thêm các layers vào khung
+hình của video tại các vị trí khác nhau (chia khung hình thành 9 phần và cho phép lựa
+chọn vị trí để đặt layer đó vào). Mục đích: tôi muốn thêm layer voice wave (dạng video
+loop) vào bên trên video nền."
+
+Đã trao đổi trước khi build 2 quyết định thiết kế chính: (1) nguồn layer LUÔN có sẵn kênh
+alpha (WebM VP9/MOV ProRes4444 trong suốt — KHÔNG phải clip nền đen kiểu overlay hiện có)
+→ dùng thẳng filter `overlay` + alpha thật, không cần kỹ thuật screen-blend phức tạp hơn;
+(2) hỗ trợ NHIỀU layer cùng lúc (danh sách) ngay từ đầu, không chỉ 1 slot cố định.
+
+### Data model + endpoint (mirror background-video mục 110, đơn giản hơn)
+
+`schemas.py::VideoLayer` (mới) — `id`, `asset_path`, `position` (1 trong 9 giá trị lưới
+3x3: `top/middle/bottom` × `left/center/right`), `width_pct` (mặc định 0.3 — % chiều
+rộng khung hình xuất, chiều cao tự co theo tỉ lệ gốc), `opacity` (mặc định 1.0).
+`RenderState.layers: list[VideoLayer]`. 4 endpoint mới (`routers/render.py`): `POST
+.../layers/upload` (multipart `file` + form `position`/`width_pct`/`opacity`, THÊM 1
+layer mỗi lần gọi — cùng tên file `layer_<ts>_<n>.<ext>` tránh đè như video nền), `PATCH
+.../layers/{layer_id}` (partial update), `DELETE .../layers/{layer_id}`, `GET .../
+layers/{layer_id}/asset`.
+
+### Assembly (`assembly.py::_composite_layers`) — phần việc chính
+
+Vị trí → toạ độ: dùng THẲNG biến RUNTIME của ffmpeg (`main_w`/`main_h`/`overlay_w`/
+`overlay_h`) trong filter `overlay` (`_layer_position_expr`) — KHÔNG tính pixel cụ thể ở
+Python, tự đúng tỉ lệ dù xuất 720p/1080p/4K, lề (margin) tính theo % khung hình
+(`0.02*main_w`/`0.02*main_h`). Mỗi layer: `-stream_loop -1` cho nguồn (đủ dài dù clip
+loop ngắn hơn nhiều lần) → `scale={pixel CHẴN}:-2` (kích thước TÍNH SẴN ở Python vì độ
+phân giải xuất đã biết, khác x/y của `overlay` — biến đó chỉ có tại thời điểm composite)
+→ `format=yuva420p` (đảm bảo có kênh alpha dù nguồn khác định dạng) →
+`colorchannelmixer=aa={opacity}` (chỉnh độ mờ qua alpha CÓ SẴN — khác overlay hiệu ứng
+lớp phủ phải giảm SÁNG vì `blend` screen không có alpha trực tiếp). Nhiều layer — chain
+`overlay` NỐI TIẾP trong 1 lệnh ffmpeg DUY NHẤT (số layer thực tế nhỏ, an toàn bộ nhớ,
+cùng lý do đã áp dụng cho `_build_background_video_playlist` mục 110). `shortest=1` trên
+MỌI node `overlay` trong chain — bài học đã có từ `_mix_overlay_effect` (mục 68): nguồn
+loop VÔ HẠN, thiếu cờ này sẽ treo vô thời hạn chờ EOF không bao giờ tới. Dùng lại
+`_WHOLE_VIDEO_FFMPEG_TIMEOUT_SEC` (đổi tên từ `_BACKGROUND_VIDEO_FFMPEG_TIMEOUT_SEC`, mục
+111 — giờ dùng chung cho MỌI lệnh ffmpeg xử lý CẢ project trong 1 lệnh duy nhất, không
+chỉ riêng video nền) — cùng lưới an toàn chống treo vô hạn.
+
+Gọi trong `_assemble_video_impl` NGAY SAU bước blend overlay hiệu ứng lớp phủ (nếu có) —
+layer LUÔN nổi TRÊN CÙNG, không bị mưa/tuyết che — và TRƯỚC bước chuẩn hoá loudness cuối
+cùng, cùng pattern ghi-đè-tại-chỗ (`final_path`) đã dùng cho bg_music/overlay. KHÔNG thêm
+`assembly_progress` stage riêng cho bước này (khác video nền chung mục 108/110) — bước
+này rẻ hơn nhiều (chỉ composite lên video ĐÃ ghép xong, không phải re-encode toàn bộ
+timeline), đúng cùng mức độ với overlay/bg_music hiện có (2 bước đó cũng không có stage
+riêng).
+
+### Frontend (`VisualStudio.tsx`)
+
+`PositionGridPicker` (mới, dùng chung) — lưới 9 ô bấm được, ô đang chọn tô sáng.
+`LayersCard` (mới, đặt cạnh `BackgroundVideoCard`) — danh sách layer đã có (mỗi layer: 1
+preview video, lưới chọn vị trí riêng — đổi ngay lập tức qua `PATCH`, 2 thanh trượt kích
+thước/độ mờ — lưu lúc thả chuột giống `BgMusicCard`/`OverlayEffectCard`, nút bỏ layer) +
+khối "Thêm layer mới" (chọn vị trí/kích thước/độ mờ TRƯỚC, rồi chọn file — 3 giá trị đó
+gửi kèm ngay lúc upload). `client.ts` thêm `uploadProjectLayer`/`patchProjectLayer`/
+`deleteProjectLayer`/`projectLayerAssetUrl`.
+
+### Test
+
+File mới `test_layers.py` (22 test) — CRUD đầy đủ (upload append/validate 5 trường hợp
+sai, PATCH partial update/404/validate, DELETE/404, GET asset/404, mặc định danh sách
+rỗng), 4 test `_composite_layers` với ffmpeg THẬT dùng clip WebM VP9 alpha thật (không
+giả định) — xác nhận: định vị ĐÚNG ô lưới (vùng ngoài layer giữ nguyên màu nền), độ mờ
+áp dụng ĐÚNG qua alpha (so khớp công thức "over" chuẩn: `fg*alpha + bg*(1-alpha)`), NHIỀU
+layer cùng lúc không đè lên nhau ngoài vùng của chúng — và 1 test tích hợp `assemble_
+video()` đầy đủ xác nhận layer thật sự xuất hiện trên video cuối cùng. Full `pytest`
+**594 passed**. `tsc --noEmit` sạch. `specs/03_api.md`/`specs/04_data_schemas.md` cập
+nhật đầy đủ schema/endpoint mới.
+
+## 113. Layer định vị hỗ trợ nguồn nền đen (screen-blend) — không chỉ alpha (2026-09-02)
+
+Ngay sau mục 112, người dùng thử dùng tính năng và báo: "tôi chỉ có video layer nền đen
+thôi. Hãy process nền đen" — asset THẬT của người dùng KHÔNG có kênh alpha (khác giả
+định đã XÁC NHẬN TRƯỚC lúc thiết kế mục 112 qua câu hỏi trực tiếp — thực tế sai với giả
+định ban đầu, không phải lỗi code).
+
+### Thiết kế — screen-blend CỤC BỘ, không phải toàn khung hình
+
+`VideoLayer.blend_mode` (mới) — `"alpha"` (mặc định, giữ NGUYÊN hành vi mục 112) hoặc
+`"screen"`. Chế độ `"screen"` dùng ĐÚNG kỹ thuật đã có ở `_mix_overlay_effect` (overlay
+hiệu ứng lớp phủ mục 68 — nền đen "biến mất" khi `blend=all_mode=screen`, cùng bài học
+màu tím sai đã ghi ở đó: PHẢI `format=gbrp` cả 2 nhánh trước blend, không được `yuv420p`/
+`rgb24` thẳng) nhưng hàm ĐÓ blend TOÀN khung hình (2 input CÙNG kích thước) — layer ở đây
+cần ĐỊNH VỊ tại 1 vùng nhỏ, nên thêm 2 bước bao quanh: (1) `crop` đúng vùng nền tương ứng
+vị trí layer từ khung hình đang ghép, (2) blend screen giữa vùng đã cắt và layer (đã
+scale cùng kích thước), ra 1 "miếng vá", (3) `overlay` miếng vá đó TRỞ LẠI đúng vị trí đã
+cắt — vùng còn lại của khung hình giữ NGUYÊN không đụng tới.
+
+**Vấn đề kỹ thuật phát sinh**: `crop` (khác `scale`) KHÔNG có cơ chế `-2` tự tính chiều
+cao — cần biết TRƯỚC cả width lẫn height CỤ THỂ để cắt đúng. Thêm `media_probe.py::
+probe_video_dimensions` (ffprobe, cùng nguyên tắc `probe_duration_sec` — lỗi/thiếu binary
+rơi về giả định 16:9, không chặn luồng ghép) + `assembly.py::_layer_target_size` — đo tỉ
+lệ khung hình GỐC của layer, tính width/height theo `width_pct`, KẸP không vượt quá khung
+hình chính ở cả 2 chiều (layer nguồn dọc đặt `width_pct` lớn trên khung ngang có thể ra
+chiều cao vượt khung hình chính, `crop` sẽ LỖI THẬT nếu vùng cắt lớn hơn nguồn bị cắt —
+phát hiện lúc thiết kế, xử lý trước khi thành bug thật).
+
+**Tái cấu trúc để tránh trùng lặp**: `_layer_position_expr` (mục 112, chỉ dùng cho
+`overlay`) đổi thành `_grid_position_expr` TỔNG QUÁT — nhận tên biến runtime làm tham số
+(`container_w/h`, `content_w/h`) thay vì hard-code `main_w/overlay_w` — dùng CHUNG cho cả
+`overlay` (`main_w/main_h/overlay_w/overlay_h`) LẪN `crop` (`in_w/in_h/out_w/out_h`, mới),
+công thức vị trí giống hệt nhau, chỉ khác tên biến ffmpeg cấp cho từng filter.
+
+Độ mờ chế độ `screen` chỉnh qua `colorchannelmixer=rr/gg/bb={opacity}` (giảm SÁNG layer
+TRƯỚC khi blend — cùng cách `_mix_overlay_effect` làm, vì `blend` screen không có tham số
+alpha trực tiếp) — khác chế độ `alpha` chỉnh qua kênh alpha CÓ SẴN (`colorchannelmixer=
+aa={opacity}`).
+
+### Endpoint + Frontend
+
+`POST/PATCH .../layers` thêm field `blend_mode` (validate 1 trong `{alpha, screen}`,
+400 nếu sai). `LayersCard` (`VisualStudio.tsx`) — dropdown "Kiểu nguồn" ("Trong suốt
+(alpha)" / "Nền đen (screen)") cho CẢ layer mới lẫn từng layer đã có (đổi tại chỗ qua
+PATCH). Cập nhật copy hướng dẫn — không còn khẳng định "cần nền trong suốt" như mục 112,
+giải thích rõ 2 lựa chọn tuỳ loại nguồn người dùng có.
+
+### Test
+
+7 test mới trong `test_layers.py`: CRUD cho `blend_mode` (mặc định `"alpha"`, chấp nhận
+`"screen"`, từ chối giá trị lạ, PATCH đổi được), và 4 test `_composite_layers` chế độ
+`screen` với ffmpeg THẬT dùng clip màu thuần KHÔNG alpha (`yuv420p` thường, giả lập ĐÚNG
+loại nguồn người dùng có) — xác nhận: layer ĐEN THUẦN làm nền "biến mất" hoàn toàn (chỉ
+còn thấy màu nền gốc), layer TRẮNG hiện rõ + vùng NGOÀI layer giữ nguyên màu nền (crop+
+blend+overlay không lem ra ngoài vùng đã định vị), và độ mờ làm nhạt hiệu ứng đúng hướng.
+Full `pytest` **601 passed**. `tsc --noEmit` sạch. `specs/03_api.md`/`specs/04_data_
+schemas.md` cập nhật `blend_mode` + sửa lại tên hàm đã đổi (`_layer_position_expr` →
+`_grid_position_expr`) trong ghi chú mục 112.
+
+## 114. Bug thật: bấm "Bỏ layer" báo lỗi (Windows file lock từ preview `<video loop>`) (2026-09-02)
+
+Người dùng báo: bấm "Bỏ layer" hiện lỗi "Có lỗi khi bỏ layer." — điều tra trực tiếp trên
+backend đang chạy thật (tìm đúng cổng qua `wmic`, tìm đúng project qua `GET /channels` →
+`GET .../projects` → `GET .../render/status`, đọc `layers[]` để lấy đúng `layer_id`), gọi
+lại NGUYÊN VĂN request `DELETE .../render/layers/{layer_id}` mà frontend gửi — tái hiện
+được `500 Internal Server Error`. Chạy lại chính logic đó bằng Python trực tiếp (thay vì
+qua HTTP) để lấy traceback đầy đủ (HTTP 500 không trả chi tiết lỗi) — lộ nguyên nhân
+THẬT: `PermissionError: [WinError 32] The process cannot access the file because it is
+being used by another process` khi gọi `unlink_retrying` xoá file layer.
+
+### Root cause
+
+`unlink_retrying` (đã có từ mục "2026-08-23", xử lý ĐÚNG loại lỗi này cho overlay.mp4
+trước đây) thử lại tối đa 10 lần × 150ms (~1.5s) — đủ cho 1 khoá THOÁNG QUA (VD trình
+duyệt vừa stream xong preview, handle chưa kịp nhả ngay). Nhưng preview của layer
+(`LayersCard`, mục 112) dùng `<video controls muted loop>` — CÓ `loop`, KHÁC MỌI preview
+khác trong app (overlay/video nền/intro — xem lại toàn bộ `VisualStudio.tsx`, không nơi
+nào khác dùng `loop`). Nếu người dùng bấm play để xem trước rồi bấm "Bỏ layer" NGAY LÚC
+nó đang phát, `loop` khiến trình duyệt LIÊN TỤC tự request lại file — không phải 1 khoá
+thoáng qua nữa mà là khoá ĐANG DIỄN RA liên tục, vượt xa cửa sổ thử lại 1.5s.
+
+### Fix
+
+`removeLayer` (`VisualStudio.tsx::LayersCard`) — thêm `videoRefs` (Map tới từng phần tử
+`<video>` của mỗi layer, gán qua callback ref) — TRƯỚC khi gọi API xoá, chủ động
+`.pause()` + `removeAttribute("src")` + `.load()` ép trình duyệt nhả file NGAY, thay vì
+trông chờ hoàn toàn vào cửa sổ thử lại phía backend (giữ NGUYÊN `unlink_retrying`, không
+đổi — vẫn hữu ích cho khoá thoáng qua bình thường, chỉ không đủ cho trường hợp `loop`
+đang phát liên tục này). KHÔNG sửa `OverlayEffectCard`/`BackgroundVideoCard` (không có
+`loop`, chưa từng gặp lại bug này kể từ lần fix gốc 2026-08-23) — giữ đúng phạm vi.
+
+Layer bị kẹt của người dùng (`layer_1788369011492_0`, project `prj_1788352112897`) đã
+gọi lại `DELETE` thành công qua backend đang chạy ngay lúc điều tra (khoá đã tự nhả) —
+không cần can thiệp tay thêm.
+
+### Test
+
+Đây là bug hành vi trình duyệt (Windows file lock qua `<video>` streaming) — không có hạ
+tầng test frontend trong repo (toàn bộ session dùng `tsc --noEmit` + pytest backend) và
+backend không đổi gì (logic `unlink_retrying`/endpoint giữ nguyên) nên không có gì mới
+để pytest verify — chỉ `tsc --noEmit` (sạch) cho phần sửa. Xác nhận thủ công qua
+`DELETE` trực tiếp bằng Python (tái hiện lỗi thật, không suy đoán) trước khi sửa.
+
+## 115. Layer ẢNH định vị (song song layer video) + hỗ trợ "full khung hình" (2026-09-02)
+
+Theo yêu cầu người dùng:
+- "Rename 'Layer định vị' thành 'Layer video định vị'."
+- "Bổ sung thêm block ở bước visual studio để setup 'Layer ảnh định vị' với chức năng
+  tương tự nhưng cho ảnh nền đen hoặc không có nền. Ngoài hỗ trợ 9 vị trí layer thì còn
+  hỗ trợ thêm full khung hình."
+
+Đổi tên tiêu đề card `LayersCard` (`VisualStudio.tsx`) từ "Layer định vị" → "Layer video
+định vị" — rõ nghĩa hơn giờ có THÊM 1 loại layer khác (ảnh) đứng cạnh nó.
+
+### Thiết kế — song song HOÀN TOÀN `VideoLayer`, danh sách RIÊNG
+
+`schemas.py::ImageLayer` (mới) — CÙNG field/2 chế độ `blend_mode` (`"alpha"`/`"screen"`,
+mục 113) với `VideoLayer`, chỉ khác 2 điểm: (1) nguồn LUÔN ảnh tĩnh PNG/JPEG/WEBP, (2)
+`position` có thêm giá trị `"full"` (9 vị trí lưới cũ + "full" — phủ TOÀN khung hình).
+`RenderState.image_layers: list[ImageLayer]` — DANH SÁCH RIÊNG, KHÔNG dùng chung
+`layers` (2 loại asset xử lý ffmpeg khác hẳn nhau — video cần `-stream_loop -1`, ảnh cần
+`-loop 1`).
+
+**`assembly.py::_composite_image_layers`** (mới, song song `_composite_layers`) — tái
+dùng NGUYÊN `_layer_target_size`/`_grid_position_expr` (mục 113, đã tổng quát hoá sẵn)
+cho 9 vị trí lưới, CHỈ thêm nhánh `position=="full"`:
+- Scale: `_scale_cover_filter(resolution)` (CÙNG hàm `_mix_overlay_effect` dùng — không
+  phụ thuộc `BrandProfile.aspect_fill_mode`, layer là tính năng độc lập) thay vì
+  `scale=W:-2`/`scale=W:H` theo `width_pct` — bỏ qua HẲN field này khi `"full"`.
+- `blend_mode=="alpha"` + `"full"`: `overlay=x=0:y=0` thẳng (không cần `_grid_position_
+  expr`, cover-scale đã khớp CHÍNH XÁC kích thước khung hình chính).
+- `blend_mode=="screen"` + `"full"`: KHÔNG cần bước `crop` (vùng cần blend = TOÀN khung
+  hình = chính `[prev]`, không phải 1 phần con) — blend THẲNG `[prev]` với layer đã
+  scale-cover, ra LUÔN kết quả cuối. Nhận ra lúc thiết kế: đây CHÍNH LÀ `_mix_overlay_
+  effect` áp dụng cho ẢNH TĨNH thay vì video loop — khác biệt DUY NHẤT là input dùng
+  `-loop 1` thay `-stream_loop -1`.
+
+Input mỗi layer: `-loop 1 -i asset_path` (khác `-stream_loop -1` của layer video) — cùng
+kỹ thuật `_build_segment` dùng cho shot ảnh, tạo stream VÔ HẠN, `shortest=1` vẫn cần
+nguyên lý cũ (bài học `_mix_overlay_effect`). Gọi trong `_assemble_video_impl` NGAY SAU
+bước layer video (nếu có) — layer ẢNH LUÔN nổi TRÊN CÙNG mọi layer khác, cùng nguyên tắc
+ghi-đè-tại-chỗ (`final_path`) đã dùng cho mọi bước hậu kỳ khác.
+
+### Endpoint + Frontend
+
+4 endpoint mới (`routers/render.py`, song song layer video) — `POST/PATCH/DELETE/GET
+.../image-layers[/...]` — dùng lại NGUYÊN `_IMAGE_EXT_BY_CONTENT_TYPE`/`_IMAGE_EXT_BY_
+SUFFIX` (map đã có sẵn cho upload ảnh shot) thay vì map video. `_IMAGE_LAYER_POSITIONS =
+_LAYER_POSITIONS | {"full"}` cho validate.
+
+`PositionGridPicker` (`VisualStudio.tsx`) — đổi thành GENERIC (`<P extends string>`) +
+prop `allowFull` mới — dùng CHUNG được cho cả `LayerPosition` (layer video, giữ nguyên
+không đổi — không truyền `allowFull`) lẫn `ImageLayerPosition` (layer ảnh, có `"full"`).
+Nút "Toàn khung hình" render RIÊNG BÊN DƯỚI lưới 3x3 (không phải ô thứ 10 trong lưới —
+"full" khác hẳn ý nghĩa 1 VỊ TRÍ, tách biệt thị giác cho rõ). `ImageLayersCard` (mới,
+song song `LayersCard`, đặt ngay dưới nó) — ẩn thanh trượt "Kích thước" khi đang chọn
+`"full"` (không có ý nghĩa gì để chỉnh).
+
+### Test
+
+File mới `test_image_layers.py` (27 test) — CRUD đầy đủ (song song `test_layers.py`,
+thêm case `position="full"` được chấp nhận), và 7 test `_composite_image_layers` với
+ffmpeg + Pillow THẬT: định vị đúng ô lưới (alpha), độ mờ qua alpha, nhiều layer cùng lúc,
+**`"full"` phủ đúng CẢ 4 góc + tâm** (khác 9 vị trí chỉ phủ 1 vùng), screen-mode làm nền
+đen biến mất + không lem ra ngoài vùng định vị, và **`"full"` + `"screen"`** ra màu XÁM
+đúng công thức (không đen tuyệt đối — xác nhận blend thật xảy ra, không phải nền đen
+"biến mất" trơ trọi) — cộng 1 test tích hợp `assemble_video()` đầy đủ. Full `pytest`
+**628 passed**. `tsc --noEmit` sạch. `specs/03_api.md`/`specs/04_data_schemas.md` cập
+nhật đầy đủ schema/endpoint mới.
+
+## 116. Bug thật: xoá watermark cho ẢNH không xoá được logo Gemini góc dưới phải — 2 lớp nguyên nhân, đổi hẳn chiến lược định vị cho ảnh (2026-09-04)
+
+Người dùng báo: "Phần xóa watermark cho ảnh ở bước visual studio đang không xóa được logo
+gemini ở góc dưới bên phải ảnh", test với shot B01/B02 project "p" kênh "t". Tìm đúng
+project qua backend THẬT đang chạy (`GET /channels` → `ch_1788363856758` tên "t" →
+`GET .../projects` → `prj_1788363856772` tên "p"), đọc `visual_asset_path` 2 shot, xem
+trực tiếp ảnh thật.
+
+### Bug #3 — bbox lọt ngưỡng diện tích nhưng SAI HÌNH DẠNG (dải dọc gần trọn chiều cao)
+
+Ảnh B01 (`B01_nowm.png`, 2752×1536) hiện MỘT DẢI MỜ/NHOÈ lớn phủ gần TRỌN chiều cao, chiếm
+~31% chiều rộng bên phải ảnh — đo bằng phân tích độ nét (gradient) theo cột ảnh: sharpness
+rơi mạnh từ x≈1600 tới x≈2450, phẳng ở mức thấp suốt chiều cao. 31% diện tích LỌT ngưỡng
+`_MAX_BBOX_AREA_FRACTION=0.35` (mục 100) nên bị chấp nhận nhầm là watermark "hợp lý", dù rõ
+ràng không phải 1 icon góc nhỏ (dải trải gần hết 1 chiều mà không mỏng ở chiều kia). Fix:
+`detector.py::_bbox_has_plausible_shape` — thêm lọc HÌNH DẠNG bên cạnh diện tích, chỉ chấp
+nhận bbox dạng (a) icon gọn — không vượt quá nửa MỖI chiều, hoặc (b) dải mỏng chạy dọc 1
+cạnh — gần hết 1 chiều NHƯNG mỏng (≤20%) ở chiều còn lại. Bbox đo thật ở trên bị loại đúng
+theo heuristic mới (test `test_detect_watermark_bboxes_robust_rejects_full_height_vertical_
+strip`), dải chữ credit hợp lệ kiểu cũ (mục 100) vẫn được chấp nhận (test riêng khoá lại).
+File gốc B01 đã bị `unlink_retrying` xoá vĩnh viễn sau lần chạy lỗi này (chỉ còn bản đã hỏng)
+— **không khôi phục được nội dung gốc**, người dùng cần re-upload nếu còn giữ file gốc.
+
+### Bug #4 — Florence-2 KHÔNG đủ khả năng định vị icon lấp lánh trong suốt trên nền minh hoạ chi tiết
+
+Ảnh B02 (`B02_nowm.png`, 2816×1536) KHÔNG có dấu hiệu bị vá/mờ ở đâu (quét gradient 2D toàn
+ảnh, không thấy vùng phẳng bất thường) nhưng icon lấp lánh Gemini vẫn NGUYÊN VẸN, sắc nét ở
+góc dưới phải — xác nhận bằng lưới toạ độ chồng lên ảnh: icon thật nằm ở bbox
+`(2470, 1220, 2600, 1330)`. Gọi TRỰC TIẾP `detect_watermark_bboxes` (model Florence-2 THẬT,
+không mock) trên ảnh này với 8 prompt khác nhau (`"watermark"`, `"logo"`, `"small icon in
+the corner"`, `"sparkle icon"`, `"star icon"`, `"four pointed star icon"`, `"white sparkle
+logo watermark"`) VÀ thử crop sẵn góc dưới phải (20%/25% khung hình) trước khi đưa vào model
+— **KHÔNG prompt/crop nào định vị đúng vị trí icon thật**, mọi bbox trả về đều rơi vào vùng
+khác hẳn (quần áo, đồ vật trong tranh). Thử thêm `<DENSE_REGION_CAPTION>`/`<REGION_PROPOSAL>`
+(task thuần visual saliency, không cần hiểu ngôn ngữ) — vẫn chỉ liệt kê vùng NGƯỜI trong
+tranh, không tách được icon lấp lánh mờ/trong suốt này thành 1 vùng riêng. Kết luận: đây là
+giới hạn THẬT của Florence-2-base (open-vocabulary, không train riêng cho watermark) với
+loại watermark trong suốt/tương phản thấp trên nền minh hoạ nhiều chi tiết — không phải lỗi
+ngưỡng/prompt có thể vá thêm được nữa (khác hẳn video Gemini/Veo mục 100, vốn định vị được
+qua prompt `"small icon in the corner"`).
+
+**Hỏi hướng xử lý qua `AskUserQuestion`** (không suy đoán, để user quyết định trade-off) —
+user chọn: "chỉ cần hỗ trợ case của ảnh từ gemini logo, đúng vị trí đó và icon lấp lánh đó
+của tất cả các ảnh" → bỏ AI định vị theo nội dung, dùng VỊ TRÍ TƯƠNG ĐỐI CỐ ĐỊNH theo quy
+ước watermark Gemini/Nano Banana. Đo tâm icon TƯƠNG ĐỐI trên cả 2 ảnh thật (khác kích thước
+hẳn nhau — xác nhận đây là %, không phải toạ độ tuyệt đối): B02 → tâm (90.0%, 83.0%) chiều
+rộng/cao; B01 (đo thô hơn do đã bị mờ 1 phần) → tâm ước lượng (90.9%, 83.7%) — khớp nhau
+trong sai số <1%, xác nhận watermark Gemini LUÔN ở cùng 1 vị trí tương đối bất kể nội dung
+ảnh.
+
+**Fix**: `detector.py::gemini_corner_bbox(image_size)` (mới) — bbox cố định tại tâm
+(90%, 83%) chiều rộng/cao, phủ vùng ±4.5%/±5.5% (rộng hơn ~1.7× icon thật đo được để chừa
+biên an toàn, vẫn chỉ ~1% diện tích khung hình — không rủi ro phá huỷ nội dung lớn như bug
+#1/#2/#3). `pipeline.py::remove_watermark_from_image` **bỏ hẳn Florence-2 cho ảnh** — dùng
+`gemini_corner_bbox` làm bbox mặc định khi không truyền `bboxes` tay; bỏ luôn param
+`text_input` không còn dùng tới. Video KHÔNG đổi (`remove_watermark_from_video` vẫn dùng
+Florence-2 — verify thật mục 100 xác nhận vẫn định vị đúng cho watermark Gemini/Veo trên
+video, khác hẳn ảnh minh hoạ chi tiết ở đây).
+
+**Verify**: 3 test mới khoá lại toạ độ đã đo thật (`test_gemini_corner_bbox_covers_measured_
+icon_on_b02`, `test_gemini_corner_bbox_is_relative_not_absolute`, `test_gemini_corner_bbox_
+is_small_relative_to_frame`) + cập nhật 3 test `remove_watermark_from_image` cũ (không còn
+mock Florence-2, xác nhận KHÔNG gọi detect nữa) + 3 test hình dạng bug #3. Full `pytest`
+**634 passed**. Không đổi API/schema — không cần cập nhật specs. Backend-only, cần khởi
+động lại app: B02 sẽ xoá đúng logo khi bấm lại "Xoá watermark"; B01 vẫn còn phần bị mờ
+KHÔNG khôi phục được (mất bản gốc), cần re-upload nếu còn giữ file.
+
+## 117. Bug thật: nút "Xoá watermark toàn bộ slot" trông như chỉ xử lý shot đầu rồi dừng (2026-09-04)
+
+Người dùng báo nút "Xoá watermark toàn bộ slot" chỉ chạy đúng B01 rồi dừng lại, không xử lý
+tiếp các slot sau. Kiểm tra `watermark_scan_summary` thật qua backend đang chạy xác nhận
+**backend đã xử lý ĐỦ cả batch thành công** (`scanned:3, cleaned:3`) — bug nằm ở tầng UI
+không hiển thị đúng, không phải backend dừng giữa chừng.
+
+**Root cause**: `VisualStudio.tsx::removeAllWatermarks` gọi endpoint chạy qua
+`BackgroundTasks` (trả về response NGAY khi task còn chưa bắt đầu chạy), rồi chỉ poll lại
+đúng 2 LẦN CỐ ĐỊNH (sau 1.2s và 3s) — thiết kế cũ giả định 1 trong 2 lần đó chắc chắn "bắt
+được" ít nhất 1 shot đang `visual_status=="generating"` để tự bật vòng poll liên tục qua
+`hasInFlight` (`useEffect` sẵn có, poll mỗi 3s tới khi hết shot "generating"). Ảnh giờ xử lý
+rất nhanh (mục 116, không còn qua Florence-2) — batch nhiều shot dễ "lọt" đúng khoảng giữa 2
+shot (shot trước đã "ready", shot sau chưa kịp chuyển "generating") ở đúng thời điểm 2 lần
+poll cố định đó, khiến `hasInFlight` không bao giờ bật lên `true`, vòng poll liên tục không
+tự kích hoạt, UI dừng cập nhật hẳn dù backend vẫn chạy tiếp phía sau.
+
+**Fix**: đổi `removeAllWatermarks` sang poll liên tục (mỗi 1s, tối đa 60 lần) tới khi
+`watermark_scan_summary.finished_at` đổi khác giá trị TRƯỚC lúc bấm — mốc thời gian
+BackgroundTask ghi CHẮC CHẮN lúc thật sự xong toàn batch, không còn suy đoán qua trạng thái
+`generating` của từng shot (vốn dễ "lọt" như trên). `tsc --noEmit` sạch. Frontend-only
+(Vite hot-reload) — không cần khởi động lại app.
+
+## 118. Bug thật (tiếp mục 116): vùng vá cố định cho watermark Gemini/Nano Banana quá hẹp với 1 số lượt sinh ảnh (2026-09-04)
+
+Người dùng báo tiếp: "slot B02 xóa watermark gemini của ảnh nhưng không được, các slot khác
+thì được" — với 1 ảnh test MỚI khác hẳn nội dung 2 ảnh đã dùng để đo vị trí ở mục 116.
+
+**Verify trực tiếp trên đúng ảnh lỗi**: dựng lưới toạ độ + khung đỏ đúng bbox
+`gemini_corner_bbox` đang dùng (half-size 4.5%/5.5%) chồng lên ảnh thật của user — xác nhận
+vùng vá ĐÚNG vị trí tương đối (nằm giữa 2 mũi giáo trong ảnh, khớp toạ độ đã đo ở mục 116)
+nhưng vết mờ/nhoè do LaMa để lại RÕ RÀNG tràn ra ngoài biên TRÊN và biên PHẢI của vùng đã vá
+— icon lấp lánh của lượt sinh ảnh này to/lệch hơn 1 chút so với 2 ảnh dùng để đo ban đầu.
+Kết luận: nền tảng "vị trí tương đối cố định" (mục 116) vẫn ĐÚNG hướng, chỉ cần vùng phủ
+RỘNG RÃI hơn để chịu được biến thiên thực tế giữa các lượt sinh ảnh khác nhau của Gemini
+(kích thước/vị trí icon không cố định tuyệt đối tới từng pixel).
+
+**Fix**: `detector.py::_GEMINI_CORNER_HALF_SIZE` tăng từ `(0.045, 0.055)` → `(0.07, 0.09)`
+— diện tích vùng phủ từ ~1% lên ~2.5% khung hình (vẫn rất nhỏ so ngưỡng "phá huỷ nội dung
+lớn" ~31-35% đã thấy ở bug #1/#2/#3 mục 100/116). Verify lại bằng ảnh thật của user: dựng
+lại khung với box MỚI — vùng vá cũ (đã tràn biên) giờ nằm TRỌN bên trong box mới.
+
+**Test**: 1 test mới khoá lại half-size KHÔNG bị vô tình thu hẹp về mức cũ đã biết không đủ
+(`test_gemini_corner_bbox_has_generous_margin_after_bug5`), nới ngưỡng "vùng phủ phải nhỏ"
+từ <3% lên <5% cho phù hợp kích thước mới (`test_gemini_corner_bbox_is_small_relative_to_
+frame`). Full `pytest` **635 passed**. Backend-only — cần khởi động lại app.

@@ -138,6 +138,66 @@ Ba vùng cố định + stepper trên cùng:
 > mục đó chấp nhận (kèm nhãn loại nếu >1), chọn xong tự route đúng luồng upload theo
 > loại file thật của asset đã chọn.
 >
+> **Đã build thêm (2026-08-23, mục 75) — Cultural lock + multi-LoRA + ảnh tham chiếu
+> IPAdapter:** theo phát hiện của người dùng ("ảnh tạo ra từ local model đang mang nét
+> văn hoá Hàn Quốc/Nhật Bản, không đậm sắc Việt Nam"). `ChannelDialog.tsx` ("Sửa
+> BrandProfile") thêm 2 textarea cạnh "Style hình ảnh kênh": "Từ khoá văn hoá Việt Nam
+> (bắt buộc xuất hiện)" (positive, để trống mặc định, gợi ý ví dụ áo tứ thân/áo giao
+> lĩnh/khăn mỏ quạ/mái đình làng Bắc Bộ/ngói âm dương/hoạ tiết rồng thời Nguyễn) và "Loại
+> trừ văn hoá ngoại lai" (negative, đã có default sẵn) — kèm ghi chú phần loại trừ CHỈ có
+> tác dụng đầy đủ với ảnh/video sinh bằng model LOCAL (Wan2.2/SDXL), phần từ khoá dương
+> vẫn giúp ích cho cloud. Mục "Style LoRA" (dropdown đơn, mục 64) đổi thành DANH SÁCH
+> nhiều dòng thêm/bớt được (mỗi dòng `ComfyModelSelect` + số trọng số + nút xoá, nút
+> "+ Thêm LoRA" ở cuối) — cho phép stack 2-3 LoRA cùng lúc (VD LoRA sơn dầu + LoRA thuỷ
+> mặc riêng). Mục MỚI "Ảnh tham chiếu phong cách — IPAdapter" (chỉ hiện khi đang sửa kênh
+> đã tồn tại): lưới ảnh đã upload (mỗi ảnh có nút xoá) + nút "+ Thêm ảnh tham chiếu"
+> (upload, không cache-bust vì mỗi ảnh có filename vĩnh viễn — khác mọi asset khác của
+> BrandProfile) + thanh trượt trọng số dùng chung cả bộ ảnh, kèm ghi chú cần cài
+> `ComfyUI_IPAdapter_plus` + tải model CLIP-Vision/IPAdapter trước khi dùng, nếu ComfyUI
+> lỗi thì ảnh vẫn sinh được nhưng KHÔNG áp style tham chiếu. Xem chi tiết cơ chế backend ở
+> `specs/05_ai_providers.md` §8k.
+>
+> **Đã build thêm (2026-08-23, mục 74) — Rà soát UX luồng tạo video:** theo yêu cầu
+> người dùng ("nhiều nút bấm bố trí chưa consistent", "right sidebar không để làm gì").
+> `RightPanel.tsx` (sidebar phải, dùng chung mọi màn) hiện lại Kênh+niche/Định dạng/Số
+> shot/Cảnh báo guardrail thay vì chỉ 1 dòng "Phiên bản Pack". Header Visual Studio tách
+> 2 cấp: 2 nút "Sinh lại TOÀN BỘ..." (tốn phí, bỏ duyệt) gom vào menu thả xuống "⋯ Tuỳ
+> chọn khác" (component mới `OverflowMenu`). `ShotCard` chỉ còn đúng 1 `btn-primary`/hàng
+> ("Tạo ảnh/video", "Tạo giọng đọc" đổi về secondary). `OutputCenter` dùng lại
+> `StepHeader` (trước tự viết riêng), bỏ nhãn "Beta · M2" đã lỗi thời. Xoá project
+> (`ProjectView.tsx`) bỏ `window.confirm()` — nơi duy nhất dùng dialog xác nhận trình
+> duyệt, nay theo đúng quy ước "label rõ đủ" của phần còn lại app (hành động chỉ chuyển
+> vào Thùng rác, khôi phục được).
+>
+> **Sửa lại cùng ngày (mục 74b) — người dùng báo "mất nút Duyệt toàn bộ":** đợt đầu đưa
+> "Duyệt toàn bộ block" xuống cạnh danh sách shot (lý do lúc đó: đứng cạnh thứ nó tác
+> động vào), nhưng vị trí đó nằm DƯỚI Thumbnail/Intro/BgMusic/Overlay card + banner GPU —
+> phải cuộn qua hết mới thấy. Đây là hành động dùng THƯỜNG XUYÊN (duyệt ngay sau khi sinh
+> xong), không phải hành động hiếm như "Sinh lại TOÀN BỘ" — chuyển LẠI vào header, cạnh
+> "Đi tới Output", giữ nguyên các phần khác của đợt rà soát UX.
+>
+> **Đã build thêm (2026-08-23, mục 73) — Motion tone cho video AI local:**
+> `ChannelDialog.tsx` ("Sửa BrandProfile") thêm field "Tông chuyển động video AI local
+> (motion_tone)" cạnh "Style hình ảnh kênh" — ràng buộc chuyển động (VD "chậm, tinh tế,
+> không giật gân") CHỈ áp dụng khi sinh video bằng provider `local_wan` (Wan2.2), provider
+> cloud (Sora/Veo/Flux) bỏ qua. **Khuyến nghị chọn "Loại Visual" khi soạn script**: chỉ
+> đặt `Video` cho shot THỰC SỰ cần chuyển động thật (khói, sương, đám đông xa...) — phần
+> lớn shot minh hoạ tĩnh (chân dung, hiện vật, bản đồ) nên dùng `Image` + "Hiệu ứng
+> chuyển động camera" (Ken Burns zoom/pan/orbit đã có sẵn, xem mục camera motion) thay vì
+> tốn GPU cho video AI dễ lệch phong cách hơn ảnh.
+>
+> **Đã build thêm (2026-08-23, mục 70) — Nhạc nền/overlay riêng hiển thị rõ kế thừa
+> BrandProfile:** `BgMusicCard`/`OverlayEffectCard` (Visual Studio) giờ HIỂN THỊ THẬT
+> nhạc nền/overlay mặc định cấp kênh làm preview khi project chưa có asset riêng (tag
+> "Kế thừa từ hồ sơ thương hiệu") — cùng cách `IntroShotCard` đã làm ở mục 61, trước đây
+> 2 card này hiện trống dù thực tế vẫn dùng brand default lúc ghép MP4.
+>
+> **Đã build thêm (2026-08-23, mục 71) — Chỉnh âm lượng nhạc nền riêng kể cả khi kế
+> thừa:** thanh trượt "Âm lượng nhạc nền so với giọng đọc chính" ở `BgMusicCard` (Visual
+> Studio) giờ hiện NGAY CẢ KHI project đang kế thừa nhạc nền brand (trước đó chỉ hiện khi
+> có asset riêng) — cho phép chỉnh âm lượng riêng cho project mà KHÔNG cần upload lại
+> file nhạc, giá trị khởi điểm = volume hiện tại của brand (không phải mặc định cứng).
+>
 > **Đã build thêm (2026-08-22, mục 68) — Hiệu ứng lớp phủ (overlay — mưa/tuyết rơi...):**
 > màn "Sửa BrandProfile" thêm mục "Hiệu ứng lớp phủ mặc định của kênh (VD mưa/tuyết rơi)"
 > (upload video/xem lại/xoá + thanh trượt cường độ), cùng cấu trúc mục "Nhạc nền mặc định

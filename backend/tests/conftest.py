@@ -68,6 +68,15 @@ def channel(client, unique_name):
 
 
 @pytest.fixture()
+def channel2(client, unique_name):
+    """Kênh THỨ HAI, tên khác biệt thật (không phải chuỗi channel_id giả) — dùng cho các
+    test cần xác nhận lọc/kiểm tra CHÉO kênh (Kho Tài Nguyên gắn nhiều kênh, 2026-08-27)."""
+    resp = client.post("/channels", json={"name": f"Test Channel 2 {unique_name}", "niche": "Test"})
+    assert resp.status_code == 200
+    return resp.json()
+
+
+@pytest.fixture()
 def project(client, channel):
     """Tạo 1 project draft trong `channel`, trả về dict project."""
     resp = client.post(f"/channels/{channel['id']}/projects", json={"title": "Test Project"})

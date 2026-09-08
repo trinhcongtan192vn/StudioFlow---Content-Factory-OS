@@ -24,11 +24,38 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Table,
     Text,
 )
 from sqlalchemy.orm import relationship
 
 from app.db import Base
+
+# Kho Tài Nguyên (Asset Vault) — chuyển sang màn TOÀN CỤC (2026-08-27, theo yêu cầu người
+# dùng): 1 RawVideo giờ gắn được NHIỀU kênh (dạng tag), KHÔNG còn 1 FK đơn như bản thiết
+# kế ban đầu (channel_id trên RawVideo/ProcessedClip). Đây là bảng m2m (secondary=) ĐẦU
+# TIÊN của dự án — đã grep xác nhận không có tiền lệ nào khác để theo trước khi build.
+raw_video_channel = Table(
+    "raw_video_channel",
+    Base.metadata,
+    Column("raw_video_id", String, ForeignKey("raw_video.id"), primary_key=True),
+    Column("channel_id", String, ForeignKey("channel.id"), primary_key=True),
+)
+
+# Bug thật (2026-08-28, user tự phát hiện): kênh của ProcessedClip TỪNG chỉ suy ra qua
+# JOIN `raw_video_id` -> RawVideo -> raw_video_channel (không có tag riêng, xem docstring
+# cũ của ProcessedClip) — xoá RawVideo cha (hành vi BÌNH THƯỜNG, không cascade xoá clip
+# con) làm clip mất SẠCH thông tin kênh (không chỉ hiển thị rỗng — còn biến mất khỏi MỌI
+# kết quả matching B-roll của MỌI kênh vì `matching.py::_clips_for_channel` INNER JOIN
+# qua raw_video). Fix: ProcessedClip có tag kênh RIÊNG (m2m này), sao chép từ raw_video
+# lúc cắt cảnh (`ingest.py::_create_clip`) — clip độc lập thật sự với raw_video cha, kể cả
+# sau khi raw_video bị xoá. Cho phép sửa lại tay (đơn lẻ + bulk, xem routers/asset_vault.py).
+processed_clip_channel = Table(
+    "processed_clip_channel",
+    Base.metadata,
+    Column("clip_id", String, ForeignKey("processed_clip.clip_id"), primary_key=True),
+    Column("channel_id", String, ForeignKey("channel.id"), primary_key=True),
+)
 
 
 class ProjectStatus(str, enum.Enum):
@@ -57,6 +84,14 @@ class Channel(Base):
     brandprofile_versions = relationship(
         "BrandProfileVersion", back_populates="channel", cascade="all, delete-orphan"
     )
+    # m2m qua raw_video_channel — KHÔNG cascade delete: Kho Tài Nguyên giờ là kho TOÀN
+    # CỤC (như CreativeAsset/Thư viện), 1 video có thể gắn NHIỀU kênh — xoá 1 kênh chỉ
+    # bỏ tag (xoá dòng ở raw_video_channel, SQLAlchemy tự làm khi xoá Channel), KHÔNG
+    # xoá RawVideo/ProcessedClip (có thể vẫn đang gắn kênh khác).
+    raw_videos = relationship("RawVideo", secondary=raw_video_channel, back_populates="channels")
+    # m2m qua processed_clip_channel (2026-08-28) — clip có tag kênh RIÊNG, độc lập với
+    # raw_video cha (xem docstring `processed_clip_channel` ở trên).
+    processed_clips = relationship("ProcessedClip", secondary=processed_clip_channel, back_populates="channels")
 
 
 class BrandProfileVersion(Base):
@@ -214,6 +249,79 @@ class CreativeAsset(Base):
     name = Column(String, nullable=False)
     file_path = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RawVideo(Base):
+    """Video gốc do user import vào Kho Tài Nguyên (CHANGE_Semantic_BRoll_Asset_
+    Vault.md §4, đổi thành màn TOÀN CỤC 2026-08-27) — chưa cắt cảnh. Gắn được NHIỀU kênh
+    (dạng tag, `channels` m2m qua `raw_video_channel`) — khác thiết kế ban đầu (1 FK đơn
+    `channel_id`). Vẫn tách biệt khỏi `CreativeAsset` (thư viện dùng lại nguyên vẹn) vì
+    đây là NGUYÊN LIỆU THÔ sẽ bị cắt thành nhiều `ProcessedClip` con, mục đích/vòng đời
+    khác hẳn."""
+    __tablename__ = "raw_video"
+
+    id = Column(String, primary_key=True)
+    file_path = Column(String, nullable=False)
+    source_url = Column(String, nullable=True)  # null nếu upload trực tiếp, khác null nếu tải qua yt-dlp
+    # Tên file THẬT lúc user upload (2026-08-27) — `file_path` trên đĩa đặt theo `id` (bất
+    # biến, không đổi dù đổi tên gốc) nhưng người dùng cần biết ĐÃ upload đúng file nào —
+    # giữ nguyên chuỗi gốc (kể cả ký tự đặc biệt) ở đây, KHÔNG sanitize (chỉ dùng để hiển
+    # thị, không dùng làm tên file thật trên đĩa). Null nếu tải qua URL (source_url đã đủ
+    # để biết nguồn).
+    original_filename = Column(String, nullable=True)
+    import_note = Column(Text, default="")
+    status = Column(String, default="detecting")  # detecting | tagging | indexed | error
+    error_message = Column(Text, nullable=True)
+    # Tiến trình THẬT (2026-08-27) — null khi không có tác vụ nền nào đang chạy.
+    # `progress_current`/`progress_total` cùng đơn vị tuỳ bước (byte lúc tải yt-dlp, số
+    # clip lúc cắt cảnh) — xem app/asset_vault/ingest.py.
+    progress_current = Column(Integer, nullable=True)
+    progress_total = Column(Integer, nullable=True)
+    progress_label = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    channels = relationship("Channel", secondary=raw_video_channel, back_populates="raw_videos")
+
+
+class ProcessedClip(Base):
+    """Clip đã cắt cảnh từ `RawVideo`, mang caption/tags/mood_tone (AI hoặc tay) +
+    rights_status — đơn vị thật được gợi ý khớp vào shot (`ShotRenderStatus.
+    linked_clip_id`, app/render/schemas.py). Có tag kênh RIÊNG (`channels` m2m qua
+    `processed_clip_channel`, mới 2026-08-28) — SAO CHÉP từ `raw_video.channels` lúc cắt
+    cảnh (`ingest.py`), rồi ĐỘC LẬP với raw_video cha từ đó (sửa lại tay không ảnh hưởng
+    raw_video, và ngược lại raw_video bị xoá không làm mất tag của clip — trước đây kênh
+    CHỈ suy ra qua JOIN `raw_video_id`, xoá raw_video cha làm mất sạch tag + clip biến mất
+    khỏi mọi kết quả matching B-roll, xem IMPLEMENTATION_REPORT.md mục 98)."""
+    __tablename__ = "processed_clip"
+
+    clip_id = Column(String, primary_key=True)
+    raw_video_id = Column(String, ForeignKey("raw_video.id"), nullable=False)
+    storage_url = Column(String, nullable=False)
+    duration_sec = Column(Float, default=0.0)
+    resolution = Column(String, default="")
+    caption = Column(Text, default="")
+    tags = Column(Text, default="[]")  # JSON array (string) — đơn giản, không cần bảng con
+    mood_tone = Column(String, default="")
+    vector_id = Column(String, nullable=True)  # id trong Chroma collection TOÀN CỤC (2026-08-27), null nếu chưa embed
+    usage_count = Column(Integer, default=0)
+    last_used_at = Column(DateTime, nullable=True)
+    active = Column(Boolean, default=True)
+    rights_status = Column(String, default="unverified")  # unverified | licensed_verified | public_domain
+    rights_note = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Lỗi gắn nhãn lần gần nhất (nếu có) — mới (2026-08-27, bulk gắn nhãn theo lựa chọn tự
+    # do ở Kho Tài Nguyên) — khác `RawVideo.error_message` (gắn nhãn CẢ video gốc, không
+    # phân biệt clip nào lỗi); field này cho phép hiện lỗi RIÊNG từng clip khi gắn nhãn
+    # 1 tập clip tuỳ ý (có thể trải nhiều raw_video khác nhau, không có 1 "raw_video" chung
+    # để gắn cờ lỗi). Null = chưa từng lỗi hoặc lần gần nhất đã thành công (xoá khi thành
+    # công, xem `ingest.py::caption_clips`).
+    caption_error = Column(Text, nullable=True)
+
+    # Chỉ đọc, không cần back_populates (RawVideo không cần collection ngược
+    # `.processed_clips`, chưa nơi nào trong app cần dùng chiều đó) — dùng để hiện "video
+    # nguồn" (tên/trạng thái) trong UI, KHÔNG còn dùng để tra kênh (xem `channels` dưới).
+    raw_video = relationship("RawVideo")
+    channels = relationship("Channel", secondary=processed_clip_channel, back_populates="processed_clips")
 
 
 class Budget(Base):

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import channel_dir, delete_channel_dir
 from app.db import get_db
-from app.filestore import read_json, write_bytes, write_versioned
+from app.filestore import read_json, unlink_retrying, write_bytes, write_versioned
 from app.models import AuditLog, BrandProfileVersion, Channel, Project
 from app.rangefile import range_file_response
 from app.schemas import BrandProfile
@@ -312,7 +312,7 @@ async def upload_brand_logo(channel_id: str, file: UploadFile = File(...), db: S
     new_path = cdir / f"logo.{ext}"
     old_path_str = profile.get("logo_path")
     if old_path_str and Path(old_path_str).exists() and Path(old_path_str) != new_path:
-        Path(old_path_str).unlink()
+        unlink_retrying(Path(old_path_str))
     write_bytes(new_path, data)
 
     profile["logo_path"] = str(new_path)
@@ -333,7 +333,92 @@ def get_brand_logo(channel_id: str, db: Session = Depends(get_db)):
     path = profile.get("logo_path")
     if not path:
         raise HTTPException(404, "Chưa có logo thương hiệu")
-    return FileResponse(path)
+    # `Cache-Control: no-cache` — cùng lý do đã thêm ở `range_file_response`
+    # (app/rangefile.py, 2026-08-23): logo bị ĐÈ TẠI CHỖ mỗi lần đổi, không có header này
+    # trình duyệt có thể trả bytes cũ từ cache mà không revalidate.
+    return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+
+@router.post("/channels/{channel_id}/brandprofile/style-references/upload")
+async def upload_style_reference(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Ảnh tham chiếu phong cách (IPAdapter) — **mới (2026-08-23)**, theo yêu cầu người
+    dùng chống thiên lệch văn hoá Nhật/Hàn: "cho model xem trực tiếp tranh cung đình/tư
+    liệu bảo tàng/Đông Hồ/Hàng Trống thật" để ép đúng thị giác Việt — xem
+    `BrandProfile.style_reference_paths`. KHÁC MỌI field asset khác của BrandProfile
+    (logo/intro/bg-music/overlay đều 1 file, thay TẠI CHỖ) — đây là DANH SÁCH NHIỀU ảnh,
+    mỗi lần upload THÊM 1 ảnh (không thay thế), tên file tự sinh duy nhất
+    (`_new_id("ref")`) để tránh trùng khi upload nhiều ảnh liên tiếp. Lưu riêng trong
+    `channel_dir(id)/style_refs/` (khác channel_dir gốc — tránh lẫn với các asset đơn
+    khác)."""
+    ch = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not ch:
+        raise HTTPException(404, "Không tìm thấy kênh")
+    profile = read_json(channel_dir(channel_id) / "brandprofile.json")
+    if profile is None:
+        raise HTTPException(404, "Chưa có BrandProfile")
+
+    ext = _LOGO_EXT_BY_CONTENT_TYPE.get(file.content_type or "") or _LOGO_EXT_BY_SUFFIX.get(Path(file.filename or "").suffix.lower())
+    if not ext:
+        raise HTTPException(400, "Chỉ nhận ảnh PNG/JPEG/WEBP")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "File ảnh rỗng")
+
+    refs_dir = channel_dir(channel_id) / "style_refs"
+    new_path = refs_dir / f"{_new_id('ref')}.{ext}"
+    write_bytes(new_path, data)
+
+    paths = list(profile.get("style_reference_paths") or [])
+    paths.append(str(new_path))
+    profile["style_reference_paths"] = paths
+    next_version = (ch.brandprofile_version or 0) + 1
+    profile["version"] = next_version
+    current, versioned = write_versioned(channel_dir(channel_id), "brandprofile", profile, next_version)
+    ch.brandprofile_path = str(current)
+    ch.brandprofile_version = next_version
+    db.add(BrandProfileVersion(channel_id=channel_id, version=next_version, file_path=str(versioned), note="Thêm ảnh tham chiếu phong cách"))
+    db.add(AuditLog(action="Thêm ảnh tham chiếu phong cách", detail=ch.name, entity=ch.name))
+    db.commit()
+    return profile
+
+
+@router.delete("/channels/{channel_id}/brandprofile/style-references/{filename}")
+def delete_style_reference(channel_id: str, filename: str, db: Session = Depends(get_db)):
+    """Bỏ ĐÚNG 1 ảnh tham chiếu khỏi danh sách + xoá file trên đĩa — `filename` là tên
+    file THẬT trong `style_refs/` (lấy từ `style_reference_paths`, không phải index —
+    tránh lệch nếu danh sách đổi thứ tự giữa lúc người dùng thao tác)."""
+    ch = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not ch:
+        raise HTTPException(404, "Không tìm thấy kênh")
+    profile = read_json(channel_dir(channel_id) / "brandprofile.json")
+    if profile is None:
+        raise HTTPException(404, "Chưa có BrandProfile")
+
+    target = channel_dir(channel_id) / "style_refs" / filename
+    paths = list(profile.get("style_reference_paths") or [])
+    remaining = [p for p in paths if Path(p).name != filename]
+    if len(remaining) == len(paths):
+        raise HTTPException(404, "Không tìm thấy ảnh tham chiếu này trong danh sách")
+    if target.exists():
+        unlink_retrying(target)
+    profile["style_reference_paths"] = remaining
+    next_version = (ch.brandprofile_version or 0) + 1
+    profile["version"] = next_version
+    current, versioned = write_versioned(channel_dir(channel_id), "brandprofile", profile, next_version)
+    ch.brandprofile_path = str(current)
+    ch.brandprofile_version = next_version
+    db.add(BrandProfileVersion(channel_id=channel_id, version=next_version, file_path=str(versioned), note="Bỏ ảnh tham chiếu phong cách"))
+    db.add(AuditLog(action="Bỏ ảnh tham chiếu phong cách", detail=ch.name, entity=ch.name))
+    db.commit()
+    return profile
+
+
+@router.get("/channels/{channel_id}/brandprofile/style-references/{filename}")
+def get_style_reference(channel_id: str, filename: str, db: Session = Depends(get_db)):
+    target = channel_dir(channel_id) / "style_refs" / filename
+    if not target.exists():
+        raise HTTPException(404, "Không tìm thấy ảnh tham chiếu")
+    return FileResponse(target)
 
 
 _INTRO_VIDEO_EXT_BY_CONTENT_TYPE = {"video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov"}
@@ -375,7 +460,7 @@ async def upload_brand_intro(channel_id: str, file: UploadFile = File(...), db: 
     for old_field in ("intro_video_path", "intro_audio_path"):
         old_path = profile.get(old_field)
         if old_path and Path(old_path).exists() and Path(old_path) != new_path:
-            Path(old_path).unlink()
+            unlink_retrying(Path(old_path))
     write_bytes(new_path, data)
 
     profile["intro_video_path"] = str(new_path) if kind == "video" else ""
@@ -427,7 +512,7 @@ async def upload_brand_bg_music(channel_id: str, file: UploadFile = File(...), d
     old_path = profile.get("bg_music_path")
     new_path = cdir / f"bg_music.{ext}"
     if old_path and Path(old_path).exists() and Path(old_path) != new_path:
-        Path(old_path).unlink()
+        unlink_retrying(Path(old_path))
     write_bytes(new_path, data)
 
     profile["bg_music_path"] = str(new_path)
@@ -480,7 +565,7 @@ async def upload_brand_overlay(channel_id: str, file: UploadFile = File(...), db
     old_path = profile.get("overlay_effect_path")
     new_path = cdir / f"overlay.{ext}"
     if old_path and Path(old_path).exists() and Path(old_path) != new_path:
-        Path(old_path).unlink()
+        unlink_retrying(Path(old_path))
     write_bytes(new_path, data)
 
     profile["overlay_effect_path"] = str(new_path)

@@ -1,4 +1,5 @@
 import Sidebar from "./components/Sidebar";
+import AssetVault from "./screens/AssetVault";
 import Dashboard from "./screens/Dashboard";
 import Library from "./screens/Library";
 import ProjectView from "./screens/ProjectView";
@@ -12,6 +13,7 @@ function Shell() {
     <div style={{ display: "flex", height: "100vh", background: "var(--color-bg)", color: "var(--color-text)", fontFamily: "var(--font-body)", overflow: "hidden", fontSize: 14 }}>
       <Sidebar />
       {app.view === "dashboard" && <Dashboard />}
+      {app.view === "asset_vault" && <AssetVault />}
       {app.view === "library" && <Library />}
       {app.view === "project" && app.activeProjectId && <ProjectView />}
       {app.view === "settings" && <SettingsShell />}

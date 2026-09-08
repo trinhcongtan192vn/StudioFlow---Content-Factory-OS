@@ -69,6 +69,44 @@ def test_brandprofile_get_put_versioning(client, channel):
     assert 1 in versions and 2 in versions
 
 
+def test_new_channel_brandprofile_has_blank_motion_tone_and_cultural_lock_negative(client, unique_name):
+    """Bug thật (2026-09-02, user báo) — `motion_tone`/`cultural_lock_negative` TỪNG có
+    default không rỗng ghim sẵn trong schema (gợi ý "chậm, tinh tế"/loại trừ Nhật-Hàn) —
+    kênh MỚI TẠO hiện sẵn giá trị dù người dùng chưa từng nhập gì, trông như đã có dữ liệu.
+    Đổi default schema về rỗng — cụm gợi ý cũ chuyển thành placeholder ở frontend, không
+    còn là giá trị thật."""
+    resp = client.post("/channels", json={"name": f"Kênh trống {unique_name}", "niche": "Test"})
+    ch = resp.json()
+    profile = client.get(f"/channels/{ch['id']}/brandprofile").json()
+    assert profile["motion_tone"] == ""
+    assert profile["cultural_lock_negative"] == ""
+
+
+def test_put_brandprofile_persists_cleared_motion_tone_and_cultural_lock_negative(client, channel):
+    """Bug thật (2026-09-02, user tự test) — xoá trắng 2 field này rồi lưu, mở lại vẫn
+    thấy giá trị cũ. Root cause thật ra ở FRONTEND (`ChannelDialog.tsx::draftFromProfile`
+    dùng `bp.field || "<default cũ>"`, coi chuỗi rỗng ĐÃ LƯU giống hệt "chưa có giá trị" —
+    xem IMPLEMENTATION_REPORT.md mục 104) — test này verify riêng phần BACKEND (được hỏi
+    trong lúc điều tra: PUT full-replace có DROP chuỗi rỗng không?) — xác nhận KHÔNG, PUT
+    lưu ĐÚNG chuỗi rỗng, GET đọc lại ĐÚNG chuỗi rỗng."""
+    profile = client.get(f"/channels/{channel['id']}/brandprofile").json()
+    profile["motion_tone"] = "chuyển động chậm, tinh tế"
+    profile["cultural_lock_negative"] = "japanese kimono"
+    client.put(f"/channels/{channel['id']}/brandprofile", json=profile)
+
+    profile2 = client.get(f"/channels/{channel['id']}/brandprofile").json()
+    profile2["motion_tone"] = ""
+    profile2["cultural_lock_negative"] = ""
+    resp = client.put(f"/channels/{channel['id']}/brandprofile", json=profile2)
+    assert resp.status_code == 200
+    assert resp.json()["motion_tone"] == ""
+    assert resp.json()["cultural_lock_negative"] == ""
+
+    reloaded = client.get(f"/channels/{channel['id']}/brandprofile").json()
+    assert reloaded["motion_tone"] == ""
+    assert reloaded["cultural_lock_negative"] == ""
+
+
 def test_clone_brandprofile(client, channel, unique_name):
     # sửa brandprofile nguồn để có nội dung phân biệt được
     profile = client.get(f"/channels/{channel['id']}/brandprofile").json()
