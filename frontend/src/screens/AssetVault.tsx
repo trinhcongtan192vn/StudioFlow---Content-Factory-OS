@@ -12,6 +12,11 @@ import ProgressBar from "../components/ProgressBar";
  * này. */
 export default function AssetVault() {
   const [rawVideos, setRawVideos] = useState<RawVideo[]>([]);
+  // Hàng "ảo" đại diện PROJECT (nguồn của asset lưu từ Visual Studio) — **mới
+  // (2026-09-13)**, riêng biệt với `rawVideos` (chỉ chứa video thật) vì dropdown "Video
+  // nguồn" của bảng "Asset từ Visual Studio" cần trỏ tới PROJECT chứ không phải video
+  // gốc thật nào — xem `api.listRawVideos(undefined, "project")`.
+  const [projectSourceRows, setProjectSourceRows] = useState<RawVideo[]>([]);
   const [clips, setClips] = useState<ProcessedClip[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -19,8 +24,9 @@ export default function AssetVault() {
   async function load() {
     setError(null);
     try {
-      const [raw, clipList] = await Promise.all([api.listRawVideos(), api.listProcessedClips()]);
+      const [raw, projectRows, clipList] = await Promise.all([api.listRawVideos(), api.listRawVideos(undefined, "project"), api.listProcessedClips()]);
       setRawVideos(raw);
+      setProjectSourceRows(projectRows);
       setClips(clipList);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Có lỗi khi tải Kho tài nguyên.");
@@ -62,7 +68,19 @@ export default function AssetVault() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)" }}>
           <RawLibrarySection rawVideos={rawVideos} clips={clips} onChanged={load} />
-          <ProcessedClipLibrarySection clips={clips} rawVideos={rawVideos} onChanged={load} />
+          <ProcessedClipLibrarySection clips={clips.filter((c) => !c.from_visual_studio)} rawVideos={rawVideos} onChanged={load} />
+          {/* Asset lưu từ Visual Studio (ảnh/video AI sinh, 2026-09-11) — section RIÊNG
+              theo yêu cầu người dùng, tái dùng NGUYÊN component "Clip đã cắt" (cùng
+              bảng/action/preview) chỉ khác nguồn dữ liệu (`from_visual_studio`) — tránh
+              trùng lặp code cho 1 bảng gần như giống hệt. */}
+          <ProcessedClipLibrarySection
+            clips={clips.filter((c) => c.from_visual_studio)}
+            rawVideos={projectSourceRows}
+            onChanged={load}
+            title="Asset từ Visual Studio"
+            emptyMessage='Chưa có asset nào — sang Visual Studio, chọn shot rồi bấm "Lưu vào Kho tài nguyên".'
+            rawFilterLabel="project"
+          />
         </div>
       )}
     </div>
@@ -76,8 +94,17 @@ const _STATUS_LABEL: Record<string, { text: string; color: string }> = {
   error: { text: "Lỗi", color: "var(--color-danger)" },
 };
 
-function StatusBadge({ status }: { status: string }) {
-  const info = _STATUS_LABEL[status] || { text: status, color: "var(--color-text)" };
+/** `status="detecting"` có 2 nghĩa khác nhau: (1) job cắt cảnh THẬT đang chạy (có
+ * `progress_total`), (2) mới upload/chưa cắt lần nào, đang CHỜ người dùng tự bấm "Cắt cảnh
+ * tự động" (đúng nguyên tắc "mỗi bước tự bấm" của CLAUDE.md — cắt cảnh KHÔNG tự chạy).
+ * Trước đây badge hiện "Đang cắt cảnh" cho CẢ 2 case, khiến video vừa upload trông như
+ * đang xử lý dở dù chưa có gì chạy — người dùng báo lại chuyện này (2026-09-10). Truyền
+ * `progressTotal` để phân biệt: null → "Chưa cắt cảnh". */
+function StatusBadge({ status, progressTotal }: { status: string; progressTotal?: number | null }) {
+  let info = _STATUS_LABEL[status] || { text: status, color: "var(--color-text)" };
+  if (status === "detecting" && progressTotal == null) {
+    info = { text: "Chưa cắt cảnh", color: "var(--color-text)" };
+  }
   return (
     <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, background: `color-mix(in srgb, ${info.color} 18%, transparent)`, color: info.color, whiteSpace: "nowrap" }}>
       {info.text}
@@ -191,6 +218,14 @@ function RawLibrarySection({ rawVideos, clips, onChanged }: { rawVideos: RawVide
   const [localError, setLocalError] = useState<string | null>(null);
   const [filterChannel, setFilterChannel] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Phân trang (2026-09-09, theo yêu cầu người dùng) — mặc định 10 dòng/trang, tuỳ chọn
+  // 10/20/50/100. Đặt lại về trang 1 khi filter hoặc pageSize đổi (effect bên dưới) —
+  // tránh trang trỏ quá cuối 1 danh sách vừa bị lọc/đổi cỡ trang ngắn lại. `selected`/
+  // `allSelected`/`toggleSelectAll` vẫn tính trên `filtered` (TOÀN BỘ video khớp filter,
+  // không chỉ trang đang xem) — giữ đúng hành vi "chọn nhiều" cũ, không bị giới hạn theo
+  // trang.
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [previewRaw, setPreviewRaw] = useState<RawVideo | null>(null);
   const [bulkAddingChannel, setBulkAddingChannel] = useState(false);
   const [bulkChannelDraft, setBulkChannelDraft] = useState<Set<string>>(new Set());
@@ -288,6 +323,12 @@ function RawLibrarySection({ rawVideos, clips, onChanged }: { rawVideos: RawVide
   }
 
   const filtered = rawVideos.filter((r) => !filterChannel || r.channels.some((c) => c.id === filterChannel));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const pageSafe = Math.min(page, totalPages);
+  const pageItems = filtered.slice((pageSafe - 1) * pageSize, pageSafe * pageSize);
+  useEffect(() => {
+    setPage(1);
+  }, [filterChannel, pageSize]);
   const allSelected = filtered.length > 0 && filtered.every((r) => selected.has(r.id));
 
   function toggleSelectAll() {
@@ -452,42 +493,46 @@ function RawLibrarySection({ rawVideos, clips, onChanged }: { rawVideos: RawVide
       {filtered.length === 0 ? (
         <div style={{ fontSize: 12.5, opacity: 0.65 }}>Chưa có video gốc nào khớp bộ lọc — upload hoặc dán URL ở trên.</div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--color-divider)", textAlign: "left" }}>
-                <Th style={{ width: 24 }}>
-                  <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
-                </Th>
-                <Th style={{ width: 36 }}></Th>
-                <Th>Tên file</Th>
-                <Th>Kênh</Th>
-                <Th>Trạng thái</Th>
-                <Th>Ghi chú</Th>
-                <Th>Ngày tạo</Th>
-                <Th>Hành động</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((r) => (
-                <RawVideoRow
-                  key={r.id}
-                  raw={r}
-                  hasClips={clips.some((c) => c.raw_video_id === r.id)}
-                  selected={selected.has(r.id)}
-                  busy={busyId === r.id}
-                  onToggleSelect={() => toggleSelect(r.id)}
-                  onPreview={() => setPreviewRaw(r)}
-                  onRetag={(next) => handleRetag(r, next)}
-                  onDetectScenes={() => handleDetectScenes(r.id)}
-                  onCaptionAll={() => handleCaptionAll(r.id)}
-                  onRemoveWatermark={() => handleRemoveWatermark(r.id)}
-                  onDelete={() => handleDelete(r.id)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <Pager page={pageSafe} pageSize={pageSize} total={filtered.length} onPageChange={setPage} onPageSizeChange={setPageSize} itemLabel="video" />
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--color-divider)", textAlign: "left" }}>
+                  <Th style={{ width: 24 }}>
+                    <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+                  </Th>
+                  <Th style={{ width: 36 }}></Th>
+                  <Th>Tên file</Th>
+                  <Th>Kênh</Th>
+                  <Th>Trạng thái</Th>
+                  <Th>Ghi chú</Th>
+                  <Th>Ngày tạo</Th>
+                  <Th>Hành động</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageItems.map((r) => (
+                  <RawVideoRow
+                    key={r.id}
+                    raw={r}
+                    hasClips={clips.some((c) => c.raw_video_id === r.id)}
+                    selected={selected.has(r.id)}
+                    busy={busyId === r.id}
+                    onToggleSelect={() => toggleSelect(r.id)}
+                    onPreview={() => setPreviewRaw(r)}
+                    onRetag={(next) => handleRetag(r, next)}
+                    onDetectScenes={() => handleDetectScenes(r.id)}
+                    onCaptionAll={() => handleCaptionAll(r.id)}
+                    onRemoveWatermark={() => handleRemoveWatermark(r.id)}
+                    onDelete={() => handleDelete(r.id)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pager page={pageSafe} pageSize={pageSize} total={filtered.length} onPageChange={setPage} onPageSizeChange={setPageSize} itemLabel="video" compact />
+        </>
       )}
 
       {previewRaw && <RawVideoPreviewPanel raw={previewRaw} onClose={() => setPreviewRaw(null)} />}
@@ -551,7 +596,7 @@ function RawVideoRow({
       </Td>
       <Td>
         <div style={{ display: "flex", flexDirection: "column", gap: 3, alignItems: "flex-start" }}>
-          <StatusBadge status={raw.status} />
+          <StatusBadge status={raw.status} progressTotal={raw.progress_total} />
           {raw.progress_total != null && raw.progress_current != null && (
             <ProgressBar current={raw.progress_current} total={raw.progress_total} label={raw.progress_label} />
           )}
@@ -662,10 +707,22 @@ function ProcessedClipLibrarySection({
   clips,
   rawVideos,
   onChanged,
+  title = "Clip đã cắt (Processed Clip Library)",
+  emptyMessage = "Chưa có clip nào khớp bộ lọc — cắt cảnh + gắn nhãn video gốc ở trên trước.",
+  rawFilterLabel = "video gốc",
 }: {
   clips: ProcessedClip[];
   rawVideos: RawVideo[];
   onChanged: () => void;
+  // Dùng chung component này cho CẢ "Clip đã cắt" (B-roll từ RawVideo thật) LẪN "Asset
+  // từ Visual Studio" (2026-09-11) — chỉ khác tiêu đề/dữ liệu truyền vào, hành vi/action
+  // giống hệt nhau. Tránh trùng lặp ~500 dòng code cho 1 bảng gần như giống hệt.
+  title?: string;
+  emptyMessage?: string;
+  // Nhãn cho dropdown "Video nguồn" — **mới (2026-09-13)** — "video gốc" cho bảng B-roll
+  // thật, "project" cho bảng "Asset từ Visual Studio" (rawVideos ở đó là hàng ẢO đại
+  // diện project, không phải video thật).
+  rawFilterLabel?: string;
 }) {
   const app = useApp();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -674,6 +731,11 @@ function ProcessedClipLibrarySection({
   const [filterRaw, setFilterRaw] = useState("");
   const [filterUnlabeled, setFilterUnlabeled] = useState(false);
   const [filterRawStatus, setFilterRawStatus] = useState("");
+  // Phân trang (2026-09-09) — cùng cơ chế `RawLibrarySection` (xem ghi chú ở đó): mặc
+  // định 10 dòng/trang, 10/20/50/100; `selected`/`allSelected` vẫn tính trên `filtered`
+  // (toàn bộ clip khớp filter), không giới hạn theo trang.
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [previewClip, setPreviewClip] = useState<ProcessedClip | null>(null);
   const [bulkCaptioning, setBulkCaptioning] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
@@ -719,6 +781,12 @@ function ProcessedClipLibrarySection({
       (!filterUnlabeled || !c.caption) &&
       (!filterRawStatus || c.raw_video_status === filterRawStatus),
   );
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const pageSafe = Math.min(page, totalPages);
+  const pageItems = filtered.slice((pageSafe - 1) * pageSize, pageSafe * pageSize);
+  useEffect(() => {
+    setPage(1);
+  }, [filterChannel, filterRights, filterRaw, filterUnlabeled, filterRawStatus, pageSize]);
 
   const allSelected = filtered.length > 0 && filtered.every((c) => selected.has(c.clip_id));
   function toggleSelectAll() {
@@ -806,7 +874,7 @@ function ProcessedClipLibrarySection({
   return (
     <div className="card elev-sm" style={{ gap: "var(--space-2)" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <div className="card-kicker">Clip đã cắt (Processed Clip Library)</div>
+        <div className="card-kicker">{title}</div>
         <OpenFolderButton getPath={async () => (await api.getAssetVaultFolders()).clips_dir} label="Mở thư mục clip đã cắt" />
       </div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -833,7 +901,7 @@ function ProcessedClipLibrarySection({
           ))}
         </select>
         <select className="input" style={{ width: "auto" }} value={filterRaw} onChange={(e) => setFilterRaw(e.target.value)}>
-          <option value="">Mọi video gốc</option>
+          <option value="">Mọi {rawFilterLabel}</option>
           {rawVideos.map((r) => (
             <option key={r.id} value={r.id}>
               {rawVideoLabel(r)}
@@ -888,50 +956,119 @@ function ProcessedClipLibrarySection({
       )}
 
       {filtered.length === 0 ? (
-        <div style={{ fontSize: 12.5, opacity: 0.65 }}>Chưa có clip nào khớp bộ lọc — cắt cảnh + gắn nhãn video gốc ở trên trước.</div>
+        <div style={{ fontSize: 12.5, opacity: 0.65 }}>{emptyMessage}</div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--color-divider)", textAlign: "left" }}>
-                <Th style={{ width: 24 }}>
-                  <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
-                </Th>
-                <Th style={{ width: 36 }}></Th>
-                <Th>Video nguồn</Th>
-                <Th>Kênh</Th>
-                <Th style={{ minWidth: 220 }}>Caption</Th>
-                <Th>Tags / Mood</Th>
-                <Th>Rights</Th>
-                <Th>Thời lượng</Th>
-                <Th>Độ phân giải</Th>
-                <Th>Dùng</Th>
-                <Th>Trạng thái</Th>
-                <Th>Ngày tạo</Th>
-                <Th>Hành động</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((c) => (
-                <ClipRow
-                  key={c.clip_id}
-                  clip={c}
-                  rawVideo={rawVideos.find((r) => r.id === c.raw_video_id)}
-                  selected={selected.has(c.clip_id)}
-                  pendingCaption={pendingCaptionIds.has(c.clip_id)}
-                  onToggleSelect={() => toggleSelect(c.clip_id)}
-                  onChanged={onChanged}
-                  onDelete={() => handleDeleteClip(c.clip_id)}
-                  onPreview={() => setPreviewClip(c)}
-                  onRetag={(next) => handleRetagClip(c.clip_id, next)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <Pager page={pageSafe} pageSize={pageSize} total={filtered.length} onPageChange={setPage} onPageSizeChange={setPageSize} itemLabel="clip" />
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--color-divider)", textAlign: "left" }}>
+                  <Th style={{ width: 24 }}>
+                    <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+                  </Th>
+                  <Th style={{ width: 36 }}></Th>
+                  <Th>Video nguồn</Th>
+                  <Th>Kênh</Th>
+                  <Th style={{ minWidth: 220 }}>Caption</Th>
+                  <Th>Tags / Mood</Th>
+                  <Th>Rights</Th>
+                  <Th>Thời lượng</Th>
+                  <Th>Độ phân giải</Th>
+                  <Th>Dùng</Th>
+                  <Th>Trạng thái</Th>
+                  <Th>Ngày tạo</Th>
+                  <Th>Hành động</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageItems.map((c) => (
+                  <ClipRow
+                    key={c.clip_id}
+                    clip={c}
+                    selected={selected.has(c.clip_id)}
+                    pendingCaption={pendingCaptionIds.has(c.clip_id)}
+                    onToggleSelect={() => toggleSelect(c.clip_id)}
+                    onChanged={onChanged}
+                    onDelete={() => handleDeleteClip(c.clip_id)}
+                    onPreview={() => setPreviewClip(c)}
+                    onRetag={(next) => handleRetagClip(c.clip_id, next)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pager page={pageSafe} pageSize={pageSize} total={filtered.length} onPageChange={setPage} onPageSizeChange={setPageSize} itemLabel="clip" compact />
+        </>
       )}
 
       {previewClip && <ClipPreviewPanel clip={previewClip} onClose={() => setPreviewClip(null)} />}
+    </div>
+  );
+}
+
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+
+/** Phân trang cho bảng — mới (2026-09-09, theo yêu cầu người dùng cho 2 bảng "Video gốc"/
+ * "Clip đã cắt"). Component RIÊNG cho `AssetVault.tsx` (chưa có pattern phân trang chung
+ * nào trong codebase trước đây — 2 bảng ở đây là nơi đầu tiên cần) — hiện tổng số dòng
+ * khớp filter + dropdown đổi số dòng/trang (10/20/50/100, mặc định 10, xem state ở 2 nơi
+ * gọi) + nút Trước/Sau. `compact` (dùng cho pager Ở DƯỚI bảng) ẩn phần đếm dòng/dropdown
+ * đổi cỡ trang (đã hiện ở pager TRÊN bảng, tránh lặp 2 lần) — chỉ còn Trước/Sau. */
+function Pager({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+  onPageSizeChange,
+  itemLabel,
+  compact,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+  itemLabel: string;
+  compact?: boolean;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const to = Math.min(total, page * pageSize);
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", fontSize: 12.5, padding: "4px 0" }}>
+      {compact ? (
+        <span />
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ opacity: 0.75 }}>
+            Hiển thị {from}–{to} / {total} {itemLabel}
+          </span>
+          <label style={{ display: "flex", alignItems: "center", gap: 4, opacity: 0.75 }}>
+            Số dòng/trang
+            <select className="input" style={{ width: "auto" }} value={pageSize} onChange={(e) => onPageSizeChange(Number(e.target.value))}>
+              {PAGE_SIZE_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+      {totalPages > 1 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button type="button" className="btn btn-secondary" style={{ padding: "2px 8px", fontSize: 11.5 }} disabled={page <= 1} onClick={() => onPageChange(page - 1)}>
+            ← Trước
+          </button>
+          <span style={{ opacity: 0.75 }}>
+            Trang {page}/{totalPages}
+          </span>
+          <button type="button" className="btn btn-secondary" style={{ padding: "2px 8px", fontSize: 11.5 }} disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>
+            Sau →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -950,7 +1087,6 @@ function Td({ children, style }: { children?: ReactNode; style?: CSSProperties }
 
 function ClipRow({
   clip,
-  rawVideo,
   selected,
   pendingCaption,
   onToggleSelect,
@@ -960,7 +1096,6 @@ function ClipRow({
   onRetag,
 }: {
   clip: ProcessedClip;
-  rawVideo: RawVideo | undefined;
   selected: boolean;
   pendingCaption: boolean;
   onToggleSelect: () => void;
@@ -983,7 +1118,7 @@ function ClipRow({
         <button
           type="button"
           className="btn btn-icon btn-secondary"
-          title="Xem trước video"
+          title={clip.media_kind === "image" ? "Xem trước ảnh" : "Xem trước video"}
           onClick={onPreview}
           style={{ width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center" }}
         >
@@ -1034,12 +1169,19 @@ function ClipRow({
           <option value="public_domain">Public domain</option>
         </select>
       </Td>
-      <Td style={{ whiteSpace: "nowrap" }}>{clip.duration_sec.toFixed(1)}s</Td>
+      <Td style={{ whiteSpace: "nowrap" }}>{clip.media_kind === "image" ? "—" : `${clip.duration_sec.toFixed(1)}s`}</Td>
       <Td style={{ whiteSpace: "nowrap" }}>{clip.resolution || "—"}</Td>
       <Td style={{ whiteSpace: "nowrap" }}>{clip.usage_count} lần</Td>
       <Td style={{ whiteSpace: "nowrap" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 3, alignItems: "flex-start" }}>
-          {rawVideo ? <StatusBadge status={rawVideo.status} /> : <span style={{ fontSize: 11, opacity: 0.5 }}>video gốc đã xoá</span>}
+          {/* Đọc THẲNG `clip.raw_video_status` (đã tính sẵn server-side qua `_clip_out`,
+              2026-09-11) thay vì tra qua prop `rawVideos` rời — ĐÚNG cả khi raw_video
+              cha là hàng "ảo" đại diện project (asset lưu từ Visual Studio, không nằm
+              trong danh sách `GET /asset-vault/raw` vì bị lọc khỏi Raw Library) lẫn khi
+              danh sách rawVideos truyền vào bị lọc/không đầy đủ vì lý do khác. Không cần
+              progress — clip CHỈ tồn tại sau khi cắt cảnh xong (hoặc lưu trực tiếp từ
+              Visual Studio), raw_video cha luôn hết progress ở thời điểm này. */}
+          {clip.raw_video_status ? <StatusBadge status={clip.raw_video_status} progressTotal={null} /> : <span style={{ fontSize: 11, opacity: 0.5 }}>video gốc đã xoá</span>}
           {pendingCaption && <span style={{ fontSize: 10.5, color: "var(--color-accent)" }}>Đang gắn nhãn...</span>}
           {!pendingCaption && clip.caption_error && (
             <span style={{ fontSize: 10.5, color: "var(--color-danger)" }} title={clip.caption_error}>
@@ -1113,7 +1255,21 @@ function ClipCaptionCell({ clip, onChanged }: { clip: ProcessedClip; onChanged: 
  * metadata
  * (caption/kênh/rights...) khác nhau giữa clip đã cắt và video gốc nên truyền qua
  * `children`, chỉ phần khung + video player là dùng chung. */
-function PreviewPanelShell({ title, videoSrc, onClose, children }: { title: string; videoSrc: string; onClose: () => void; children: ReactNode }) {
+function PreviewPanelShell({
+  title,
+  videoSrc,
+  mediaKind = "video",
+  onClose,
+  children,
+}: {
+  title: string;
+  videoSrc: string;
+  // Asset lưu từ Visual Studio có thể là ẢNH (2026-09-11) — mặc định "video" (khớp
+  // NGUYÊN hành vi cũ, mọi caller khác đều là video: clip B-roll/video gốc).
+  mediaKind?: "video" | "image";
+  onClose: () => void;
+  children: ReactNode;
+}) {
   return (
     <div className="dialog-backdrop" onClick={onClose} style={{ display: "flex", justifyContent: "flex-end", padding: 0 }}>
       <div
@@ -1132,8 +1288,13 @@ function PreviewPanelShell({ title, videoSrc, onClose, children }: { title: stri
             </svg>
           </button>
         </div>
-        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-        <video src={videoSrc} controls autoPlay style={{ width: "100%", borderRadius: "var(--radius-sm)", background: "#000" }} />
+        {mediaKind === "image" ? (
+          // eslint-disable-next-line jsx-a11y/alt-text
+          <img src={videoSrc} style={{ width: "100%", borderRadius: "var(--radius-sm)", background: "#000" }} />
+        ) : (
+          // eslint-disable-next-line jsx-a11y/media-has-caption
+          <video src={videoSrc} controls autoPlay style={{ width: "100%", borderRadius: "var(--radius-sm)", background: "#000" }} />
+        )}
         <div style={{ fontSize: 12.5, display: "flex", flexDirection: "column", gap: 6 }}>{children}</div>
       </div>
     </div>
@@ -1142,9 +1303,9 @@ function PreviewPanelShell({ title, videoSrc, onClose, children }: { title: stri
 
 function ClipPreviewPanel({ clip, onClose }: { clip: ProcessedClip; onClose: () => void }) {
   return (
-    <PreviewPanelShell title="Xem trước clip" videoSrc={api.clipFileUrl(clip.clip_id)} onClose={onClose}>
+    <PreviewPanelShell title={clip.media_kind === "image" ? "Xem trước ảnh" : "Xem trước clip"} videoSrc={api.clipFileUrl(clip.clip_id)} mediaKind={clip.media_kind} onClose={onClose}>
       <div>
-        <span style={{ opacity: 0.6 }}>Video nguồn: </span>
+        <span style={{ opacity: 0.6 }}>{clip.from_visual_studio ? "Từ project: " : "Video nguồn: "}</span>
         {clip.raw_video_name}
       </div>
       <ChannelChips channels={clip.channels} />
@@ -1157,7 +1318,7 @@ function ClipPreviewPanel({ clip, onClose }: { clip: ProcessedClip; onClose: () 
         ))}
       </div>
       <div style={{ opacity: 0.65 }}>
-        {clip.duration_sec.toFixed(1)}s · {clip.resolution || "—"} · dùng {clip.usage_count} lần
+        {clip.media_kind === "image" ? clip.resolution || "—" : `${clip.duration_sec.toFixed(1)}s · ${clip.resolution || "—"}`} · dùng {clip.usage_count} lần
       </div>
       <RightsBadge status={clip.rights_status} />
     </PreviewPanelShell>
@@ -1178,7 +1339,7 @@ function RawVideoPreviewPanel({ raw, onClose }: { raw: RawVideo; onClose: () => 
           {raw.import_note}
         </div>
       )}
-      <StatusBadge status={raw.status} />
+      <StatusBadge status={raw.status} progressTotal={raw.progress_total} />
     </PreviewPanelShell>
   );
 }

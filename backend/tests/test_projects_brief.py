@@ -18,8 +18,52 @@ def test_create_project_defaults(client, channel):
     assert p["id"] in ids
 
 
+def test_new_id_unique_even_when_time_collides(monkeypatch):
+    """Bug thật (2026-09-12, phát hiện lúc điều tra vì sao full test suite thỉnh thoảng
+    lỗi `UNIQUE constraint failed: project.id` khi chạy nhanh): `_new_id` cũ chỉ dùng
+    `int(time.time()*1000)` làm hậu tố — 2 lệnh gọi trong CÙNG 1 mili giây (thật xảy ra
+    khi test chạy nhanh, hoặc người dùng bấm tạo hàng loạt rất nhanh ngoài đời) ra TRÙNG
+    ID. Fix: thêm hex ngẫu nhiên — đóng băng `time.time()` (giả lập collision THẬT, không
+    chỉ hy vọng may mắn không trùng lúc test chạy) rồi sinh nhiều ID liên tiếp, xác nhận
+    KHÔNG còn cái nào trùng nhau."""
+    monkeypatch.setattr(projects_router.time, "time", lambda: 1789999999.999)
+    ids = [projects_router._new_id("prj") for _ in range(50)]
+    assert len(set(ids)) == 50
+
+
 def test_get_project_404(client):
     resp = client.get("/projects/does_not_exist")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Kéo thả sắp xếp thứ tự project trên Sidebar (2026-09-19) — `order_index` mới, xem
+# `models.py::Project.order_index`/`routers/projects.py::reorder_projects`.
+# ---------------------------------------------------------------------------
+def test_create_project_prepends_within_same_sibling_group(client, channel):
+    p1 = client.post(f"/channels/{channel['id']}/projects", json={"title": "First"}).json()
+    p2 = client.post(f"/channels/{channel['id']}/projects", json={"title": "Second"}).json()
+    ids = [p["id"] for p in client.get(f"/channels/{channel['id']}/projects").json()]
+    assert ids.index(p2["id"]) < ids.index(p1["id"])  # tạo SAU -> lên ĐẦU nhóm
+
+
+def test_reorder_projects_persists_new_order(client, channel):
+    p1 = client.post(f"/channels/{channel['id']}/projects", json={"title": "P1"}).json()
+    p2 = client.post(f"/channels/{channel['id']}/projects", json={"title": "P2"}).json()
+    p3 = client.post(f"/channels/{channel['id']}/projects", json={"title": "P3"}).json()
+
+    resp = client.patch(f"/channels/{channel['id']}/projects/reorder", json={"project_ids": [p3["id"], p1["id"], p2["id"]]})
+    assert resp.status_code == 200, resp.text
+
+    ids = [p["id"] for p in client.get(f"/channels/{channel['id']}/projects").json()]
+    assert ids == [p3["id"], p1["id"], p2["id"]]
+
+
+def test_reorder_projects_rejects_id_from_other_channel(client, channel, channel2):
+    p1 = client.post(f"/channels/{channel['id']}/projects", json={"title": "Mine"}).json()
+    other = client.post(f"/channels/{channel2['id']}/projects", json={"title": "Other channel"}).json()
+
+    resp = client.patch(f"/channels/{channel['id']}/projects/reorder", json={"project_ids": [p1["id"], other["id"]]})
     assert resp.status_code == 404
 
 

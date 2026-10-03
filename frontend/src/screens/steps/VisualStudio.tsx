@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../../api/client";
-import type { BackgroundVideoOverride, BgMusicOverride, GpuStatus, ImageLayer, ImageLayerPosition, IntroAssetStatus, LayerBlendMode, LayerPosition, OverlayEffectOverride, ProductionPack, ProjectSummary, RenderState, Shot, ShotRenderStatus, VideoLayer, WatermarkScanSummary } from "../../api/types";
+import type { BackgroundVideoOverride, BgMusicOverride, CaptionLayer, CharacterReferenceStatus, GpuStatus, ImageLayer, ImageLayerPosition, IntroAssetStatus, LayerBlendMode, LayerPosition, NarrationLanguage, OverlayEffectOverride, ProductionPack, ProjectSummary, RenderState, Shot, ShotRenderStatus, ShotUploadBatchResult, VaultAutoFillSuggestionsResult, VideoLayer, WatermarkScanSummary } from "../../api/types";
+import { NARRATION_LANGUAGES, NARRATION_LANGUAGE_LABELS } from "../../api/types";
 import AddToLibraryButton from "../../components/AddToLibraryButton";
 import AiErrorBanner from "../../components/AiErrorBanner";
 import Lightbox, { ExpandButton } from "../../components/Lightbox";
@@ -76,6 +77,21 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
   const tickRef = useRef<number | undefined>(undefined);
   const body = pack.script?.body || [];
 
+  // Tiếng Việt tham chiếu dưới narration ngôn ngữ chính — mới (2026-09-09), theo yêu cầu
+  // người dùng: tương tự cách Script Studio đã làm (xem ScriptStudio.tsx). Chỉ cần biết
+  // `primary_language` để quyết định CÓ hiện panel tham chiếu hay không (KHÔNG cần
+  // `viewLang` như Script Studio — Visual Studio không có khái niệm "đang xem ngôn ngữ
+  // nào", luôn hiện đúng 1 bản ngôn ngữ chính).
+  const [primaryLanguage, setPrimaryLanguage] = useState<NarrationLanguage>("vi");
+  useEffect(() => {
+    api
+      .getBrandProfile(project.channel_id)
+      .then((bp) => setPrimaryLanguage(bp.primary_language || "vi"))
+      .catch(() => {
+        /* BrandProfile luôn tồn tại (tạo kèm kênh) — lỗi hiếm, giữ mặc định "vi" */
+      });
+  }, [project.channel_id]);
+
   function describeAiError(e: unknown, fallback: string): string {
     return e instanceof ApiError ? e.message : fallback;
   }
@@ -123,13 +139,193 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
     return renderState?.shots.find((s) => s.shot_id === shotId);
   }
 
-  function snippetFor(ts: number | null) {
-    return body.find((b) => b.timestamp_sec === ts)?.audio || "";
+  // Khớp shot ↔ block theo `block_id` TRƯỚC (ổn định, duy nhất) — cùng bugfix đã áp dụng
+  // ở Script Studio (`shotForBlock`, mục 31 IMPLEMENTATION_REPORT.md: `timestamp_sec` có
+  // thể lệch giữa lúc tạo shot và lúc script sửa/import lại). Fallback về khớp
+  // `timestamp_sec` (hành vi cũ) khi shot chưa có `block_id` (dữ liệu cũ).
+  function bodyItemFor(shot: Shot) {
+    if (shot.block_id) {
+      const byBlock = body.find((b) => b.block_id === shot.block_id);
+      if (byBlock) return byBlock;
+    }
+    return body.find((b) => b.timestamp_sec === shot.linked_timestamp_sec);
+  }
+
+  function narrationTextsFor(shot: Shot): { primary: string; vi: string } {
+    const b = bodyItemFor(shot);
+    return { primary: b?.audio || "", vi: b?.audio_by_lang?.vi || "" };
   }
 
   async function patchShot(shotId: string, patch: Partial<{ visual_fx: string; audio_sfx: string; visual_type: string; transition_to_next: string; camera_motion: string }>) {
     await api.patchShot(project.id, shotId, patch);
     await refresh();
+  }
+
+  // Bulk edit "Chuyển cảnh sang shot kế tiếp"/"Chuyển động camera" cho nhiều/tất cả shot
+  // — mới (2026-09-10), theo yêu cầu người dùng. `selectedShots` sống ở component CHA
+  // (không phải trong từng ShotCard) vì thanh công cụ bulk cần biết tổng số đã chọn +
+  // gọi API 1 lần cho cả danh sách.
+  const [selectedShots, setSelectedShots] = useState<Set<string>>(new Set());
+  const [bulkTransition, setBulkTransition] = useState("cut");
+  const [bulkCameraMotion, setBulkCameraMotion] = useState("none");
+  const [applyingBulkTransition, setApplyingBulkTransition] = useState(false);
+  const [applyingBulkCameraMotion, setApplyingBulkCameraMotion] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+
+  function toggleShotSelect(shotId: string) {
+    setSelectedShots((s) => {
+      const next = new Set(s);
+      if (next.has(shotId)) next.delete(shotId);
+      else next.add(shotId);
+      return next;
+    });
+  }
+
+  const allShotsSelected = pack.shots.length > 0 && pack.shots.every((v) => selectedShots.has(v.shot_id));
+  function toggleSelectAllShots() {
+    setSelectedShots(allShotsSelected ? new Set() : new Set(pack.shots.map((v) => v.shot_id)));
+  }
+
+  // "Chuyển cảnh sang shot kế tiếp" không có ý nghĩa cho shot CUỐI (không có shot kế
+  // tiếp để chuyển sang — xem field tương ứng ẩn ở ShotCard khi `isLast`) — loại khỏi
+  // danh sách áp dụng để tránh gửi 1 field không đổi gì (không hại nếu gửi, nhưng đếm số
+  // shot áp dụng THẬT khớp UI hơn).
+  const selectableForTransition = pack.shots.filter((v, i) => selectedShots.has(v.shot_id) && i < pack.shots.length - 1);
+  // "Chuyển động camera (ảnh tĩnh)" chỉ có ý nghĩa cho shot ẢNH — lọc tương tự.
+  const selectableForCameraMotion = pack.shots.filter((v) => selectedShots.has(v.shot_id) && v.visual_type === "image");
+
+  async function applyBulkTransition() {
+    if (selectableForTransition.length === 0) return;
+    setApplyingBulkTransition(true);
+    setBulkError(null);
+    try {
+      await api.patchShotsBulk(
+        project.id,
+        selectableForTransition.map((v) => v.shot_id),
+        { transition_to_next: bulkTransition }
+      );
+      await refresh();
+    } catch (e) {
+      setBulkError(describeAiError(e, "Có lỗi khi áp dụng hàng loạt."));
+    } finally {
+      setApplyingBulkTransition(false);
+    }
+  }
+
+  async function applyBulkCameraMotion() {
+    if (selectableForCameraMotion.length === 0) return;
+    setApplyingBulkCameraMotion(true);
+    setBulkError(null);
+    try {
+      await api.patchShotsBulk(
+        project.id,
+        selectableForCameraMotion.map((v) => v.shot_id),
+        { camera_motion: bulkCameraMotion }
+      );
+      await refresh();
+    } catch (e) {
+      setBulkError(describeAiError(e, "Có lỗi khi áp dụng hàng loạt."));
+    } finally {
+      setApplyingBulkCameraMotion(false);
+    }
+  }
+
+  // Lưu ảnh/video đã sinh của shot đã chọn vào Kho Tài Nguyên — mới (2026-09-11), theo
+  // yêu cầu người dùng: "cho phép chọn Lưu tài nguyên cho ảnh/video ở một hoặc nhiều
+  // block 1 lúc". Tái dùng ĐÚNG checkbox bulk-select đã có ở trên (mục 130) — chọn 1
+  // shot vẫn dùng được cơ chế này bình thường, không cần nút riêng cho từng shot.
+  const [applyingSaveToVault, setApplyingSaveToVault] = useState(false);
+  const [saveToVaultResult, setSaveToVaultResult] = useState<{ saved: number; updated: number; skipped: { shot_id: string; reason: string }[] } | null>(null);
+
+  async function saveSelectedToVault() {
+    if (selectedShots.size === 0) return;
+    setApplyingSaveToVault(true);
+    setBulkError(null);
+    setSaveToVaultResult(null);
+    try {
+      const result = await api.saveShotsToVault(project.id, Array.from(selectedShots));
+      setSaveToVaultResult({ saved: result.saved.length, updated: result.updated.length, skipped: result.skipped });
+      await refresh();
+    } catch (e) {
+      setBulkError(describeAiError(e, "Có lỗi khi lưu vào Kho tài nguyên."));
+    } finally {
+      setApplyingSaveToVault(false);
+    }
+  }
+
+  // Tự động điền block còn thiếu từ Kho Tài Nguyên — mới (2026-09-11), theo yêu cầu
+  // người dùng: quét shot chưa có visual, gợi ý ảnh/video khớp từ Kho, mở màn review
+  // cho người dùng bỏ bớt gợi ý không phù hợp trước khi thật sự gán.
+  const [autoFillResult, setAutoFillResult] = useState<VaultAutoFillSuggestionsResult | null>(null);
+  const [scanningAutoFill, setScanningAutoFill] = useState(false);
+  const [autoFillError, setAutoFillError] = useState<string | null>(null);
+  // Tiến trình quét — **mới (2026-09-13)**, theo yêu cầu người dùng cần biết đang quét
+  // gì/tới đâu/bao lâu (job nền poll được, xem client.ts::startVaultAutoFillScan).
+  const [autoFillProgress, setAutoFillProgress] = useState<{ current: number; total: number; label: string | null; elapsedSec: number } | null>(null);
+  const autoFillPollRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearInterval(autoFillPollRef.current), []);
+
+  async function openAutoFillScan() {
+    setScanningAutoFill(true);
+    setAutoFillError(null);
+    setAutoFillProgress(null);
+    try {
+      await api.startVaultAutoFillScan(project.id);
+    } catch (e) {
+      setAutoFillError(describeAiError(e, "Có lỗi khi bắt đầu quét Kho tài nguyên."));
+      setScanningAutoFill(false);
+      return;
+    }
+    window.clearInterval(autoFillPollRef.current);
+    autoFillPollRef.current = window.setInterval(async () => {
+      let s;
+      try {
+        s = await api.getVaultAutoFillScanStatus(project.id);
+      } catch {
+        return; // lỗi mạng thoáng qua — thử lại ở lượt poll tiếp theo
+      }
+      if (s.status === "running") {
+        setAutoFillProgress({ current: s.current || 0, total: s.total || 0, label: s.current_label ?? null, elapsedSec: s.elapsed_sec || 0 });
+        return;
+      }
+      window.clearInterval(autoFillPollRef.current);
+      setScanningAutoFill(false);
+      setAutoFillProgress(null);
+      if (s.status === "error") {
+        setAutoFillError(s.error || "Có lỗi khi quét gợi ý từ Kho tài nguyên.");
+      } else if (s.status === "done" && s.result) {
+        if (s.result.matched_count === 0) {
+          setAutoFillError("Không tìm thấy gợi ý nào đủ tin cậy trong Kho Tài Nguyên cho các shot còn thiếu visual.");
+        } else {
+          setAutoFillResult(s.result);
+        }
+      }
+    }, 800);
+  }
+
+  // Upload cả folder ảnh/video khớp theo mã block — mới (2026-09-16), theo yêu cầu
+  // người dùng: chọn 1 folder có sẵn (tên file trùng shot_id, VD "B01.png"), backend tự
+  // khớp + upload, popup báo số file khớp/chưa khớp + liệt kê tên file chưa khớp.
+  const [uploadingBatch, setUploadingBatch] = useState(false);
+  const [batchUploadError, setBatchUploadError] = useState<string | null>(null);
+  const [batchUploadResult, setBatchUploadResult] = useState<ShotUploadBatchResult | null>(null);
+  const batchFolderInputRef = useRef<HTMLInputElement>(null);
+
+  async function handleBatchFolderPicked(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploadingBatch(true);
+    setBatchUploadError(null);
+    try {
+      const result = await api.uploadShotVisualBatch(project.id, Array.from(files));
+      setRenderState(result.state);
+      for (const m of result.matched) bumpShotCacheBust(m.shot_id);
+      setBatchUploadResult(result);
+    } catch (e) {
+      setBatchUploadError(describeAiError(e, "Có lỗi khi upload folder."));
+    } finally {
+      setUploadingBatch(false);
+    }
   }
 
   async function toggleType(shotId: string, current: string) {
@@ -241,14 +437,26 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
     }
   }
 
-  async function removeShotWatermark(shotId: string) {
+  async function removeShotWatermark(shotId: string, mode: "auto" | "gemini" = "auto") {
     setAiError(null);
     try {
-      setRenderState(await api.removeShotWatermark(project.id, shotId));
-      // Cùng lý do ở regenVisualAsset — endpoint này cũng chạy qua BackgroundTasks, kết
-      // quả (kể cả "không phát hiện watermark") chỉ có sau khi nền chạy xong.
-      window.setTimeout(loadRenderStatus, 1200);
-      window.setTimeout(loadRenderStatus, 3000);
+      setRenderState(await api.removeShotWatermark(project.id, shotId, mode));
+      // Bug thật (2026-09-19, người dùng báo "xoá xong nhưng video vẫn còn watermark") —
+      // file THẬT đã được xoá đúng trên đĩa (`visual_asset_path` đổi tên sang `_nowm`),
+      // nhưng preview <video>/<img> KHÔNG BAO GIỜ refetch vì thiếu `bumpShotCacheBust` ở
+      // đây (mọi hành động đổi asset khác — upload/regenerate/assign vault clip — đều có
+      // gọi, riêng hàm này bị bỏ sót từ lúc build tính năng xoá watermark). Bump SAU KHI
+      // poll xong (không phải ngay sau POST) — endpoint này chạy qua BackgroundTasks, file
+      // mới chỉ tồn tại SAU khi nền hoàn tất; bump quá sớm sẽ khiến trình duyệt fetch lại
+      // nhưng vẫn nhận đúng file CŨ rồi cache luôn kết quả sai đó.
+      window.setTimeout(async () => {
+        await loadRenderStatus();
+        bumpShotCacheBust(shotId);
+      }, 1200);
+      window.setTimeout(async () => {
+        await loadRenderStatus();
+        bumpShotCacheBust(shotId);
+      }, 3000);
     } catch (e) {
       setAiError(describeAiError(e, "Có lỗi khi xoá watermark cho shot này."));
     }
@@ -256,12 +464,12 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
 
   const [removingAllWatermarks, setRemovingAllWatermarks] = useState(false);
   const [dismissedWatermarkSummaryAt, setDismissedWatermarkSummaryAt] = useState<string | null>(null);
-  async function removeAllWatermarks() {
+  async function removeAllWatermarks(mode: "auto" | "gemini" = "auto") {
     setRemovingAllWatermarks(true);
     setAiError(null);
     const previousFinishedAt = renderState?.watermark_scan_summary?.finished_at ?? null;
     try {
-      await api.removeAllShotsWatermark(project.id);
+      await api.removeAllShotsWatermark(project.id, mode);
       setDismissedWatermarkSummaryAt(null); // lượt quét mới — banner tóm tắt cũ (nếu đang ẩn) không còn liên quan
       // Bug thật (2026-09-04): 2 lần poll cố định (1.2s/3s) cũ giả định sẽ "bắt được" ít
       // nhất 1 shot đang `visual_status=="generating"` để tự bật vòng poll liên tục qua
@@ -276,7 +484,14 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
         const fresh = await api.getRenderStatus(project.id);
         setRenderState(fresh);
-        if (fresh.watermark_scan_summary && fresh.watermark_scan_summary.finished_at !== previousFinishedAt) break;
+        if (fresh.watermark_scan_summary && fresh.watermark_scan_summary.finished_at !== previousFinishedAt) {
+          // Cùng bug thật vừa sửa ở removeShotWatermark — preview <video>/<img> không tự
+          // refetch nếu thiếu bumpShotCacheBust dù file trên đĩa đã đổi. Bump cho MỌI shot
+          // (rẻ, chỉ vài lượt fetch thừa cho shot không đổi) thay vì tính lại đúng shot nào
+          // vừa "cleaned" — đơn giản hơn hẳn mà không có tác dụng phụ đáng kể.
+          for (const s of fresh.shots) bumpShotCacheBust(s.shot_id);
+          break;
+        }
       }
     } catch (e) {
       setAiError(describeAiError(e, "Có lỗi khi xoá watermark cho toàn bộ block."));
@@ -359,11 +574,41 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
                 },
                 {
                   label: removingAllWatermarks ? "Đang quét/xoá watermark..." : "Xoá watermark toàn bộ slot",
-                  title: "Xoá watermark cho MỌI shot đã có ảnh/video sẵn sàng (bỏ qua shot chưa sinh xong) — ảnh vá vị trí watermark Gemini/Nano Banana cố định (góc dưới phải), video dùng Florence-2 + LaMa để tự định vị. Có thể mất vài phút tuỳ số lượng shot.",
+                  title: "Xoá watermark cho MỌI shot đã có ảnh/video sẵn sàng (bỏ qua shot chưa sinh xong, VÀ bỏ qua ảnh không rõ nguồn Gemini — dùng nút riêng nếu chắc chắn có watermark Gemini) — video tự định vị bằng so sánh nhiều frame, dự phòng Florence-2 + LaMa. Có thể mất vài phút tuỳ số lượng shot.",
                   disabled: removingAllWatermarks || startingRender || hasInFlight,
-                  onClick: removeAllWatermarks,
+                  onClick: () => removeAllWatermarks("auto"),
+                },
+                {
+                  label: removingAllWatermarks ? "Đang quét/xoá watermark..." : "Xoá watermark Gemini toàn bộ slot",
+                  title: "Ép xoá watermark Gemini tại vị trí cố định góc dưới-phải cho MỌI shot đã có ảnh/video sẵn sàng (ảnh lẫn video), không cần biết provider — dùng khi bạn chắc chắn CẢ block đều có watermark Gemini.",
+                  disabled: removingAllWatermarks || startingRender || hasInFlight,
+                  onClick: () => removeAllWatermarks("gemini"),
+                },
+                {
+                  label: scanningAutoFill ? "Đang quét Kho tài nguyên..." : "Tự động điền từ Kho tài nguyên",
+                  title: "Quét các shot CHƯA có visual, gợi ý ảnh/video khớp từ Kho Tài Nguyên (chỉ gợi ý match thật chắc) — mở màn xem trước để bạn bỏ bớt gợi ý không phù hợp rồi mới gán.",
+                  disabled: scanningAutoFill,
+                  onClick: openAutoFillScan,
+                },
+                {
+                  label: uploadingBatch ? "Đang upload folder..." : "Upload ảnh/video từ folder (theo mã block)",
+                  title: 'Chọn 1 folder có sẵn ảnh/video, tên file trùng mã block (VD "B01.png") — tự động khớp + upload, ghi đè block đã có sẵn nếu trùng tên. Hiện popup báo số file khớp/chưa khớp.',
+                  disabled: uploadingBatch,
+                  onClick: () => batchFolderInputRef.current?.click(),
                 },
               ]}
+            />
+            <input
+              ref={batchFolderInputRef}
+              type="file"
+              multiple
+              // @ts-expect-error webkitdirectory chưa có trong type HTMLInputElement chuẩn — thuộc tính Chromium (Electron renderer chạy Chromium nên dùng được thẳng, không cần IPC riêng)
+              webkitdirectory=""
+              style={{ display: "none" }}
+              onChange={(e) => {
+                handleBatchFolderPicked(e.target.files);
+                e.target.value = "";
+              }}
             />
             <button className="btn btn-primary" style={{ fontSize: 12, padding: "5px 12px" }} onClick={goOutput} disabled={busy}>
               {busy ? "Đang chuyển..." : "Đi tới Output →"}
@@ -373,6 +618,30 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
       />
 
       {aiError && <AiErrorBanner message={aiError} onDismiss={() => setAiError(null)} />}
+      {autoFillProgress && (
+        <div style={{ marginBottom: "var(--space-3)" }}>
+          <ProgressBar
+            current={autoFillProgress.current}
+            total={autoFillProgress.total}
+            label={`Đang quét ${autoFillProgress.current}/${autoFillProgress.total}${autoFillProgress.label ? ` — ${autoFillProgress.label}` : ""} (${Math.round(autoFillProgress.elapsedSec)}s)`}
+          />
+        </div>
+      )}
+      {autoFillError && <AiErrorBanner message={autoFillError} onDismiss={() => setAutoFillError(null)} />}
+      {autoFillResult && (
+        <VaultAutoFillModal
+          projectId={project.id}
+          result={autoFillResult}
+          onClose={() => setAutoFillResult(null)}
+          onApplied={async () => {
+            setAutoFillResult(null);
+            await refresh();
+            await loadRenderStatus();
+          }}
+        />
+      )}
+      {batchUploadError && <AiErrorBanner message={batchUploadError} onDismiss={() => setBatchUploadError(null)} />}
+      {batchUploadResult && <ShotUploadBatchModal result={batchUploadResult} onClose={() => setBatchUploadResult(null)} />}
 
       {renderState?.watermark_scan_summary && renderState.watermark_scan_summary.finished_at !== dismissedWatermarkSummaryAt && (
         <WatermarkSummaryBanner
@@ -383,6 +652,8 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
 
       <IntroShotCard projectId={project.id} channelId={project.channel_id} intro={renderState?.intro ?? null} refresh={loadRenderStatus} isVertical={project.format === "short"} />
 
+      <CharacterReferenceCard projectId={project.id} characterReference={renderState?.character_reference ?? null} refresh={loadRenderStatus} />
+
       <BgMusicCard projectId={project.id} channelId={project.channel_id} bgMusic={renderState?.bg_music ?? null} refresh={loadRenderStatus} />
 
       <OverlayEffectCard projectId={project.id} channelId={project.channel_id} overlay={renderState?.overlay ?? null} refresh={loadRenderStatus} />
@@ -392,6 +663,8 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
       <LayersCard projectId={project.id} layers={renderState?.layers ?? []} refresh={loadRenderStatus} />
 
       <ImageLayersCard projectId={project.id} layers={renderState?.image_layers ?? []} refresh={loadRenderStatus} />
+
+      <CaptionLayerCard projectId={project.id} channelId={project.channel_id} captionLayer={renderState?.caption_layer ?? null} refresh={loadRenderStatus} />
 
       {hasInFlight && gpuStatus && (
         <div
@@ -407,29 +680,114 @@ export default function VisualStudio({ project, pack, refresh, busy, setBusy }: 
         </div>
       )}
 
+      {pack.shots.length > 0 && (
+        <div className="card elev-sm" style={{ gap: "var(--space-2)", maxWidth: 900, marginBottom: "var(--space-3)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" checked={allShotsSelected} onChange={toggleSelectAllShots} />
+            <span style={{ fontSize: 12.5, opacity: 0.8 }}>
+              {selectedShots.size === 0 ? "Chọn shot để sửa hàng loạt" : `Đã chọn ${selectedShots.size}/${pack.shots.length} shot`}
+            </span>
+          </div>
+          {selectedShots.size > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-4)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label style={{ fontSize: 12.5, opacity: 0.8 }}>Chuyển cảnh sang shot kế tiếp:</label>
+                <select className="input" style={{ fontSize: 12.5, width: "auto" }} value={bulkTransition} onChange={(e) => setBulkTransition(e.target.value)}>
+                  {TRANSITION_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="btn btn-secondary"
+                  style={{ fontSize: 12, padding: "5px 10px" }}
+                  onClick={applyBulkTransition}
+                  disabled={applyingBulkTransition || selectableForTransition.length === 0}
+                  title={selectableForTransition.length === 0 ? "Không có shot nào trong lựa chọn có shot kế tiếp (loại shot cuối)" : `Áp dụng cho ${selectableForTransition.length} shot`}
+                >
+                  {applyingBulkTransition ? "Đang áp dụng..." : `Áp dụng (${selectableForTransition.length} shot)`}
+                </button>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label style={{ fontSize: 12.5, opacity: 0.8 }}>Chuyển động camera (ảnh tĩnh):</label>
+                <select className="input" style={{ fontSize: 12.5, width: "auto" }} value={bulkCameraMotion} onChange={(e) => setBulkCameraMotion(e.target.value)}>
+                  {CAMERA_MOTION_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="btn btn-secondary"
+                  style={{ fontSize: 12, padding: "5px 10px" }}
+                  onClick={applyBulkCameraMotion}
+                  disabled={applyingBulkCameraMotion || selectableForCameraMotion.length === 0}
+                  title={selectableForCameraMotion.length === 0 ? "Không có shot ảnh nào trong lựa chọn (loại shot video)" : `Áp dụng cho ${selectableForCameraMotion.length} ảnh`}
+                >
+                  {applyingBulkCameraMotion ? "Đang áp dụng..." : `Áp dụng (${selectableForCameraMotion.length} ảnh)`}
+                </button>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <button
+                  className="btn btn-secondary"
+                  style={{ fontSize: 12, padding: "5px 10px" }}
+                  onClick={saveSelectedToVault}
+                  disabled={applyingSaveToVault}
+                  title="Lưu ảnh/video đã sinh của các shot đã chọn vào Kho Tài Nguyên để tái sử dụng cho project khác cùng kênh"
+                >
+                  {applyingSaveToVault ? "Đang lưu..." : `Lưu vào Kho tài nguyên (${selectedShots.size})`}
+                </button>
+              </div>
+            </div>
+          )}
+          {saveToVaultResult && (
+            <div style={{ fontSize: 12, opacity: 0.85 }}>
+              Đã lưu {saveToVaultResult.saved} shot mới, cập nhật {saveToVaultResult.updated} shot đã lưu trước đó.
+              {saveToVaultResult.skipped.length > 0 && (
+                <>
+                  {" "}
+                  Bỏ qua {saveToVaultResult.skipped.length} shot:{" "}
+                  {saveToVaultResult.skipped.map((s) => `${s.shot_id} (${s.reason})`).join(", ")}
+                </>
+              )}
+            </div>
+          )}
+          {bulkError && <div style={{ fontSize: 12, color: "var(--color-danger)" }}>{bulkError}</div>}
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)", maxWidth: 900 }}>
-        {pack.shots.map((v, i) => (
-          <ShotCard
-            key={v.shot_id}
-            projectId={project.id}
-            shot={v}
-            isLast={i === pack.shots.length - 1}
-            status={statusFor(v.shot_id)}
-            snippet={snippetFor(v.linked_timestamp_sec)}
-            onToggleType={() => toggleType(v.shot_id, v.visual_type)}
-            onPatchShot={(patch) => patchShot(v.shot_id, patch)}
-            onGenerateVisualAsset={() => regenVisualAsset(v.shot_id)}
-            onGenerateNarrationAsset={() => regenNarrationAsset(v.shot_id)}
-            onUploadVisualAsset={(file) => uploadVisualAsset(v.shot_id, file)}
-            onAssignVaultClip={(clipId) => assignVaultClip(v.shot_id, clipId)}
-            onRemoveVisual={() => removeVisualAsset(v.shot_id)}
-            onRemoveWatermark={() => removeShotWatermark(v.shot_id)}
-            disableGenerate={hasInFlight}
-            nowTick={nowTick}
-            cacheBust={shotCacheBust[v.shot_id] || 0}
-            isVertical={project.format === "short"}
-          />
-        ))}
+        {pack.shots.map((v, i) => {
+          const { primary, vi } = narrationTextsFor(v);
+          return (
+            <ShotCard
+              key={v.shot_id}
+              projectId={project.id}
+              shot={v}
+              isLast={i === pack.shots.length - 1}
+              status={statusFor(v.shot_id)}
+              snippet={primary}
+              viSnippet={vi}
+              showViSnippet={primaryLanguage !== "vi"}
+              selected={selectedShots.has(v.shot_id)}
+              onToggleSelect={() => toggleShotSelect(v.shot_id)}
+              onToggleType={() => toggleType(v.shot_id, v.visual_type)}
+              onPatchShot={(patch) => patchShot(v.shot_id, patch)}
+              onGenerateVisualAsset={() => regenVisualAsset(v.shot_id)}
+              onGenerateNarrationAsset={() => regenNarrationAsset(v.shot_id)}
+              onUploadVisualAsset={(file) => uploadVisualAsset(v.shot_id, file)}
+              onAssignVaultClip={(clipId) => assignVaultClip(v.shot_id, clipId)}
+              onRemoveVisual={() => removeVisualAsset(v.shot_id)}
+              onRemoveWatermark={() => removeShotWatermark(v.shot_id)}
+              onRemoveWatermarkGemini={() => removeShotWatermark(v.shot_id, "gemini")}
+              disableGenerate={hasInFlight}
+              nowTick={nowTick}
+              cacheBust={shotCacheBust[v.shot_id] || 0}
+              isVertical={project.format === "short"}
+            />
+          );
+        })}
       </div>
     </div>
   );
@@ -483,6 +841,10 @@ function ShotCard({
   isLast,
   status,
   snippet,
+  viSnippet,
+  showViSnippet,
+  selected,
+  onToggleSelect,
   onToggleType,
   onPatchShot,
   onGenerateVisualAsset,
@@ -491,6 +853,7 @@ function ShotCard({
   onAssignVaultClip,
   onRemoveVisual,
   onRemoveWatermark,
+  onRemoveWatermarkGemini,
   disableGenerate,
   nowTick,
   cacheBust,
@@ -501,6 +864,16 @@ function ShotCard({
   isLast: boolean;
   status: ShotRenderStatus | undefined;
   snippet: string;
+  // Tiếng Việt tham chiếu (mới 2026-09-09) — hiện dưới `snippet` khi kênh có ngôn ngữ
+  // chính KHÁC tiếng Việt (`showViSnippet`, tính sẵn ở component cha từ `primary_language`
+  // — cùng kiểu dữ liệu/điều kiện Script Studio đã dùng, xem ScriptStudio.tsx).
+  viSnippet: string;
+  showViSnippet: boolean;
+  // Chọn nhiều shot để bulk edit "Chuyển cảnh"/"Chuyển động camera" — mới (2026-09-10),
+  // tính ở component cha (`VisualStudio`, `selectedShots: Set<string>`) — thanh công cụ
+  // bulk cần biết TỔNG số đã chọn, không hợp lý sống riêng trong từng ShotCard.
+  selected: boolean;
+  onToggleSelect: () => void;
   onToggleType: () => void;
   onPatchShot: (patch: Partial<{ visual_fx: string; audio_sfx: string; visual_type: string; transition_to_next: string; camera_motion: string }>) => void;
   onGenerateVisualAsset: () => void;
@@ -509,6 +882,10 @@ function ShotCard({
   onAssignVaultClip: (clipId: string) => Promise<void>;
   onRemoveVisual: () => void;
   onRemoveWatermark: () => void;
+  // Nút riêng "Xoá watermark Gemini" — **mới (2026-09-18)** — ép chạy Gemini corner-
+  // removal bất kể `status.visual_provider`, chỉ hiện cho shot ẢNH (xem docstring nút
+  // "Xoá watermark" bên dưới về lý do tách riêng).
+  onRemoveWatermarkGemini: () => void;
   // true khi BẤT KỲ shot nào trong project đang generate (không chỉ shot này) — chặn
   // bấm "sinh lại" chồng lên batch/shot khác đang chạy nền, tránh 2 BackgroundTasks
   // cùng ghi đè render.json (xem giải thích đầy đủ ở engine.py::_in_progress).
@@ -547,6 +924,7 @@ function ShotCard({
   return (
     <div className="card elev-sm" style={{ gap: "var(--space-3)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <input type="checkbox" checked={selected} onChange={onToggleSelect} title="Chọn để sửa hàng loạt" />
         <span className="tag tag-neutral" style={{ fontFamily: "ui-monospace,monospace" }}>
           {shot.shot_id} · {shot.linked_timestamp_sec}s
         </span>
@@ -555,8 +933,24 @@ function ShotCard({
         </span>
         <StatusTag label="Visual" status={visualStatus} />
         <StatusTag label="Giọng đọc" status={narrationStatus} />
+        {status?.saved_to_vault_clip_id && (
+          <span className="tag tag-neutral" style={{ opacity: 0.75 }} title="Ảnh/video của shot này đã được lưu vào Kho Tài Nguyên">
+            ✓ Đã lưu vào Kho
+          </span>
+        )}
       </div>
-      <div style={{ fontSize: 13, opacity: 0.8, padding: 8, background: "var(--color-bg)", borderRadius: "var(--radius-sm)" }}>{snippet}</div>
+      <div style={{ fontSize: 13, opacity: 0.8, padding: 8, background: "var(--color-bg)", borderRadius: "var(--radius-sm)" }}>
+        {snippet}
+        {/* Tiếng Việt tham chiếu (2026-09-04, cùng recipe Script Studio) — chỉ hiện khi
+            ngôn ngữ chính của kênh KHÔNG phải tiếng Việt. Đọc-only, giúp đối chiếu
+            nội dung shot khi làm việc với kênh nước ngoài. */}
+        {showViSnippet && (
+          <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px dashed var(--color-divider)" }}>
+            <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".06em", opacity: 0.5, marginBottom: 2 }}>Tiếng Việt (tham chiếu)</div>
+            <div style={{ opacity: 0.75 }}>{viSnippet || <span style={{ opacity: 0.45 }}>— chưa có —</span>}</div>
+          </div>
+        )}
+      </div>
 
       <div style={{ display: "grid", gridTemplateColumns: `${previewColWidth(isVertical)}px 1fr`, gap: "var(--space-3)", alignItems: "flex-start" }}>
         <ShotPreview projectId={projectId} shot={shot} status={status} cacheBust={cacheBust} isVertical={isVertical} />
@@ -646,26 +1040,27 @@ function ShotCard({
                 }
               }}
             />
-            {/* Video từ Kho — CHANGE_Semantic_BRoll_Asset_Vault.md §7.3. Chỉ áp dụng
-                cho shot VIDEO (clip B-roll trong Kho luôn là video, không có ảnh tĩnh). */}
-            {shot.visual_type === "video" && (
-              <VaultClipPicker
-                projectId={projectId}
-                shotId={shot.shot_id}
-                disabled={uploading || disableGenerate}
-                onPick={async (clipId) => {
-                  setUploading(true);
-                  setUploadError(null);
-                  try {
-                    await onAssignVaultClip(clipId);
-                  } catch (err) {
-                    setUploadError(err instanceof Error ? err.message : "Có lỗi khi gán clip từ Kho.");
-                  } finally {
-                    setUploading(false);
-                  }
-                }}
-              />
-            )}
+            {/* Video/Ảnh từ Kho — CHANGE_Semantic_BRoll_Asset_Vault.md §7.3. Kho Tài
+                Nguyên giờ chứa CẢ ảnh (lưu từ Visual Studio) lẫn video (cắt B-roll,
+                2026-09-11) — không còn gate riêng shot video, `mediaKind` khớp
+                `shot.visual_type` để backend lọc đúng loại. */}
+            <VaultClipPicker
+              projectId={projectId}
+              shotId={shot.shot_id}
+              mediaKind={shot.visual_type === "video" ? "video" : "image"}
+              disabled={uploading || disableGenerate}
+              onPick={async (clipId) => {
+                setUploading(true);
+                setUploadError(null);
+                try {
+                  await onAssignVaultClip(clipId);
+                } catch (err) {
+                  setUploadError(err instanceof Error ? err.message : "Có lỗi khi gán clip từ Kho.");
+                } finally {
+                  setUploading(false);
+                }
+              }}
+            />
             {/* `btn-secondary` (đổi 2026-08-23, theo đề xuất rà soát UX) — TRƯỚC ĐÂY
                 cũng `btn-primary` NGANG HÀNG với "Tạo ảnh/video" ở trên, 2 nút primary
                 cạnh nhau khiến không còn nút nào thực sự "nổi bật nhất". Giữ ĐÚNG 1
@@ -685,9 +1080,22 @@ function ShotCard({
               style={{ fontSize: 12, padding: "5px 10px" }}
               onClick={onRemoveWatermark}
               disabled={visualStatus !== "ready" || disableGenerate}
-              title="Xoá watermark trên ảnh/video hiện có của shot này — ảnh vá vị trí watermark Gemini/Nano Banana cố định (góc dưới phải), video tự định vị bằng Florence-2 + LaMa (không phát hiện được sẽ báo rõ, không phải lỗi)"
+              title={
+                shot.visual_type === "video"
+                  ? "Xoá watermark trên video hiện có của shot này — tự định vị bằng cách so sánh nhiều frame (vùng không đổi qua thời gian), dự phòng Florence-2 + LaMa nếu không tìm được (không phát hiện được sẽ báo rõ, không phải lỗi)"
+                  : 'Chỉ tự chạy khi ảnh chắc chắn sinh từ Gemini (vá vị trí watermark Gemini/Nano Banana cố định, góc dưới phải) — ảnh nguồn khác dùng nút "Xoá watermark Gemini" nếu chắc chắn có watermark Gemini, hoặc bỏ qua nếu không có watermark'
+              }
             >
               {visualStatus === "generating" ? "Đang xử lý..." : "Xoá watermark"}
+            </button>
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: 12, padding: "5px 10px" }}
+              onClick={onRemoveWatermarkGemini}
+              disabled={visualStatus !== "ready" || disableGenerate}
+              title="Ép xoá watermark Gemini tại vị trí cố định (góc dưới-phải) — áp dụng cho CẢ ảnh lẫn video, bất kể hệ thống có nhận ra nguồn/provider hay không. Dùng khi bạn chắc chắn asset này có watermark Gemini (kể cả upload tay)."
+            >
+              Xoá watermark Gemini
             </button>
             {status?.visual_asset_path && (
               <button
@@ -765,6 +1173,141 @@ function StatusTag({ label, status }: { label: string; status: string }) {
     <span className="tag tag-outline" style={{ fontSize: 10, color }}>
       {label}: {status}
     </span>
+  );
+}
+
+/** Màn review "Tự động điền từ Kho tài nguyên" — mới (2026-09-11), theo yêu cầu người
+ * dùng: "mở ra màn danh sách các shot đang có kèm ảnh/video gợi ý. User có thể bỏ các
+ * ảnh match ko phù hợp và accept các ảnh phù hợp còn lại để gắn với shot." Nhận `result`
+ * đã quét SẴN từ component cha (KHÔNG tự fetch lại — tránh lệch dữ liệu giữa lúc mở modal
+ * và lúc áp dụng). Mỗi dòng mặc định TICK (đã qua ngưỡng tin cậy cao ở backend) — người
+ * dùng BỎ tick dòng không phù hợp thay vì phải tick từng dòng đúng. */
+function VaultAutoFillModal({
+  projectId,
+  result,
+  onClose,
+  onApplied,
+}: {
+  projectId: string;
+  result: VaultAutoFillSuggestionsResult;
+  onClose: () => void;
+  onApplied: () => Promise<void>;
+}) {
+  const [accepted, setAccepted] = useState<Set<string>>(new Set(result.suggestions.map((s) => s.shot_id)));
+  const [applying, setApplying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function toggle(shotId: string) {
+    setAccepted((s) => {
+      const next = new Set(s);
+      if (next.has(shotId)) next.delete(shotId);
+      else next.add(shotId);
+      return next;
+    });
+  }
+
+  async function apply() {
+    const items = result.suggestions.filter((s) => accepted.has(s.shot_id)).map((s) => ({ shot_id: s.shot_id, clip_id: s.clip_id }));
+    if (items.length === 0) {
+      onClose();
+      return;
+    }
+    setApplying(true);
+    setError(null);
+    try {
+      await api.applyVaultAutoFill(projectId, items);
+      await onApplied();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi áp dụng gợi ý.");
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <div className="dialog" style={{ width: "min(640px,100%)", maxHeight: "80vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-title">Tự động điền từ Kho tài nguyên</div>
+        <div style={{ fontSize: 12.5, opacity: 0.75, marginBottom: 8 }}>
+          Đã quét {result.scanned_count} shot còn thiếu visual, tìm được {result.suggestions.length} gợi ý đủ tin cậy. Bỏ tick dòng nào không phù hợp trước khi áp dụng.
+        </div>
+        {error && <div style={{ fontSize: 12, color: "var(--color-danger)", marginBottom: 8 }}>{error}</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {result.suggestions.map((s) => (
+            <label
+              key={s.shot_id}
+              style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "8px 10px",
+                borderRadius: "var(--radius-sm)", background: "var(--color-bg)", cursor: "pointer",
+              }}
+            >
+              <input type="checkbox" checked={accepted.has(s.shot_id)} onChange={() => toggle(s.shot_id)} />
+              <div style={{ width: 64, height: 48, flex: "none", borderRadius: 4, overflow: "hidden", background: "var(--color-neutral-800)" }}>
+                {s.media_kind === "image" ? (
+                  // eslint-disable-next-line jsx-a11y/alt-text
+                  <img src={api.clipFileUrl(s.clip_id)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : (
+                  // eslint-disable-next-line jsx-a11y/media-has-caption
+                  <video src={api.clipFileUrl(s.clip_id)} preload="metadata" muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                )}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontFamily: "ui-monospace,monospace", opacity: 0.7 }}>{s.shot_id}</div>
+                <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={s.caption}>
+                  {s.caption || s.clip_id}
+                </div>
+              </div>
+              {s.match_score != null && (
+                <span className="tag tag-accent" style={{ fontSize: 10.5, flex: "none" }}>
+                  {Math.round(s.match_score * 100)}% match
+                </span>
+              )}
+            </label>
+          ))}
+        </div>
+        <div className="dialog-actions">
+          <button className="btn btn-secondary" onClick={onClose} disabled={applying}>
+            Huỷ
+          </button>
+          <button className="btn btn-primary" onClick={apply} disabled={applying}>
+            {applying ? "Đang áp dụng..." : `Áp dụng (${accepted.size} đã chọn)`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Popup báo cáo "Upload ảnh/video từ folder (theo mã block)" — mới (2026-09-16), theo
+ * yêu cầu người dùng: chỉ BÁO CÁO kết quả (upload đã xong khi popup này mở, khác
+ * `VaultAutoFillModal` — không có bước "chọn rồi áp dụng"), liệt kê rõ file nào chưa
+ * khớp kèm lý do để người dùng tự đổi tên/sửa rồi thử lại. */
+function ShotUploadBatchModal({ result, onClose }: { result: ShotUploadBatchResult; onClose: () => void }) {
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <div className="dialog" style={{ width: "min(560px,100%)", maxHeight: "80vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-title">Upload ảnh/video từ folder</div>
+        <div style={{ fontSize: 12.5, opacity: 0.85, marginBottom: 8 }}>
+          Đã khớp + upload <strong>{result.matched.length}</strong> file
+          {result.unmatched.length > 0 ? `, ${result.unmatched.length} file chưa khớp.` : "."}
+        </div>
+        {result.unmatched.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {result.unmatched.map((u) => (
+              <div key={u.filename} style={{ padding: "6px 10px", borderRadius: "var(--radius-sm)", background: "var(--color-danger-bg)" }}>
+                <div style={{ fontSize: 12.5, fontFamily: "ui-monospace,monospace" }}>{u.filename}</div>
+                <div style={{ fontSize: 11.5, color: "var(--color-danger)" }}>{u.reason}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="dialog-actions">
+          <button className="btn btn-primary" onClick={onClose}>
+            Đóng
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1062,6 +1605,160 @@ function IntroShotCard({ projectId, channelId, intro, refresh, isVertical }: { p
             {isDisabled && (brandIntroVideoPath || brandIntroAudioPath) && (
               <button className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 10px" }} onClick={enableInherit} disabled={enabling}>
                 {enabling ? "Đang bật lại..." : "Dùng lại mặc định thương hiệu"}
+              </button>
+            )}
+          </div>
+          {error && <div style={{ fontSize: 12, color: "var(--color-danger)" }}>{error}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Ảnh nhân vật tham khảo RIÊNG của project — **mới (2026-09-09, mục 127)**, theo yêu cầu
+ * người dùng: upload 1 ảnh nhân vật (VD ảnh shot trước đã ưng ý), backend TỰ ĐỘNG sinh
+ * `description` qua VisionProvider (đồng bộ, xong ngay trong response upload — xem
+ * `app/routers/render.py::upload_character_reference`) — mô tả này tự nối vào MỌI prompt
+ * sinh ảnh của project (xem `_build_visual_prompt`), đây là bản TỰ ĐỘNG HOÁ của cách làm
+ * thủ công đã verify hiệu quả thật ở mục 126 (mô tả ngoại hình nhân vật bằng chữ giữ
+ * đồng nhất tốt hơn hẳn Flux Redux/PuLID-Flux). KHÔNG có cấp kênh để kế thừa (khác
+ * `IntroShotCard`/`BgMusicCard` — nhân vật tham khảo đặc thù từng project, không có
+ * BrandProfile field tương ứng) — đơn giản hơn nhiều: 1 ảnh, 1 mô tả, sửa tay được. */
+function CharacterReferenceCard({ projectId, characterReference, refresh }: { projectId: string; characterReference: CharacterReferenceStatus | null; refresh: () => Promise<void> }) {
+  const [uploading, setUploading] = useState(false);
+  const [recaptioning, setRecaptioning] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [cacheBust, setCacheBust] = useState(0);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [savingDesc, setSavingDesc] = useState(false);
+
+  async function upload(file: File) {
+    setUploading(true);
+    setError(null);
+    try {
+      await api.uploadCharacterReference(projectId, file);
+      await refresh();
+      setCacheBust((n) => n + 1);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi upload ảnh nhân vật tham khảo.");
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function recaption() {
+    setRecaptioning(true);
+    setError(null);
+    try {
+      await api.recaptionCharacterReference(projectId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi sinh lại mô tả.");
+    } finally {
+      setRecaptioning(false);
+    }
+  }
+
+  async function saveDescription(value: string) {
+    setSavingDesc(true);
+    setError(null);
+    try {
+      await api.patchCharacterReferenceDescription(projectId, value);
+      await refresh();
+      setEditingDesc(false);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi lưu mô tả.");
+    } finally {
+      setSavingDesc(false);
+    }
+  }
+
+  async function remove() {
+    if (!confirm("Bỏ ảnh nhân vật tham khảo? Mô tả sẽ không còn được nối vào prompt sinh ảnh nữa.")) return;
+    setRemoving(true);
+    setError(null);
+    try {
+      await api.deleteCharacterReference(projectId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi bỏ ảnh tham khảo.");
+    } finally {
+      setRemoving(false);
+    }
+  }
+
+  const hasImage = !!characterReference?.image_path;
+
+  return (
+    <div className="card elev-sm" style={{ gap: "var(--space-3)", maxWidth: 900, marginBottom: "var(--space-3)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div className="card-title">
+          Nhân vật tham khảo (tuỳ chọn){" "}
+          {hasImage && <span className="tag tag-accent" style={{ marginLeft: 6 }}>Đang dùng — nối mô tả vào mọi prompt sinh ảnh</span>}
+        </div>
+        <span style={{ fontSize: 11.5, opacity: 0.6 }}>Upload 1 ảnh nhân vật (VD ảnh shot đã ưng ý) — tự sinh mô tả ngoại hình, giúp giữ đồng nhất nhân vật giữa các shot</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: "var(--space-3)", alignItems: "flex-start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ height: 140, borderRadius: "var(--radius-sm)", background: "var(--color-bg)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+            {hasImage ? (
+              <img alt="Nhân vật tham khảo" src={`${api.characterReferenceAssetUrl(projectId)}?v=${cacheBust}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : (
+              <span style={{ fontSize: 11.5, opacity: 0.5, textAlign: "center", padding: 8 }}>Chưa có</span>
+            )}
+          </div>
+          {hasImage && <AddToLibraryButton kind="image" sourceUrl={`${api.characterReferenceAssetUrl(projectId)}?v=${cacheBust}`} name="nhan-vat-tham-khao" />}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
+          <div className="field" style={{ margin: 0 }}>
+            <label>Mô tả ngoại hình (tự sinh, nối vào mọi prompt sinh ảnh)</label>
+            {editingDesc ? (
+              <textarea
+                className="input"
+                rows={2}
+                style={{ fontSize: 13 }}
+                defaultValue={characterReference?.description || ""}
+                autoFocus
+                disabled={savingDesc}
+                onBlur={(e) => saveDescription(e.target.value)}
+              />
+            ) : (
+              <div
+                style={{ fontSize: 13, opacity: hasImage ? 1 : 0.5, padding: 8, background: "var(--color-bg)", borderRadius: "var(--radius-sm)", cursor: hasImage ? "text" : "default" }}
+                onClick={() => hasImage && setEditingDesc(true)}
+              >
+                {characterReference?.description || (hasImage ? "— chưa có, đang sinh hoặc bấm để tự gõ —" : "— upload ảnh để tự sinh mô tả —")}
+              </div>
+            )}
+            {characterReference?.caption_error && (
+              <div style={{ fontSize: 12, color: "var(--color-danger)", marginTop: 4 }}>Lỗi sinh mô tả tự động: {characterReference.caption_error}</div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) upload(f);
+              }}
+            />
+            <button className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 10px" }} onClick={() => fileRef.current?.click()} disabled={uploading}>
+              {uploading ? "Đang tải lên..." : hasImage ? "Thay ảnh" : "Upload ảnh"}
+            </button>
+            {hasImage && (
+              <button className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 10px" }} onClick={recaption} disabled={recaptioning}>
+                {recaptioning ? "Đang sinh lại..." : "Sinh lại mô tả"}
+              </button>
+            )}
+            {hasImage && (
+              <button className="btn btn-secondary" style={{ fontSize: 12, padding: "5px 10px", color: "var(--color-danger)" }} onClick={remove} disabled={removing}>
+                {removing ? "Đang bỏ..." : "Bỏ ảnh tham khảo"}
               </button>
             )}
           </div>
@@ -1979,6 +2676,105 @@ function ImageLayersCard({ projectId, layers, refresh }: { projectId: string; la
           <LibraryPicker kinds={["image"]} disabled={uploading} onPick={upload} />
         </div>
       </div>
+      {error && <div style={{ fontSize: 12, color: "var(--color-danger)" }}>{error}</div>}
+    </div>
+  );
+}
+
+/** Layer CAPTION (phụ đề cứng burn-in) — **mới (2026-09-12)**, theo yêu cầu người dùng:
+ * "Bổ sung tính năng cho phép user thêm caption vào video ở bước visual studio... chọn
+ * 9 vị trí, kích thước, độ mờ tương tự phần Layer video định vị". KHÁC LayersCard/
+ * ImageLayersCard (list, nhiều instance, upload file) — đây là 1 CẤU HÌNH DUY NHẤT/
+ * project, KHÔNG có upload gì (nội dung lấy thẳng từ script, đã sinh giọng đọc hay chưa
+ * không quan trọng — chỉ cần có chữ). Ngôn ngữ caption — theo yêu cầu người dùng xác
+ * nhận thêm ("chọn cả loại ngôn ngữ nữa") — mặc định "Theo ngôn ngữ đang ghép video"
+ * (`lang: null`), đổi được sang ngôn ngữ KHÁC độc lập với ngôn ngữ giọng đọc. */
+function CaptionLayerCard({ projectId, channelId, captionLayer, refresh }: { projectId: string; channelId: string; captionLayer: CaptionLayer | null; refresh: () => Promise<void> }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [primaryLanguage, setPrimaryLanguage] = useState<NarrationLanguage>("vi");
+
+  useEffect(() => {
+    api.getBrandProfile(channelId).then((bp) => setPrimaryLanguage(bp.primary_language || "vi"), () => {});
+  }, [channelId]);
+
+  const layer: CaptionLayer = captionLayer ?? { enabled: false, position: "bottom-center", size_pct: 0.045, opacity: 1, lang: null };
+
+  async function patchCaption(patch: Partial<{ enabled: boolean; position: LayerPosition; size_pct: number; opacity: number; lang: NarrationLanguage | null }>) {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.patchCaptionLayer(projectId, patch);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Có lỗi khi lưu cấu hình caption.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="card elev-sm" style={{ gap: "var(--space-3)", maxWidth: 900, marginBottom: "var(--space-3)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div className="card-title">
+          Caption (phụ đề cứng) {layer.enabled && <span className="tag tag-accent" style={{ marginLeft: 6 }}>Đang bật</span>}
+        </div>
+        <span style={{ fontSize: 11.5, opacity: 0.6 }}>
+          Tuỳ chọn — chèn phụ đề cứng (burn-in) lấy từ nội dung kịch bản vào video khi ghép, tự cắt nhỏ theo cảnh, đè suốt toàn bộ video (kể cả short-video export).
+        </span>
+      </div>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+        <input type="checkbox" checked={layer.enabled} disabled={saving} onChange={(e) => patchCaption({ enabled: e.target.checked })} />
+        Bật caption
+      </label>
+
+      {layer.enabled && (
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 20, flexWrap: "wrap" }}>
+          <div>
+            <label style={{ fontSize: 11 }}>Vị trí</label>
+            <PositionGridPicker value={layer.position} disabled={saving} onChange={(pos) => patchCaption({ position: pos })} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 160 }}>
+            <label style={{ fontSize: 11 }}>Kích thước chữ ({Math.round(layer.size_pct * 100)}% chiều cao)</label>
+            <input
+              key={`s-${layer.size_pct}`}
+              type="range"
+              min={0.01}
+              max={0.3}
+              step={0.005}
+              defaultValue={layer.size_pct}
+              disabled={saving}
+              onMouseUp={(e) => patchCaption({ size_pct: parseFloat((e.target as HTMLInputElement).value) })}
+              onTouchEnd={(e) => patchCaption({ size_pct: parseFloat((e.target as HTMLInputElement).value) })}
+            />
+            <label style={{ fontSize: 11 }}>Độ mờ ({Math.round(layer.opacity * 100)}%)</label>
+            <input
+              key={`o-${layer.opacity}`}
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              defaultValue={layer.opacity}
+              disabled={saving}
+              onMouseUp={(e) => patchCaption({ opacity: parseFloat((e.target as HTMLInputElement).value) })}
+              onTouchEnd={(e) => patchCaption({ opacity: parseFloat((e.target as HTMLInputElement).value) })}
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 11 }}>Ngôn ngữ caption</label>
+            <select className="input" style={{ fontSize: 12 }} value={layer.lang ?? ""} disabled={saving} onChange={(e) => patchCaption({ lang: (e.target.value || null) as NarrationLanguage | null })}>
+              <option value="">Theo ngôn ngữ đang ghép video</option>
+              {NARRATION_LANGUAGES.map((l) => (
+                <option key={l} value={l}>
+                  {NARRATION_LANGUAGE_LABELS[l]}
+                  {l === primaryLanguage ? " (ngôn ngữ chính của kênh)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
       {error && <div style={{ fontSize: 12, color: "var(--color-danger)" }}>{error}</div>}
     </div>
   );

@@ -27,9 +27,6 @@ Inject vào mọi agent AI để giữ bản sắc kênh.
   "visual_style_prompt": "minimal, tông xanh–trắng, biểu đồ sạch",
   "cultural_lock_positive": "áo tứ thân, khăn mỏ quạ, mái đình làng Bắc Bộ, ngói âm dương",
   "cultural_lock_negative": "japanese kimono, torii gate, korean hanbok, japanese architecture, korean architecture, anime style, manga, japanese art style",
-  "style_reference_paths": [],
-  "style_reference_weight": 0.6,
-  "motion_tone": "chuyển động chậm, tinh tế, không giật gân, không rung camera",
   "hook_formats_preferred": ["câu hỏi gây sốc", "con số phản trực giác"],
   "retention_benchmark": {
     "target_hook_strength": 0.7,
@@ -42,9 +39,10 @@ Inject vào mọi agent AI để giữ bản sắc kênh.
   "intro_audio_path": "",
   "bg_music_path": "",
   "bg_music_volume": 0.3,
-  "style_loras": [{ "name": "InkArtXL_1.2.safetensors", "strength": 0.8 }],
   "overlay_effect_path": "",
   "overlay_effect_opacity": 0.5,
+  "primary_language": "vi",
+  "voice_clone_ref_paths": {},
   "version": 3
 }
 ```
@@ -72,34 +70,29 @@ Inject vào mọi agent AI để giữ bản sắc kênh.
   ẢNH của shot ĐẦU TIÊN trong từng project làm hình minh hoạ (chỉ khả dụng nếu shot đó
   đã sinh xong visual — xem `app/render/assembly.py::_resolve_intro_source`). Có thể bị
   GHI ĐÈ bởi shot mở đầu riêng của TỪNG project — xem `3b. RenderState` bên dưới.
-- `motion_tone` — **đã build 2026-08-23 (mục 73)**: ràng buộc chuyển động cho video AI
-  local (`local_wan`/Wan2.2) — KHÁC `visual_style_prompt` (phong cách thị giác TĨNH,
-  không nói gì về tốc độ/kiểu chuyển động). Mặc định "chậm, tinh tế, không giật gân"
-  khớp brand DNA kênh sử. Nối vào prompt qua `app/render/engine.py::
-  _build_video_motion_prompt`. CHỈ áp dụng `local_wan` — provider video cloud (Sora/
-  Veo/Flux) bỏ qua field này.
 - `cultural_lock_positive`/`cultural_lock_negative` — **đã build 2026-08-23 (mục 75)**:
   chống thiên lệch văn hoá Nhật/Hàn của checkpoint/LoRA "Á Đông" (đa số train từ dữ liệu
   Nhật/Trung/Hàn). `cultural_lock_positive` — từ khoá Việt Nam cụ thể theo triều đại/
   thời kỳ (trang phục, kiến trúc, hoạ tiết), rỗng mặc định (đặc thù từng kênh), áp dụng
-  MỌI provider (cloud lẫn local) — nối vào `_build_visual_prompt`/`_build_video_motion_
-  prompt` NGAY SAU content. `cultural_lock_negative` — loại trừ văn hoá ngoại lai, default
-  KHÔNG rỗng ("japanese kimono, torii gate, korean hanbok..."), CHỈ áp dụng đầy đủ cho
-  `local_sdxl`/`local_wan` (negative-prompt thật) — provider cloud không có tham số
-  negative prompt.
-- `style_loras` — **đã build 2026-08-22 (mục 64), đổi sang STACK nhiều LoRA (mục 75)**:
-  Style LoRA khoá "chữ ký hình ảnh" cho ảnh sinh bằng provider `local_sdxl` (ComfyUI) —
-  danh sách `{name, strength}` (thay `style_lora_path`/`style_lora_strength` đơn cũ),
-  cho phép xếp chồng 2-3 LoRA (VD 1 LoRA chất liệu + 1 LoRA hướng văn hoá). `name` là TÊN
-  FILE thật trong `ComfyUI/models/loras/` (KHÔNG PHẢI đường dẫn tuyệt đối — LoRA sống
-  trong thư mục ComfyUI, không phải channel_dir). Rỗng = không dùng LoRA nào. CHỈ áp dụng
-  cho `local_sdxl` — provider khác bỏ qua. Xem `specs/05_ai_providers.md` §8h/§8k.
-- `style_reference_paths`/`style_reference_weight` — **đã build 2026-08-23 (mục 75)**:
-  ảnh tham chiếu phong cách qua IPAdapter — danh sách đường dẫn TUYỆT ĐỐI trong
-  `channel_dir(id)/style_refs/` (khác `style_loras` — LoRA sống trong ComfyUI). Đảo
-  ngược 1 phần quyết định "không dùng IPAdapter" (xem `specs/05_ai_providers.md` §8k) —
-  RỦI RO CAO (custom node cộng đồng, CHƯA verify thật). `style_reference_weight` (mặc
-  định 0.6) là trọng số IPAdapter dùng chung cho cả bộ ảnh. CHỈ áp dụng `local_sdxl`.
+  MỌI provider (cloud lẫn local) — nối vào `_build_visual_prompt` NGAY SAU content.
+  `cultural_lock_negative` — loại trừ văn hoá ngoại lai. **Đợt dọn dẹp (2026-09-24)**:
+  hiện KHÔNG nối vào bất kỳ provider nào — trước đây chỉ có tác dụng qua negative-prompt
+  thật của `local_sdxl`/`local_wan` (đã xoá cùng 3 provider local khác, xem
+  `specs/05_ai_providers.md`) — để dành nối vào `local_qwen` (có negative_prompt thật)
+  sau nếu cần, KHÔNG xoá field/UI vì ngoài phạm vi yêu cầu hiện tại.
+- **`motion_tone`/`style_loras`/`flux_style_loras` — ĐÃ XOÁ HOÀN TOÀN (2026-09-24)**: 3
+  field này (ràng buộc chuyển động cho `local_wan`, Style LoRA cho `local_sdxl`/
+  `local_flux`) hết tác dụng khi người dùng quyết định xoá hẳn 5 provider local cũ
+  (SDXL/Flux/Wan/LocalAI ảnh/LocalAI video — chất lượng kém hơn hẳn `local_qwen` theo
+  đánh giá thật sau khi so sánh trực tiếp) — xem `specs/05_ai_providers.md` mục dọn dẹp,
+  `IMPLEMENTATION_REPORT.md` mục 156.
+- **Ảnh tham chiếu phong cách (IPAdapter) — ĐÃ GỠ BỎ HOÀN TOÀN (2026-09-09)**: field
+  `style_reference_paths`/`style_reference_weight` (đã build 2026-08-23, mục 75) và toàn
+  bộ cơ chế IPAdapter/img2img liên quan đã bị xoá khỏi codebase. Tính năng chưa từng
+  verify thật (custom node cộng đồng `ComfyUI_IPAdapter_plus` chưa từng được cài trên máy
+  người dùng — mọi lần gọi âm thầm fallback về "không có IPAdapter"). Người dùng yêu cầu
+  bỏ hẳn khi rà soát tính năng LoRA Flux mới: "nếu không work thì bỏ luôn tính năng ảnh
+  tham chiếu". Xem `specs/05_ai_providers.md` §8k (cập nhật ghi lại quyết định gỡ bỏ).
 - `bg_music_path`/`bg_music_volume` — **đã build 2026-08-20 (mục 53)**: nhạc nền MẶC
   ĐỊNH của kênh, phát ĐÈ LIÊN TỤC dưới TOÀN BỘ video (kể cả intro) khi ghép MP4 cho mọi
   project của kênh, rỗng nếu chưa upload. `bg_music_volume` (0.0=câm, 1.0=to bằng giọng
@@ -118,6 +111,16 @@ Inject vào mọi agent AI để giữ bản sắc kênh.
   /channels/{id}/brandprofile/overlay/upload` (multipart, luôn video). Có thể bị GHI ĐÈ
   bởi overlay riêng của TỪNG project (`RenderState.overlay`, ưu tiên cao hơn) — xem
   `app/render/overlay.py::resolve_overlay_source` và `3b. RenderState` bên dưới.
+- `primary_language`/`voice_clone_ref_paths` — **mới (2026-09-04)**: giọng đọc đa ngôn
+  ngữ cho thị trường nước ngoài. `primary_language` (1 trong 6:
+  `vi`/`en`/`de`/`pt_br`/`es`/`fr`, mặc định `"vi"`) quyết định ngôn ngữ nào dùng để
+  render video + tính timestamp (field `Shot.audio`/`ShotRenderStatus.narration_*` GỐC
+  — không có field mới nào, video/SRT/pack export mặc định KHÔNG đổi hành vi trừ khi đổi
+  `primary_language`). `voice_clone_ref_paths` (dict `{lang: path}`) — mẫu giọng clone
+  RIÊNG từng ngôn ngữ, thay `voice_clone_ref_path` đơn (field đó GIỮ NGUYÊN, đọc như mẫu
+  của `primary_language` khi dict chưa có entry tương ứng — tương thích ngược dữ liệu
+  cũ). Upload qua `POST /channels/{id}/brandprofile/voice-sample/upload/{lang}`. Xem
+  `app/render/schemas.py::NARRATION_LANGUAGES` (nguồn sự thật danh sách 6 ngôn ngữ).
 - `visual_grade`/`grain_enabled`/`aspect_fill_mode`/`bg_music_ducking_enabled` — **đã
   build 2026-08-26 (CHANGE_Semantic_BRoll_Asset_Vault.md §9b)**: mở rộng hậu kỳ theo
   BrandProfile, KHÔNG viết render engine mới (mở rộng `app/render/assembly.py` đã có).
@@ -281,7 +284,8 @@ Script Studio (nhận script từ import) → Visual Studio → Output. Schema T
         "timestamp_sec": 0, "end_sec": 5, "audio": "...", "visual": "...",
         "direction": "...", "direction_label": "Direction | Audio/SFX",
         "block_id": "B01 (chỉ có khi import)", "visual_type": "Image|Video (chỉ có khi import)",
-        "anchor": false, "warning": "Warning | null — cảnh báo guardrail gần nhất, hiển thị inline"
+        "anchor": false, "warning": "Warning | null — cảnh báo guardrail gần nhất, hiển thị inline",
+        "audio_by_lang": "{lang: text} — mới 2026-09-04, giọng đọc đa ngôn ngữ. Rỗng {} với script cũ/file import 1 cột VO. `audio` (field gốc, trên) LUÔN = audio_by_lang[primary_language] — xem app/pipeline/script_import.py"
       }
     ],
     "cta": { "spoken", "conversion_point" }
@@ -372,16 +376,23 @@ RenderState
     visual_error: string | null
     approved: bool                        # cờ human review tuỳ chọn — KHÔNG còn bắt buộc trước khi ghép (bỏ gate 2026-09-02, mục 107, theo yêu cầu người dùng); vẫn ghi lại qua POST .../approve nhưng Visual Studio không còn UI nào gọi tới
     linked_clip_id: string | null         # mới (2026-08-26) — trỏ tới ProcessedClip.clip_id khi visual_provider=="asset_vault" (Channel Asset Vault, §1b); dùng cho dedup (usage_count/last_used_at) + cảnh báo rights ở Guardrail
+    saved_to_vault_clip_id: string | null # mới (2026-09-11) — chiều NGƯỢC lại linked_clip_id: set khi visual CỦA CHÍNH shot này đã được lưu vào Kho Tài Nguyên (nút "Lưu vào Kho tài nguyên") — trỏ tới ProcessedClip.clip_id vừa tạo/cập nhật, dùng cho badge UI + cập nhật đè khi lưu lại
     narration_status: "pending" | "generating" | "ready" | "error"
     narration_asset_path: string | null   # assets/<shot_id>.{mp3|wav} — TTS hoá script.body[].audio (lời thoại thật)
     narration_provider: string | null
     narration_error: string | null
-    narration_duration_sec: float | null  # đo THẬT qua ffprobe khi sinh xong — **đã build lại 2026-08-20, mục 52**: NGUỒN THẬT cho độ dài segment lúc ghép MP4 (`assembly.py::_shot_base_duration`) VÀ timeline transcript .srt (`pipeline.py::_build_srt`), thay cho `timestamp_sec`/`end_sec` (script.body) — timestamp kịch bản giờ CHỈ tham khảo, không dùng để render/xuất transcript nữa (fallback khi CHƯA sinh giọng đọc)
+    narration_duration_sec: float | null  # đo THẬT qua ffprobe khi sinh xong — **đã build lại 2026-08-20, mục 52**: NGUỒN THẬT cho độ dài segment lúc ghép MP4 (`assembly.py::_shot_base_duration`) VÀ timeline transcript .srt (`pipeline.py::_build_srt`/`pack_export.py::build_srt_text`), thay cho `timestamp_sec`/`end_sec` (script.body) — timestamp kịch bản giờ CHỈ tham khảo, không dùng để render/xuất transcript nữa (fallback khi CHƯA sinh giọng đọc). **Cắt nhỏ cue dài (2026-09-12, mục 141)** — khoảng `(start, duration)` tính từ field này giờ được `app/render/captions.py::split_block_into_cues` chia lại thành nhiều cue SRT ngắn hơn khi text 1 block dài hơn `DEFAULT_MAX_CUE_CHARS`, xem `03_api.md`
+    narration_translations: { [lang]: TranslatedNarrationStatus }  # mới (2026-09-04) — giọng đọc CÁC NGÔN NGỮ KHÁC ngôn ngữ chính, xem ghi chú riêng bên dưới
+      narration_status, narration_asset_path, narration_provider, narration_error, narration_duration_sec, narration_updated_at  # CÙNG Ý NGHĨA field narration_* gốc ở trên, chỉ khác: KHÔNG có narration_started_at (không có UI đồng hồ đếm riêng cho ngôn ngữ khác)
   intro: IntroAssetStatus | null          # shot mở đầu RIÊNG của project — mới (2026-08-20), xem ghi chú dưới
     kind: "image" | "video"               # tự suy theo file upload, không phải người dùng chọn tay
     visual_asset_path: string | null      # assets/intro.<ext>
     audio_asset_path: string | null       # assets/intro_audio.<ext> — CHỈ áp dụng/bắt buộc khi kind=="image"
     transition_to_next: string             # hiệu ứng chuyển cảnh intro→shot đầu tiên — mới (2026-08-21, mục 55), mặc định "cut", cùng bảng TRANSITIONS dùng cho shot-to-shot
+  character_reference: CharacterReferenceStatus | null  # ảnh nhân vật tham khảo RIÊNG của project — mới (2026-09-09, mục 127), xem ghi chú dưới
+    image_path: string | null             # assets/character_reference.<ext>
+    description: string                    # TỰ SINH qua VisionProvider lúc upload/recaption (đồng bộ) — nối vào MỌI prompt sinh ảnh của project, sửa tay được qua PATCH
+    caption_error: string | null           # lỗi sinh mô tả tự động (KHÔNG chặn upload — ảnh vẫn lưu, chỉ description rỗng)
   bg_music: BgMusicOverride | null        # nhạc nền RIÊNG của project — mới (2026-08-20, mục 53), xem ghi chú dưới
     asset_path: string | null             # assets/bg_music.<ext>
     volume: float                          # 0.0 (câm) .. 1.0 (to bằng giọng đọc chính) — mặc định 0.3
@@ -407,6 +418,12 @@ RenderState
     width_pct: float                      # % chiều rộng khung hình xuất, mặc định 0.3 — bỏ qua khi position=="full"
     opacity: float                        # mặc định 1.0
     blend_mode: "alpha" | "screen"        # mặc định "alpha"; "screen" = ảnh nền đen đặc/không nền
+  caption_layer: CaptionLayer | null      # layer CAPTION (phụ đề cứng burn-in) — mới (2026-09-12, mục 142), xem ghi chú dưới. 1 CẤU HÌNH DUY NHẤT/project (KHÁC layers/image_layers — list, upload file)
+    enabled: bool                         # mặc định false
+    position: "top-left"|"top-center"|"top-right"|"middle-left"|"center"|"middle-right"|"bottom-left"|"bottom-center"|"bottom-right"  # mặc định "bottom-center" — KHÔNG có "full" (không có ý nghĩa cho chữ)
+    size_pct: float                       # cỡ chữ = % CHIỀU CAO khung hình xuất, mặc định 0.045 — khác width_pct (% chiều RỘNG) của layer video/ảnh
+    opacity: float                        # mặc định 1.0
+    lang: string | null                   # null = dùng ĐÚNG ngôn ngữ đang ghép video (export_lang); khác đi = ngôn ngữ caption ĐỘC LẬP với ngôn ngữ giọng đọc
   assembly_status: "not_started" | "assembling" | "done" | "error"
   assembly_error: string | null
   assembly_started_at: string | null      # mốc TOÀN BỘ assembly bắt đầu — dùng hiện "Đã chạy: X" ở RenderStudio.tsx
@@ -416,6 +433,20 @@ RenderState
     total: int
     stage_started_at: string | null       # mốc STAGE HIỆN TẠI bắt đầu — mới (2026-09-02, mục 108), KHÁC assembly_started_at (toàn bộ assembly)
   final_video_path: string | null         # renders/final.mp4 sau khi ghép xong
+  final_video_lang: string | null         # mới (2026-09-11, mục 134) — ngôn ngữ giọng đọc dùng lúc ghép gần nhất thành công (null cho render cũ trước tính năng chọn ngôn ngữ xuất video — fallback BrandProfile.primary_language)
+  short_exports: ShortVideoExport[]       # mới (2026-09-12, mục 137) — xuất short-video 9:16 từ 1 khoảng block, xem ghi chú dưới. Tối đa 3 phần tử/project (chặn ở router, KHÔNG chặn ở schema)
+    id: string                            # "short_<ts>_<hex6>"
+    start_block_id: string
+    end_block_id: string
+    regenerate_images: bool               # true = sinh lại ẢNH (không bao giờ video) đúng 9:16 cho shot ảnh trong khoảng; false (mặc định) = giữ asset gốc + crop-fill (đổi từ letterbox, mục 138)
+    lang: string | null                   # mới (2026-09-12, mục 140) — ngôn ngữ giọng đọc dùng xuất, LUÔN đã resolve với export mới (null chỉ gặp ở export cũ trước tính năng này — fallback BrandProfile.primary_language)
+    status: "pending" | "generating_images" | "assembling" | "done" | "error"
+    error: string | null
+    progress_current: int | null
+    progress_total: int | null
+    progress_label: string | null
+    video_path: string | null             # renders/short/<id>/short_final.<ext> sau khi xong
+    created_at: string | null
 ```
 
 Chi tiết: `specs/05_ai_providers.md` §8c, `IMPLEMENTATION_REPORT.md`.
@@ -535,6 +566,27 @@ Chi tiết: `specs/05_ai_providers.md` §8c, `IMPLEMENTATION_REPORT.md`.
 > chỉnh. Giá trị hợp lệ: 0.5–2.0 (400 nếu ngoài khoảng — phạm vi giữ trong ngưỡng ffmpeg
 > `atempo` xử lý tốt bằng 1 lần filter, không cần chain nhiều lần).
 
+> **Đã build (2026-09-04 IMPLEMENTATION_REPORT.md):** `narration_translations` — giọng
+> đọc đa ngôn ngữ cho thị trường nước ngoài, theo yêu cầu người dùng ("Cho phép tạo nhiều
+> voice giọng đọc hỗ trợ Anh/Việt/Đức/Brazil/Tây Ban Nha/Pháp"). Ngôn ngữ CHÍNH của kênh
+> (`BrandProfile.primary_language`) tiếp tục dùng NGUYÊN field `narration_*`/`Shot.audio`
+> gốc — render video/timestamp/SRT chính KHÔNG đổi hành vi. Văn bản dịch từng ngôn ngữ
+> (`ScriptBodyItem.audio_by_lang`) đọc từ file import (cột `VO (VI)`/`VO (DE)`/... —
+> `app/pipeline/script_import.py`) hoặc sửa tay (`PATCH .../script/body/{index}/
+> translation/{lang}`). Engine TTS: chỉ OmniVoice hỗ trợ voice cloning per-language
+> (`reference_audio` = `BrandProfile.voice_clone_ref_paths[lang]`, tái dùng
+> `TTSProvider.synthesize()` sẵn có — KHÔNG thêm interface mới); ElevenLabs/Gemini TTS
+> vẫn dùng được (tự nhận diện ngôn ngữ từ text) nhưng KHÔNG clone qua field này. Output
+> Pack Export (`app/render/pack_export.py`) xuất thêm `transcript_<lang>.srt` +
+> `narration_full_<lang>.mp3` cho MỖI ngôn ngữ có ít nhất 1 block đã dịch (ngôn ngữ chưa
+> dùng tới bị bỏ qua hoàn toàn, không liệt kê "thiếu"). Endpoint mới: `POST .../render/
+> narration-translations/{lang}/start`, `POST .../render/shots/{shot_id}/regenerate-
+> narration-translation/{lang}`, `GET .../render/shots/{shot_id}/asset/narration/{lang}`,
+> `GET .../render/narration-download/{lang}`, `GET .../script/transcript-srt/{lang}`.
+> Script Studio: thanh 6 tag chọn ngôn ngữ đang xem/thao tác (mặc định = ngôn ngữ chính)
+> thay UI panel Audio + mọi nút hàng loạt; panel Tiếng Việt tham chiếu hiện SONG SONG khi
+> ngôn ngữ chính khác Việt VÀ đang xem ngôn ngữ khác Việt.
+
 > **Đã build (2026-09-02, mục 112 IMPLEMENTATION_REPORT.md):** `layers` — layer video
 > ĐỊNH VỊ theo lưới 3x3, theo yêu cầu người dùng ("thêm layer voice wave (dạng video
 > loop) vào bên trên video nền... chia khung hình thành 9 phần và cho phép lựa chọn vị
@@ -588,6 +640,76 @@ Chi tiết: `specs/05_ai_providers.md` §8c, `IMPLEMENTATION_REPORT.md`.
 > khác. Endpoint: `POST /projects/{id}/render/image-layers/upload`, `PATCH .../image-
 > layers/{layer_id}`, `DELETE .../image-layers/{layer_id}`, `GET .../image-layers/
 > {layer_id}/asset`.
+
+> **Đã build (2026-09-12, mục 137 IMPLEMENTATION_REPORT.md):** `short_exports` — xuất
+> short-video 9:16 từ 1 khoảng block (`start_block_id`..`end_block_id`), theo yêu cầu
+> người dùng: repurpose 1 đoạn của project long-form thành YouTube Shorts/TikTok mà
+> KHÔNG cần tạo 1 project short-form riêng (`Project.format=="short"`/`parent_project_id`
+> là 1 project TRỐNG hoàn toàn, không copy block nào từ cha — khác hẳn tính năng này).
+> Artifact sống NGAY trong `RenderState` của CHÍNH project long-form, tối đa 3 phần tử
+> (chặn 400 ở router `POST /render/short-export`, KHÔNG chặn ở schema). Short-video CHỈ
+> gồm THUẦN shot trong khoảng đã chọn (ảnh/video + giọng đọc, giữ transition đã cấu
+> hình) — KHÔNG kèm intro/nhạc nền/overlay/video nền như video chính.
+> `regenerate_images=true` — sinh lại ẢNH (KHÔNG BAO GIỜ video, kể cả khi bật cờ này —
+> sinh lại video 9:16 tốn kém/chậm hơn hẳn ảnh, ngoài phạm vi tính năng) đúng tỷ lệ 9:16
+> cho từng shot ẢNH trong khoảng, lưu vào `renders/short/<id>/assets/` RIÊNG, KHÔNG đụng
+> `ShotRenderStatus.visual_asset_path` 16:9 gốc; `false` (mặc định) — giữ nguyên asset
+> gốc, ép crop-fill vào khung dọc (`aspect_fill_mode="crop"`,
+> `assembly.py::_scale_cover_filter` — phóng khung ngang lên vừa CHIỀU CAO khung dọc rồi
+> cắt bớt 2 bên, KHÔNG co nhỏ nội dung). Shot dạng VIDEO trong khoảng LUÔN crop bản gốc
+> CÙNG kiểu, KHÔNG BAO GIỜ được sinh lại. **Đổi (2026-09-12, mục 138)** — bản đầu (mục
+> 137) dùng letterbox (viền đen trên/dưới, `_scale_letterbox_filter` — đã XOÁ HẲN, không
+> còn nơi nào gọi tới) đúng yêu cầu ban đầu "hiện full khung ngang", nhưng người dùng test
+> thật báo ảnh bị "co hẹp" giữa 2 viền đen — yêu cầu đổi hẳn sang crop, không co ảnh.
+>
+> **Đổi (2026-09-12, mục 140)** — thêm `lang`, theo yêu cầu người dùng "cho phép chọn
+> ngôn ngữ khi xuất short-video, tương tự như khi render long-video": `null`/bỏ qua ở
+> `POST /render/short-export` → ngôn ngữ CHÍNH của kênh, giá trị ĐÃ RESOLVE lưu vào
+> `ShortVideoExport.lang`. 400 NGAY (ở `create_short_export`, trước khi tạo entry) nếu
+> `lang` không thuộc `NARRATION_LANGUAGES`, HOẶC giọng đọc ngôn ngữ đã chọn CHƯA sinh
+> xong cho MỌI shot **TRONG KHOẢNG ĐÃ CHỌN** (không phải toàn project — khác biệt CÓ CHỦ
+> Ý so với `assemble` chính, mục 134). Thời lượng từng shot + giọng đọc mux vào segment
+> đều ăn theo `lang` đã chọn (`_shot_base_duration`/`_narration_for_lang`, cùng cơ chế
+> `assemble_video` chính). Tên file (Pack Export LẪN tải riêng lẻ) có hậu tố ngôn ngữ
+> (`_<lang>`) — CẦN THIẾT: 2 export CÙNG khoảng block khác ngôn ngữ (hợp lệ, chiếm 2/3
+> slot khác nhau) trước đây đè tên file lên nhau.
+>
+> Xoá qua `DELETE /render/short-export/{id}` (giải phóng lại slot); tải qua `GET /render/
+> short-export/{id}/download`; Pack Export xuất
+> `short_<start_block_id>-<end_block_id>_<lang>.<ext>` cho MỖI export `status=="done"`.
+
+> **Đã build (2026-09-12, mục 142 IMPLEMENTATION_REPORT.md):** `caption_layer` — Layer
+> CAPTION (phụ đề cứng burn-in), theo yêu cầu người dùng: "Bổ sung tính năng cho phép
+> user thêm caption vào video ở bước visual studio... chọn 9 vị trí, kích thước, độ mờ
+> tương tự phần Layer video định vị", sau đó xác nhận thêm "chọn cả loại ngôn ngữ nữa".
+> KHÁC `layers`/`image_layers` (list, nhiều instance, nguồn là FILE upload) — đây là 1
+> CẤU HÌNH DUY NHẤT/project (chỉ 1 track caption có ý nghĩa), nguồn nội dung là TEXT lấy
+> thẳng từ `pack.script.body[].audio`/`audio_by_lang[lang]` (không upload gì).
+>
+> Burn TRỰC TIẾP vào TỪNG SEGMENT lúc ghép (KHÔNG PHẢI 1 lượt trên video đã ghép xong) —
+> mỗi segment tự ffmpeg đảm bảo đúng độ dài qua `-t duration`, nên caption luôn khớp khít
+> mà không cần tính lại mốc thời gian tuyệt đối qua transition/reflow/offset intro. Dùng
+> `app/render/captions.py::write_shot_caption_ass` — cắt text dài thành nhiều cue qua
+> `split_block_into_cues` (mục 141) rồi tự viết 1 file `.ass` HOÀN CHỈNH (tự khai
+> `PlayResX`/`PlayResY` = ĐÚNG độ phân giải xuất, Style trực tiếp trong `[V4+ Styles]`) —
+> **KHÔNG dùng `.srt` + `force_style`** (bản đầu dùng cách này, verify bằng ffmpeg thật
+> phát hiện `force_style`/`original_size` KHÔNG quy đổi `Fontsize` sang pixel thật như kỳ
+> vọng, chữ ra khổng lồ sai lệch hẳn — xem docstring `write_shot_caption_ass` cho chi
+> tiết bug đã sửa). `position` tái dùng `LayerPosition` (9 ô lưới, map thẳng sang
+> "Alignment" kiểu numpad của ASS/libass).
+>
+> `lang` — `null`/bỏ qua = dùng ĐÚNG ngôn ngữ đang ghép video (`export_lang` của lượt
+> `assemble`/xuất short-video); khác đi = ngôn ngữ caption ĐỘC LẬP với ngôn ngữ giọng đọc
+> (VD ghép giọng đọc tiếng Việt nhưng muốn caption tiếng Anh) — CHỈ cần CÓ chữ dịch
+> (`audio_by_lang[lang]`), KHÔNG cần đã sinh audio ngôn ngữ đó (timing luôn theo ĐÚNG
+> thời lượng thật của shot trên timeline, không phụ thuộc ngôn ngữ caption).
+>
+> Áp dụng CHO CẢ video chính (`assembly.py::_assemble_video_impl`) LẪN short-video
+> export (`short_export.py::run_short_export`, mục 137-140) — 2 nơi dùng CHUNG
+> `state.caption_layer`, nhất quán theo yêu cầu người dùng (xác nhận qua hỏi trực tiếp).
+> KHÔNG áp dụng cho intro (không có nội dung script để burn). PATCH duy nhất
+> `/render/caption-layer` (partial update, lazy-create) — không có POST/DELETE riêng
+> (không có file upload, tắt qua `enabled=false`).
 
 ## 3c. CreativeAsset (Thư viện Creative Asset, ĐỘC LẬP — mới 2026-08-20, mục 53)
 

@@ -8,8 +8,7 @@ from app.crypto import decrypt_secret, encrypt_secret, mask_secret
 from app.db import get_db
 from app.models import AuditLog, ProviderConfig
 from app.providers.factory import _EMBEDDING_ADAPTERS, _IMAGE_ADAPTERS, _TTS_ADAPTERS, _VIDEO_ADAPTERS, _VISION_ADAPTERS, _build_asset_provider, build_llm_provider
-from app.providers.image_comfy_sdxl import list_comfyui_models
-from app.providers.image_localai import list_localai_models
+from app.providers.image_comfy_qwen import list_comfyui_models
 
 router = APIRouter(tags=["providers"])
 
@@ -172,8 +171,8 @@ def test_provider(provider_id: int, db: Session = Depends(get_db)):
         else:
             # Dùng chung _build_asset_provider (factory.py) thay vì tự khởi tạo adapter
             # ở đây — bản cũ luôn gọi adapter_cls(api_key=...) bất kể connection_type,
-            # nên provider local (piper/local_sdxl/local_wan, không nhận api_key) lỗi
-            # TypeError khi bấm Test (phát hiện lúc verify thật local AI provider, xem
+            # nên provider local (piper/local_qwen, không nhận api_key) lỗi TypeError khi
+            # bấm Test (phát hiện lúc verify thật local AI provider, xem
             # IMPLEMENTATION_REPORT.md).
             registry = {"tts": _TTS_ADAPTERS, "image": _IMAGE_ADAPTERS, "video": _VIDEO_ADAPTERS, "vision": _VISION_ADAPTERS, "embedding": _EMBEDDING_ADAPTERS}[pv.task]
             adapter = _build_asset_provider(pv, registry)
@@ -191,32 +190,20 @@ def test_provider(provider_id: int, db: Session = Depends(get_db)):
     return {"ok": status.ok, "message": status.message}
 
 
-@router.get("/providers/local-sdxl/models")
-def get_local_sdxl_models(kind: str, base_url: str = ""):
-    """Liệt kê checkpoint/LoRA THẬT đang có trong ComfyUI — **mới (2026-08-22)**, theo
-    yêu cầu người dùng: cho CHỌN (dropdown) thay vì phải tự gõ đúng tên file. `kind` =
-    `checkpoints` (đổ vào ô "Model" của provider `local_sdxl`, Cài đặt → Provider AI)
-    hoặc `loras` (đổ vào ô "Style LoRA" của BrandProfile, Sửa BrandProfile — dùng CHUNG
-    endpoint này dù 2 màn khác nhau, vì cùng 1 ComfyUI/cùng cơ chế liệt kê, xem
-    `app/providers/image_comfy_sdxl.py::list_comfyui_models`). 502 nếu ComfyUI chưa chạy
-    được — KHÔNG âm thầm trả rỗng (frontend cần phân biệt "chưa có file" với "chưa kết
-    nối được ComfyUI")."""
-    if kind not in ("checkpoints", "loras"):
-        raise HTTPException(400, "kind phải là checkpoints hoặc loras")
+@router.get("/providers/comfyui/models")
+def get_comfyui_models(kind: str, base_url: str = ""):
+    """Liệt kê checkpoint/LoRA/GGUF THẬT đang có trong ComfyUI — **mới (2026-08-22)**,
+    theo yêu cầu người dùng: cho CHỌN (dropdown) thay vì phải tự gõ đúng tên file. `kind` =
+    `unet_gguf` (đổ vào ô "Model" của provider `local_qwen`, Cài đặt → Provider AI) —
+    `checkpoints`/`loras` vẫn được hỗ trợ ở tầng hàm nhưng không còn màn nào trong app gọi
+    tới (đợt dọn dẹp 2026-09-24 xoá `local_sdxl`/`local_flux` cùng UI Style LoRA từng dùng
+    2 kind đó, xem `app/providers/image_comfy_qwen.py::list_comfyui_models`). Đổi tên
+    endpoint từ `/providers/local-sdxl/models` — tên cũ gây hiểu nhầm khi SDXL không còn
+    tồn tại. 502 nếu ComfyUI chưa chạy được — KHÔNG âm thầm trả rỗng (frontend cần phân
+    biệt "chưa có file" với "chưa kết nối được ComfyUI")."""
+    if kind not in ("checkpoints", "loras", "unet_gguf"):
+        raise HTTPException(400, "kind phải là checkpoints, loras hoặc unet_gguf")
     try:
         return {"models": list_comfyui_models(kind, base_url=base_url)}
-    except RuntimeError as e:
-        raise HTTPException(502, str(e)) from e
-
-
-@router.get("/providers/localai/models")
-def get_localai_models(base_url: str = ""):
-    """Liệt kê model ĐÃ ĐĂNG KÝ trong LocalAI — **mới (2026-08-25)**, tương đương
-    `get_local_sdxl_models` ở trên nhưng cho provider `localai_image`/`localai_video`
-    (xem `app/providers/image_localai.py::list_localai_models` — khác ComfyUI, đây là
-    model LOGIC đã đăng ký, không phải file checkpoint thô trên đĩa). 502 nếu LocalAI
-    chưa chạy được, cùng convention endpoint ComfyUI ở trên."""
-    try:
-        return {"models": list_localai_models(base_url=base_url)}
     except RuntimeError as e:
         raise HTTPException(502, str(e)) from e

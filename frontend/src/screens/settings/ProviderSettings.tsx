@@ -47,7 +47,7 @@ const CLOUD_CATALOG: Record<string, { provider_name: string; display_name: strin
 };
 
 // Provider local (connection_type="local_endpoint") theo từng nhóm task — mở rộng từ
-// chỉ LLM (Ollama/vLLM/LM Studio) sang cả tts/image/video (piper/local_sdxl/local_wan),
+// chỉ LLM (Ollama/vLLM/LM Studio) sang cả tts/image/video (piper/local_qwen),
 // xem backend/app/providers/factory.py::_build_asset_provider + IMPLEMENTATION_REPORT.md.
 // MẢNG (không phải 1 lựa chọn/nhóm) — từ khi có OmniVoice làm lựa chọn TTS local THỨ 2
 // (song song Piper), cùng dạng CLOUD_CATALOG (có <select> chọn provider khi >1 lựa chọn).
@@ -87,51 +87,25 @@ const LOCAL_CATALOG: Record<string, LocalCatalogEntry[]> = {
   ],
   image: [
     {
-      provider_name: "local_sdxl",
-      display_name: "ComfyUI SDXL (local GPU)",
+      // Qwen-Image-2.1 (GGUF quantized) — **mới (2026-09-24)**, theo yêu cầu người dùng
+      // "muốn dùng model qwen image, chọn model nào phù hợp VRAM". Đã verify THẬT qua GPU
+      // người dùng (RTX 5060 Ti, ~16GB) — xem docstring app/providers/image_comfy_qwen.py
+      // cho toàn bộ quá trình verify (cập nhật ComfyUI core, đọc schema node thật, chạy
+      // workflow thật ra ảnh đúng). Provider ẢNH LOCAL DUY NHẤT còn lại — đợt dọn dẹp
+      // 2026-09-24 xoá hẳn `local_sdxl`/`local_flux`/`localai_image` (chất lượng kém hơn
+      // hẳn theo đánh giá thật của người dùng), xem IMPLEMENTATION_REPORT.md.
+      // **CẢNH BÁO LICENSE**: Qwen-Image-2.1 dùng license "Qwen Research" — CHỈ NGHIÊN
+      // CỨU, KHÔNG THƯƠNG MẠI (khác Qwen-Image gốc Apache 2.0) — người dùng đã được báo
+      // rõ và tự quyết định dùng, KHÔNG phải app tự ý chọn.
+      provider_name: "local_qwen",
+      display_name: "ComfyUI Qwen-Image-2.1 (local GPU, GGUF)",
       endpoint_url: "http://127.0.0.1:8188",
-      // Trước là "sdxl" (placeholder không phải tên file thật, chưa từng có tác dụng) —
-      // mới (2026-08-22): field này giờ ĐIỀU KHIỂN THẬT checkpoint dùng để sinh ảnh, để
-      // trống dùng mặc định của app (xem hint bên dưới).
       model_name: "",
       needs_endpoint: true,
-      hint: "Cần cài + chạy ComfyUI trước (mặc định cổng 8188). Để trống ô Model dùng checkpoint mặc định của app — hoặc điền ĐÚNG tên file .safetensors đang có trong thư mục ComfyUI/models/checkpoints (VD sau khi đổi sang checkpoint fine-tune) để đổi checkpoint mà không cần sửa code.",
-    },
-    {
-      // LocalAI (github.com/mudler/LocalAI) — **mới (2026-08-25)**, song song ComfyUI
-      // SDXL ở trên theo kế hoạch migrate đã duyệt (KHÔNG thay thế ComfyUI ở đợt này,
-      // chọn thử để verify trước khi quyết định chuyển hẳn). LoRA lấy từ BrandProfile
-      // (mục "Style LoRA") vẫn dùng được — provider tự đồng bộ vào model LocalAI qua
-      // API quản lý model runtime, không cần đăng ký tay YAML cho mỗi lần đổi LoRA.
-      provider_name: "localai_image",
-      display_name: "LocalAI (local GPU)",
-      endpoint_url: "http://127.0.0.1:8080",
-      model_name: "",
-      needs_endpoint: true,
-      hint: "Cần cài + chạy LocalAI trước (mặc định cổng 8080, github.com/mudler/LocalAI). Để trống ô Model để app tự đăng ký/đồng bộ 1 model dùng checkpoint + LoRA từ BrandProfile — CHƯA verify thật, nếu lỗi hãy báo lại nguyên văn để chỉnh đúng API LocalAI đang cài.",
+      hint: "⚠ License \"Qwen Research\" — CHỈ dùng nghiên cứu, KHÔNG được dùng thương mại. Cần cài ComfyUI + custom node ComfyUI-GGUF + tải 3 file: UNet GGUF (mặc định Qwen-Image-2.1-Q4.gguf, đặt vào ComfyUI/models/diffusion_models/, từ huggingface.co/realrebelai/Qwen-Image-2.1_GGUFs), text encoder (qwen3vl_8b_w4a8.safetensors, đặt vào models/text_encoders/) + VAE (qwen_image_2.1_vae_bf16.safetensors, đặt vào models/vae/) — cả 2 file sau từ huggingface.co/Comfy-Org/Qwen-Image-2.1 (nguồn chính thức). Để trống ô Model dùng Qwen-Image-2.1-Q4.gguf mặc định — đổi sang Q5/Q6/Q8 nếu dư VRAM và muốn chất lượng cao hơn.",
     },
   ],
-  video: [
-    {
-      provider_name: "local_wan",
-      display_name: "ComfyUI Wan2.2 (local GPU)",
-      endpoint_url: "http://127.0.0.1:8188",
-      model_name: "wan2.2-ti2v-5b",
-      needs_endpoint: true,
-      hint: "Cùng ComfyUI với Image (cổng 8188) — cần checkpoint Wan2.2 TI2V-5B đã tải sẵn.",
-    },
-    {
-      // LocalAI video — **mới (2026-08-25)**, RỦI RO CAO NHẤT trong toàn bộ migrate:
-      // API `/v1/videos` rất mới, chưa có case study rộng (xem docstring
-      // video_localai.py). Song song ComfyUI Wan2.2 ở trên, KHÔNG thay thế.
-      provider_name: "localai_video",
-      display_name: "LocalAI Wan2.2 (local GPU) — CHƯA verify",
-      endpoint_url: "http://127.0.0.1:8080",
-      model_name: "wan2.2-ti2v-5b",
-      needs_endpoint: true,
-      hint: "Cần cài + chạy LocalAI trước (mặc định cổng 8080) + đăng ký model Wan2.2. Endpoint video của LocalAI rất mới, CHƯA verify qua GPU thật — nếu lỗi, báo lại nguyên văn phản hồi LocalAI để chỉnh đúng.",
-    },
-  ],
+  video: [],
   vision: [
     {
       // Khuyến nghị mặc định (2026-08-26) — máy dev xác nhận KHÔNG cài LocalAI (cổng
@@ -180,17 +154,15 @@ const LOCAL_CATALOG: Record<string, LocalCatalogEntry[]> = {
   ],
 };
 
-/** Dropdown checkpoint/LoRA THẬT lấy từ ComfyUI đang chạy — **mới (2026-08-22)**, theo
- * yêu cầu người dùng: cho CHỌN thay vì phải tự gõ đúng tên file (dễ gõ sai, không biết
- * ComfyUI thật đang có file nào). Dùng chung cho ô "Model" của provider `local_sdxl`
- * (kind="checkpoints") LẪN ô "Style LoRA" ở ChannelDialog.tsx (kind="loras") — cùng 1
- * ComfyUI, cùng cơ chế liệt kê (xem `api.listLocalSdxlModels`).
- * ComfyUI chưa chạy/không kết nối được → fallback về ô nhập tay (KHÔNG chặn cấu hình,
- * chỉ mất tiện ích chọn nhanh) kèm thông báo lỗi rõ ràng. */
+/** Dropdown file GGUF THẬT lấy từ ComfyUI đang chạy — **mới (2026-08-22)**, theo yêu cầu
+ * người dùng: cho CHỌN thay vì phải tự gõ đúng tên file (dễ gõ sai, không biết ComfyUI
+ * thật đang có file nào). Dùng cho ô "Model" của provider `local_qwen` (kind="unet_gguf")
+ * — xem `api.listComfyUIModels`. ComfyUI chưa chạy/không kết nối được → fallback về ô
+ * nhập tay (KHÔNG chặn cấu hình, chỉ mất tiện ích chọn nhanh) kèm thông báo lỗi rõ ràng. */
 export function ComfyModelSelect({
   kind, value, baseUrl, onChange, placeholder, emptyLabel,
 }: {
-  kind: "checkpoints" | "loras";
+  kind: "checkpoints" | "loras" | "unet_gguf";
   value: string;
   baseUrl: string;
   onChange: (v: string) => void;
@@ -206,7 +178,7 @@ export function ComfyModelSelect({
     setLoading(true);
     setError(null);
     api
-      .listLocalSdxlModels(kind, baseUrl || undefined)
+      .listComfyUIModels(kind, baseUrl || undefined)
       .then((res) => {
         if (!cancelled) {
           setModels(res.models);
@@ -237,64 +209,6 @@ export function ComfyModelSelect({
   }
   // Giá trị hiện có nhưng ComfyUI không (còn) thấy file đó (VD đã xoá/đổi tên) — vẫn hiện
   // trong dropdown để không "mất" cấu hình đang lưu, không tự ý reset về rỗng.
-  const options = value && !models.includes(value) ? [value, ...models] : models;
-  return (
-    <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">{emptyLabel}</option>
-      {options.map((m) => (
-        <option key={m} value={m}>
-          {m}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-/** Dropdown model ĐÃ ĐĂNG KÝ trong LocalAI — **mới (2026-08-25)**, tương tự
- * `ComfyModelSelect` nhưng khác nguồn: LocalAI liệt kê model LOGIC đã đăng ký
- * (`GET /v1/models`), KHÔNG PHẢI file checkpoint thô trên đĩa như ComfyUI — model cần
- * đăng ký trước (YAML hoặc qua `LocalAIImageProvider._apply_model`, tự động khi có
- * LoRA từ BrandProfile) mới hiện ở đây. LocalAI chưa chạy/không kết nối được → fallback
- * ô nhập tay, cùng hành vi `ComfyModelSelect`. */
-function LocalAIModelSelect({ value, baseUrl, onChange, emptyLabel }: { value: string; baseUrl: string; onChange: (v: string) => void; emptyLabel: string }) {
-  const [models, setModels] = useState<string[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    api
-      .listLocalAiModels(baseUrl || undefined)
-      .then((res) => {
-        if (!cancelled) {
-          setModels(res.models);
-          setLoading(false);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setError(e instanceof ApiError ? e.message : "Không kết nối được LocalAI để lấy danh sách.");
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [baseUrl]);
-
-  if (loading) {
-    return <input className="input" value={value} disabled placeholder="Đang tải danh sách từ LocalAI..." />;
-  }
-  if (error || !models) {
-    return (
-      <div>
-        <input className="input" value={value} onChange={(e) => onChange(e.target.value)} placeholder="VD studioflow-sdxl (để trống dùng tự động)" />
-        <div style={{ fontSize: 11, color: "var(--color-danger)", marginTop: 4 }}>{error || "Không lấy được danh sách — nhập tay tên model."}</div>
-      </div>
-    );
-  }
   const options = value && !models.includes(value) ? [value, ...models] : models;
   return (
     <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
@@ -489,20 +403,13 @@ export default function ProviderSettings() {
                         </>
                       )}
                       <label style={{ marginTop: 6 }}>Model</label>
-                      {pv.provider_name === "local_sdxl" ? (
+                      {pv.provider_name === "local_qwen" ? (
                         <ComfyModelSelect
-                          kind="checkpoints"
+                          kind="unet_gguf"
                           value={pv.model_name || ""}
                           baseUrl={pv.endpoint_url || ""}
                           onChange={(v) => api.patchProvider(pv.id, { model_name: v }).then(load)}
-                          emptyLabel="— Mặc định app (Painter's Checkpoint) —"
-                        />
-                      ) : pv.provider_name === "localai_image" ? (
-                        <LocalAIModelSelect
-                          value={pv.model_name || ""}
-                          baseUrl={pv.endpoint_url || ""}
-                          onChange={(v) => api.patchProvider(pv.id, { model_name: v }).then(load)}
-                          emptyLabel="— Tự động đăng ký/đồng bộ (studioflow-sdxl) —"
+                          emptyLabel="— Mặc định app (Qwen-Image-2.1-Q4.gguf) —"
                         />
                       ) : (
                         <input className="input" defaultValue={pv.model_name || ""} onBlur={(e) => api.patchProvider(pv.id, { model_name: e.target.value }).then(load)} placeholder={localEntry?.model_name} />
@@ -753,6 +660,13 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
               <input className="input" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." />
             </div>
           </>
+        ) : localCatalog.length === 0 ? (
+          // Video không còn provider local nào — đợt dọn dẹp 2026-09-24 xoá hẳn
+          // `local_wan`/`localai_video`, xem IMPLEMENTATION_REPORT.md.
+          <div className="card-body" style={{ fontSize: 13 }}>
+            Chưa có provider video local nào — video hiện chỉ hỗ trợ qua provider cloud
+            (đổi lại tab "Cloud API" ở trên).
+          </div>
         ) : (
           <>
             {localCatalog.length > 1 && (
@@ -790,20 +704,13 @@ function AddProviderDialog({ group, onClose, onCreated }: { group: string; onClo
             )}
             <div className="field">
               <label>Tên model</label>
-              {localProviderName === "local_sdxl" ? (
+              {localProviderName === "local_qwen" ? (
                 <ComfyModelSelect
-                  kind="checkpoints"
+                  kind="unet_gguf"
                   value={modelName}
                   baseUrl={endpointUrl}
                   onChange={setModelName}
-                  emptyLabel="— Mặc định app (Painter's Checkpoint) —"
-                />
-              ) : localProviderName === "localai_image" ? (
-                <LocalAIModelSelect
-                  value={modelName}
-                  baseUrl={endpointUrl}
-                  onChange={setModelName}
-                  emptyLabel="— Tự động đăng ký/đồng bộ (studioflow-sdxl) —"
+                  emptyLabel="— Mặc định app (Qwen-Image-2.1-Q4.gguf) —"
                 />
               ) : (
                 <input className="input" value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder={selectedLocalCatalog?.model_name} />

@@ -34,6 +34,18 @@ def test_long_form_project_defaults_no_parent(client, project):
     assert project["format"] == "long"
 
 
+def test_create_short_form_prepends_within_own_parent_group(client, channel, project):
+    """Kéo thả sắp xếp (2026-09-19) — short-form mới phải chèn ĐẦU nhóm anh em CỦA RIÊNG
+    NÓ (cùng `parent_project_id`), KHÔNG lẫn với thứ tự của project long-form ở kênh (xem
+    `models.py::Project.order_index`)."""
+    s1 = client.post(f"/channels/{channel['id']}/projects", json={"title": "Short 1", "parent_project_id": project["id"]}).json()
+    s2 = client.post(f"/channels/{channel['id']}/projects", json={"title": "Short 2", "parent_project_id": project["id"]}).json()
+
+    ids = [p["id"] for p in client.get(f"/channels/{channel['id']}/projects").json()]
+    shorts_order = [i for i in ids if i in {s1["id"], s2["id"]}]
+    assert shorts_order == [s2["id"], s1["id"]]  # Short 2 tạo sau -> lên đầu nhóm shorts
+
+
 def test_create_short_form_rejects_missing_parent(client, channel):
     resp = client.post(f"/channels/{channel['id']}/projects", json={"title": "Short mồ côi", "parent_project_id": "prj_does_not_exist"})
     assert resp.status_code == 404
@@ -197,28 +209,12 @@ def test_flux_image_provider_uses_vertical_width_height_for_short_form():
     assert (body["width"], body["height"]) == (800, 1408)
 
 
-def test_sdxl_workflow_builder_uses_vertical_dims_when_passed():
-    from app.providers.image_comfy_sdxl import _build_txt2img_workflow
-
-    wf_default = _build_txt2img_workflow(prompt="x", seed=1)
-    assert wf_default["5"]["inputs"]["width"] == 1344 and wf_default["5"]["inputs"]["height"] == 768
-
-    wf_vertical = _build_txt2img_workflow(prompt="x", seed=1, width=768, height=1344)
-    assert wf_vertical["5"]["inputs"]["width"] == 768 and wf_vertical["5"]["inputs"]["height"] == 1344
-
-
-def test_wan_workflow_builder_uses_vertical_dims_when_passed():
-    """Độ phân giải mặc định đổi (2026-08-23) sang khớp bucket SDXL (1344×768, xem
-    test_video_comfy_wan.py::test_resolution_matches_sdxl_bucket_exactly) — test này chỉ
-    xác nhận đúng THAM SỐ width/height truyền vào có tới đúng node, không hardcode lại
-    số cụ thể (tránh trùng lặp nguồn sự thật với test kia)."""
-    from app.providers.video_comfy_wan import _HEIGHT, _HEIGHT_VERTICAL, _WIDTH, _WIDTH_VERTICAL, _build_txt2vid_workflow
-
-    wf_default = _build_txt2vid_workflow(prompt="x", seed=1, num_frames=25)
-    assert wf_default["55"]["inputs"]["width"] == _WIDTH and wf_default["55"]["inputs"]["height"] == _HEIGHT
-
-    wf_vertical = _build_txt2vid_workflow(prompt="x", seed=1, num_frames=25, width=_WIDTH_VERTICAL, height=_HEIGHT_VERTICAL)
-    assert wf_vertical["55"]["inputs"]["width"] == _WIDTH_VERTICAL and wf_vertical["55"]["inputs"]["height"] == _HEIGHT_VERTICAL
+# Test tương đương cho SDXL/Wan (workflow builder dùng đúng width/height dọc khi truyền
+# 9:16) đã xoá cùng lúc xoá 2 provider đó (đợt dọn dẹp 2026-09-24, xem IMPLEMENTATION_
+# REPORT.md) — bản thay thế (`local_qwen`, provider ảnh local duy nhất còn lại) đã có
+# `test_generate_aspect_ratio_9_16_uses_portrait_resolution` trong
+# tests/test_image_comfy_qwen.py, không cần lặp lại ở đây (không còn provider video local
+# nào cần test riêng).
 
 
 # ---------------------------------------------------------------------------

@@ -101,7 +101,7 @@ def test_import_parse_endpoint_success(client, project):
 def test_import_parse_endpoint_invalid_file_returns_400(client, project):
     resp = client.post(f"/projects/{project['id']}/script/import/parse", files={"file": ("script.csv", io.BytesIO(b"khong,phai,dung,cot"), "text/csv")})
     assert resp.status_code == 400
-    assert "6 cột" in resp.json()["detail"]
+    assert "5 cột" in resp.json()["detail"]
 
 
 def test_import_confirm_jumps_straight_to_script_studio(client, project):
@@ -134,6 +134,82 @@ def test_import_confirm_jumps_straight_to_script_studio(client, project):
 def test_import_confirm_empty_beats_400(client, project):
     resp = client.post(f"/projects/{project['id']}/script/import/confirm", json={"beats": []})
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Giọng đọc đa ngôn ngữ (2026-09-04) — cột VO (XX) thay cho cột VO đơn.
+# ---------------------------------------------------------------------------
+MULTILANG_HEADER = ["Mã", "Thời lượng", "Loại Visual", "Visual/FX", "Audio/SFX", "VO (VI)", "VO (EN)", "VO (DE)"]
+
+
+def test_parse_script_rows_multilang_columns():
+    rows = [
+        MULTILANG_HEADER,
+        ["B01", "0:00–0:05", "Video", "Cảnh mở", "Nhạc nền", "Xin chào các bạn.", "Hello everyone.", "Hallo zusammen."],
+    ]
+    result = parse_script_rows(rows, primary_language="vi")
+    beat = result["beats"][0]
+    assert beat["audio_by_lang"] == {"vi": "Xin chào các bạn.", "en": "Hello everyone.", "de": "Hallo zusammen."}
+    assert beat["audio"] == "Xin chào các bạn."  # audio gốc = primary_language
+
+
+def test_parse_script_rows_multilang_columns_picks_audio_by_primary_language():
+    """`audio` (field gốc, dùng cho render/timestamp) phải LUÔN khớp `primary_language`
+    của kênh, không phải cột đầu tiên/cột VI mặc định."""
+    rows = [
+        MULTILANG_HEADER,
+        ["B01", "0:00", "Video", "v", "d", "Xin chào.", "Hello.", "Hallo."],
+    ]
+    result = parse_script_rows(rows, primary_language="de")
+    assert result["beats"][0]["audio"] == "Hallo."
+
+
+def test_parse_script_rows_multilang_columns_partial_translation_allowed():
+    """KHÔNG bắt buộc đủ cả 6 ngôn ngữ — thiếu 1 vài cột vẫn parse được, ô trống coi là
+    'chưa dịch' (rỗng), không raise lỗi."""
+    header = ["Mã", "Thời lượng", "Loại Visual", "Visual/FX", "Audio/SFX", "VO (VI)", "VO (FR)"]
+    rows = [header, ["B01", "0:00", "Video", "v", "d", "Xin chào.", ""]]
+    result = parse_script_rows(rows, primary_language="vi")
+    assert result["beats"][0]["audio_by_lang"] == {"vi": "Xin chào.", "fr": ""}
+
+
+def test_parse_script_rows_single_vo_column_still_works_backward_compat():
+    """File CŨ (1 cột VO đơn, không có mã ngôn ngữ trong ngoặc) vẫn parse y hệt trước —
+    tương thích ngược, không bắt buộc đổi sang cột VO (XX)."""
+    rows = [HEADER, ["B01", "0:00", "Image", "v", "d", "Lời thoại cũ."]]
+    result = parse_script_rows(rows)
+    assert result["beats"][0]["audio"] == "Lời thoại cũ."
+    assert result["beats"][0]["audio_by_lang"] == {}
+
+
+def test_import_parse_endpoint_uses_channel_primary_language(client, channel):
+    """`/script/import/parse` phải đọc `BrandProfile.primary_language` của kênh để chọn
+    đúng cột VO nào trở thành `audio` gốc."""
+    profile = client.get(f"/channels/{channel['id']}/brandprofile").json()
+    profile["primary_language"] = "en"
+    client.put(f"/channels/{channel['id']}/brandprofile", json=profile)
+
+    proj = client.post(f"/channels/{channel['id']}/projects", json={"title": "Multilang test"}).json()
+    csv_bytes = _csv_bytes([MULTILANG_HEADER, ["B01", "0:00", "Video", "v", "d", "Xin chào.", "Hello.", "Hallo."]])
+    resp = client.post(f"/projects/{proj['id']}/script/import/parse", files={"file": ("s.csv", io.BytesIO(csv_bytes), "text/csv")})
+    assert resp.status_code == 200
+    assert resp.json()["beats"][0]["audio"] == "Hello."
+
+
+def test_build_template_workbook_multilang_has_6_vo_columns():
+    from openpyxl import load_workbook
+
+    from app.pipeline.script_import import build_template_workbook
+
+    wb = load_workbook(io.BytesIO(build_template_workbook(multilang=True)))
+    header = [c.value for c in next(wb.active.iter_rows(min_row=1, max_row=1))]
+    assert header == ["Mã", "Thời lượng", "Loại Visual", "Visual/FX", "Audio/SFX", "VO (VI)", "VO (EN)", "VO (DE)", "VO (PT-BR)", "VO (ES)", "VO (FR)"]
+
+
+def test_download_script_import_template_multilang_query_param(client, project):
+    resp = client.get(f"/projects/{project['id']}/script/import/template", params={"multilang": "true"})
+    assert resp.status_code == 200
+    assert "da-ngon-ngu" in resp.headers["content-disposition"]
 
 
 def test_visual_generate_from_imported_script_skips_ai(client, project):

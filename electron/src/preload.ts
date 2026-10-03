@@ -11,4 +11,10 @@ contextBridge.exposeInMainWorld("STUDIOFLOW_API_BASE", `http://127.0.0.1:${port}
 contextBridge.exposeInMainWorld("studioflowNative", {
   chooseFolder: (): Promise<string | null> => ipcRenderer.invoke("choose-folder"),
   openFolder: (folderPath: string): Promise<void> => ipcRenderer.invoke("open-folder", folderPath),
+  // Kết nối tài khoản Google (chỉ số YouTube, 2026-09-12) — mở URL đồng ý OAuth trong
+  // trình duyệt hệ thống, cùng pattern optional `window.studioflowNative` (chỉ tồn tại
+  // trong Electron — frontend tự fallback báo "chỉ dùng được trong app desktop" khi
+  // chạy dev server thuần trình duyệt, vì URL localhost callback không hoạt động đúng
+  // ngoài ngữ cảnh Electron).
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke("open-external", url),
 });

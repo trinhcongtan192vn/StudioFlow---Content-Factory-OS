@@ -1,7 +1,9 @@
 import time
+import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import delete_project_dir, project_dir
@@ -16,7 +18,10 @@ router = APIRouter(tags=["projects"])
 
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{int(time.time() * 1000)}"
+    # Hậu tố hex ngẫu nhiên (2026-09-12) — tránh trùng ID khi 2 hàng tạo trong CÙNG 1
+    # mili giây (bug thật gặp lúc full test suite chạy nhanh, `UNIQUE constraint
+    # failed`) — xem giải thích đầy đủ ở `asset_vault/ingest.py::_new_id`.
+    return f"{prefix}_{int(time.time() * 1000)}{uuid.uuid4().hex[:6]}"
 
 
 def _project_out(p: Project) -> dict:
@@ -32,6 +37,7 @@ def _project_out(p: Project) -> dict:
         "archived": p.archived,
         "parent_project_id": p.parent_project_id,
         "format": p.format or "long",
+        "youtube_video_id": p.youtube_video_id,  # mới (2026-09-12), xem `routers/youtube_analytics.py`
         "created_at": vn_isoformat(p.created_at) if p.created_at else None,
         "updated_at": vn_isoformat(p.updated_at) if p.updated_at else None,
     }
@@ -54,7 +60,7 @@ class ProjectPatch(BaseModel):
 
 @router.get("/channels/{channel_id}/projects")
 def list_projects(channel_id: str, db: Session = Depends(get_db)):
-    ps = db.query(Project).filter(Project.channel_id == channel_id, Project.archived == False).all()  # noqa: E712
+    ps = db.query(Project).filter(Project.channel_id == channel_id, Project.archived == False).order_by(Project.order_index).all()  # noqa: E712
     return [_project_out(p) for p in ps]
 
 
@@ -85,12 +91,45 @@ def create_project(channel_id: str, body: ProjectCreate, db: Session = Depends(g
     write_json(pdir / "pack.json", pack.model_dump())
     write_json(pdir / "pack.v1.json", pack.model_dump())
 
+    # order_index = ĐẦU danh sách trong CÙNG nhóm anh em (2026-09-19, xem docstring cột)
+    # — khớp đúng hành vi optimistic đã có ở Sidebar.tsx::handleNewProject (chèn project
+    # mới lên đầu local state, trước đây không hề persist nên F5 sẽ nhảy xuống cuối).
+    min_order = (
+        db.query(func.min(Project.order_index))
+        .filter(Project.channel_id == channel_id, Project.parent_project_id == body.parent_project_id)
+        .scalar()
+    )
+    order_index = 0 if min_order is None else min_order - 1
+
     p = Project(id=pid, channel_id=channel_id, title=body.title, status="draft", step=0, max_step_reached=0,
                 brief_path=str(pdir / "brief.json"), pack_path=str(pdir / "pack.json"), pack_version=1,
-                parent_project_id=body.parent_project_id, format=fmt)
+                parent_project_id=body.parent_project_id, format=fmt, order_index=order_index)
     db.add(p)
     db.commit()
     return _project_out(p)
+
+
+class ReorderProjectsBody(BaseModel):
+    project_ids: list[str]
+
+
+@router.patch("/channels/{channel_id}/projects/reorder")
+def reorder_projects(channel_id: str, body: ReorderProjectsBody, db: Session = Depends(get_db)):
+    """Kéo thả sắp xếp lại thứ tự project trên Sidebar — mới (2026-09-19). Dùng CHUNG cho
+    CẢ project long-form (nhóm `parent_project_id IS NULL`) lẫn short-form con của 1
+    project (nhóm `parent_project_id == X`) — nhận NGUYÊN danh sách ID của 1 NHÓM theo
+    thứ tự mới, gán `order_index` = vị trí trong danh sách đó. KHÔNG cần biết nhóm nào
+    (long-form hay short-form) — hiển thị luôn lọc theo nhóm TRƯỚC khi sắp theo
+    `order_index`, nên không ảnh hưởng nhóm khác."""
+    ps = db.query(Project).filter(Project.id.in_(body.project_ids), Project.channel_id == channel_id).all()
+    by_id = {p.id: p for p in ps}
+    missing = [pid for pid in body.project_ids if pid not in by_id]
+    if missing:
+        raise HTTPException(404, f"Không tìm thấy project thuộc kênh này: {', '.join(missing)}")
+    for idx, pid in enumerate(body.project_ids):
+        by_id[pid].order_index = idx
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/projects/{project_id}")

@@ -15,6 +15,7 @@ import type {
   LayerBlendMode,
   LayerPosition,
   LocalServicesResponse,
+  NarrationLanguage,
   ClipRightsStatus,
   ProcessedClip,
   ProductionPack,
@@ -24,9 +25,18 @@ import type {
   RawVideo,
   RenderState,
   RetentionOut,
+  SaveShotsToVaultResult,
   TrashOut,
+  ShotUploadBatchResult,
+  VaultAutoFillApplyResult,
+  VaultAutoFillScanStatus,
   VaultCandidatesResult,
   VoiceSampleUploadResult,
+  YoutubeChannelMetricsOut,
+  YoutubeChannelOAuthStatus,
+  YoutubeRetentionChapter,
+  YoutubeSettingsStatus,
+  YoutubeVideoAvailable,
 } from "./types";
 
 declare global {
@@ -36,7 +46,7 @@ declare global {
     // Electron (xem electron/src/preload.ts). Chạy dev server thuần trình duyệt (`npm
     // run dev:frontend`) sẽ KHÔNG có global này — UI tự fallback về ô nhập đường dẫn
     // tay, xem OutputCenter.tsx.
-    studioflowNative?: { chooseFolder: () => Promise<string | null>; openFolder: (folderPath: string) => Promise<void> };
+    studioflowNative?: { chooseFolder: () => Promise<string | null>; openFolder: (folderPath: string) => Promise<void>; openExternal: (url: string) => Promise<void> };
   }
 }
 
@@ -124,6 +134,8 @@ export const api = {
   createChannel: (body: { name: string; niche: string }) => post<ChannelSummary>("/channels", body),
   getChannel: (id: string) => get<ChannelSummary & { brand_profile: BrandProfile }>(`/channels/${id}`),
   patchChannel: (id: string, body: Partial<{ name: string; niche: string; archived: boolean }>) => patch<ChannelSummary>(`/channels/${id}`, body),
+  // Kéo thả sắp xếp Sidebar — mới (2026-09-19).
+  reorderChannels: (channelIds: string[]) => patch<{ ok: boolean }>("/channels/reorder", { channel_ids: channelIds }),
   restoreChannel: (id: string) => post<ChannelSummary>(`/channels/${id}/restore`),
   deleteChannelPermanent: (id: string) => del<{ ok: boolean }>(`/channels/${id}/permanent`),
   getBrandProfile: (id: string) => get<BrandProfile>(`/channels/${id}/brandprofile`),
@@ -141,6 +153,14 @@ export const api = {
     return req<VoiceSampleUploadResult>(`/channels/${id}/brandprofile/voice-sample/upload`, { method: "POST", body: form });
   },
   voiceSampleUrl: (id: string) => `${BASE}/channels/${id}/brandprofile/voice-sample`,
+  // Giọng đọc đa ngôn ngữ (mới 2026-09-04) — mẫu giọng clone RIÊNG cho từng ngôn ngữ
+  // (khác voice-sample đơn ở trên, dùng cho ngôn ngữ CHÍNH).
+  uploadVoiceSampleLang: (id: string, lang: NarrationLanguage, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return req<VoiceSampleUploadResult>(`/channels/${id}/brandprofile/voice-sample/upload/${lang}`, { method: "POST", body: form });
+  },
+  voiceSampleLangUrl: (id: string, lang: NarrationLanguage) => `${BASE}/channels/${id}/brandprofile/voice-sample/${lang}`,
   uploadBrandIntro: (id: string, file: File) => {
     const form = new FormData();
     form.append("file", file);
@@ -159,21 +179,14 @@ export const api = {
     return req<BrandProfile>(`/channels/${id}/brandprofile/overlay/upload`, { method: "POST", body: form });
   },
   brandOverlayUrl: (id: string) => `${BASE}/channels/${id}/brandprofile/overlay`,
-  // Ảnh tham chiếu phong cách — mới (2026-08-23), làm lại đợt 2 (2026-08-25, xem
-  // types.ts::BrandProfile.style_reference_paths). Endpoint backend không đổi (vẫn
-  // nhận list) — UI giờ tự giới hạn tối đa 1 ảnh phía frontend (ChannelDialog.tsx).
-  uploadStyleReference: (id: string, file: File) => {
-    const form = new FormData();
-    form.append("file", file);
-    return req<BrandProfile>(`/channels/${id}/brandprofile/style-references/upload`, { method: "POST", body: form });
-  },
-  deleteStyleReference: (id: string, filename: string) => del<BrandProfile>(`/channels/${id}/brandprofile/style-references/${filename}`),
-  styleReferenceUrl: (id: string, filename: string) => `${BASE}/channels/${id}/brandprofile/style-references/${filename}`,
 
   // Projects
   listProjects: (channelId: string) => get<ProjectSummary[]>(`/channels/${channelId}/projects`),
   createProject: (channelId: string, title: string, parentProjectId?: string) =>
     post<ProjectSummary>(`/channels/${channelId}/projects`, { title, parent_project_id: parentProjectId }),
+  // Kéo thả sắp xếp Sidebar — mới (2026-09-19). Dùng CHUNG cho cả project long-form lẫn
+  // short-form con của 1 project — truyền ĐÚNG danh sách ID của 1 nhóm anh em.
+  reorderProjects: (channelId: string, projectIds: string[]) => patch<{ ok: boolean }>(`/channels/${channelId}/projects/reorder`, { project_ids: projectIds }),
   getProject: (id: string) => get<ProjectSummary>(`/projects/${id}`),
   patchProject: (id: string, body: Partial<{ title: string; status: string; step: number; return_note: string }>) =>
     patch<ProjectSummary>(`/projects/${id}`, body),
@@ -201,8 +214,16 @@ export const api = {
 
   // Pipeline
   editScriptBlockAudio: (id: string, index: number, audio: string) => patch<ProductionPack>(`/projects/${id}/script/body/${index}/audio`, { audio }),
-  downloadScriptImportTemplate: (id: string) => downloadFile(`/projects/${id}/script/import/template`, "mau-nhap-kich-ban.xlsx"),
+  // Giọng đọc đa ngôn ngữ (mới 2026-09-04) — sửa tay bản dịch VO của 1 block/1 ngôn ngữ.
+  editScriptBlockTranslation: (id: string, index: number, lang: NarrationLanguage, text: string) =>
+    patch<ProductionPack>(`/projects/${id}/script/body/${index}/translation/${lang}`, { text }),
+  downloadScriptImportTemplate: (id: string, multilang = false) =>
+    downloadFile(`/projects/${id}/script/import/template${multilang ? "?multilang=true" : ""}`, multilang ? "mau-nhap-kich-ban-da-ngon-ngu.xlsx" : "mau-nhap-kich-ban.xlsx"),
   downloadTranscriptSrt: (id: string) => downloadFile(`/projects/${id}/script/transcript-srt`, "transcript.srt"),
+  downloadTranscriptSrtLang: (id: string, lang: NarrationLanguage) => downloadFile(`/projects/${id}/script/transcript-srt/${lang}`, `transcript_${lang}.srt`),
+  // Kịch bản .txt thuần, không timestamp — mới (2026-09-12).
+  downloadTranscriptTxt: (id: string) => downloadFile(`/projects/${id}/script/transcript-txt`, "script.txt"),
+  downloadTranscriptTxtLang: (id: string, lang: NarrationLanguage) => downloadFile(`/projects/${id}/script/transcript-txt/${lang}`, `script_${lang}.txt`),
   ensureShotsForNarration: (id: string) => post<ProductionPack>(`/projects/${id}/visual/ensure-shots-for-narration`),
   importScriptParse: (id: string, file: File) => {
     const form = new FormData();
@@ -214,6 +235,11 @@ export const api = {
   generateVisualShots: (id: string) => post<ProductionPack>(`/projects/${id}/visual/generate`),
   patchShot: (id: string, shotId: string, body: Partial<{ visual_fx: string; audio_sfx: string; visual_type: string; transition_to_next: string; camera_motion: string }>) =>
     patch<ProductionPack>(`/projects/${id}/visual/shots/${shotId}`, body),
+  // Bulk edit transition_to_next/camera_motion cho nhiều shot cùng lúc — mới (2026-09-10).
+  patchShotsBulk: (id: string, shotIds: string[], body: Partial<{ transition_to_next: string; camera_motion: string }>) =>
+    patch<ProductionPack>(`/projects/${id}/visual/shots/bulk`, { shot_ids: shotIds, ...body }),
+  // Lưu ảnh/video đã sinh của 1-nhiều shot vào Kho Tài Nguyên để tái sử dụng — mới (2026-09-11).
+  saveShotsToVault: (id: string, shotIds: string[]) => post<SaveShotsToVaultResult>(`/projects/${id}/visual/shots/save-to-vault`, { shot_ids: shotIds }),
   regenerateShotVisual: (id: string, shotId: string) => post<ProductionPack>(`/projects/${id}/visual/shots/${shotId}/regenerate-visual`),
   regenerateShotAudio: (id: string, shotId: string) => post<ProductionPack>(`/projects/${id}/visual/shots/${shotId}/regenerate-audio`),
   generateAllVisual: (id: string) => post<ProductionPack>(`/projects/${id}/visual/generate-all-visual`),
@@ -237,6 +263,24 @@ export const api = {
   guardrailCheck: (id: string) => post<{ hook_strength: number | null; max_anchor_gap_sec: number | null; warnings: unknown[] }>(`/projects/${id}/guardrail/check`),
   getRetention: (id: string) => get<RetentionOut>(`/projects/${id}/retention`),
   putRetention: (id: string, body: Record<string, number | string | null>) => put<RetentionOut>(`/projects/${id}/retention`, body),
+
+  // Chỉ số YouTube (Data API v3 + Analytics API v2) — mới (2026-09-12), theo yêu cầu
+  // người dùng: kéo dữ liệu thật từ YouTube. Xem `backend/app/routers/youtube_analytics.py`.
+  // OAuth giờ RIÊNG theo từng kênh (mục 154, 2026-09-19) — xem
+  // `getYoutubeChannelAuthorizeUrl`/`getYoutubeChannelOAuthStatus` bên dưới.
+  saveYoutubeOAuthClient: (client_id: string, client_secret: string) => post<{ ok: boolean }>("/settings/youtube/oauth-client", { client_id, client_secret }),
+  getYoutubeSettingsStatus: () => get<YoutubeSettingsStatus>("/settings/youtube/status"),
+  getYoutubeChannelAuthorizeUrl: (channelId: string, redirect_uri: string) => get<{ url: string }>(`/channels/${channelId}/youtube/authorize-url?redirect_uri=${encodeURIComponent(redirect_uri)}`),
+  getYoutubeChannelOAuthStatus: (channelId: string) => get<YoutubeChannelOAuthStatus>(`/channels/${channelId}/youtube/oauth-status`),
+  // `${BASE}/oauth/callback` — cổng backend đang chạy, ĐÚNG cổng nhận được redirect từ
+  // Google (xem docstring backend `youtube_analytics.py`).
+  youtubeOAuthCallbackUrl: () => `${BASE}/oauth/callback`,
+  disconnectChannelFromYoutube: (channelId: string) => post<{ ok: boolean }>(`/channels/${channelId}/youtube/disconnect`),
+  syncYoutubeMetrics: (channelId: string) => post<YoutubeChannelMetricsOut>(`/channels/${channelId}/youtube/sync`),
+  getYoutubeChannelMetrics: (channelId: string) => get<YoutubeChannelMetricsOut>(`/channels/${channelId}/youtube/metrics`),
+  getYoutubeVideosAvailable: (projectId: string) => get<{ videos: YoutubeVideoAvailable[]; current_video_id: string | null }>(`/projects/${projectId}/youtube-videos-available`),
+  patchYoutubeLink: (projectId: string, videoId: string | null) => patch<{ youtube_video_id: string | null }>(`/projects/${projectId}/youtube-link`, { video_id: videoId }),
+  getRetentionChapters: (projectId: string) => get<{ video_duration_sec: number | null; chapters: YoutubeRetentionChapter[] }>(`/projects/${projectId}/youtube/retention-chapters`),
 
   // Export — "Xuất Pack" (2026-08-26, thay "Output A" cũ): gói SRT + assets + giọng đọc
   // full + video đã ghép (nếu có) ra 1 folder trên máy local, xem app/render/pack_export.py.
@@ -262,20 +306,58 @@ export const api = {
     form.append("file", file);
     return req<RenderState>(`/projects/${id}/render/shots/${shotId}/upload-visual`, { method: "POST", body: form });
   },
+  // Upload cả folder ảnh/video khớp theo mã block — mới (2026-09-16).
+  uploadShotVisualBatch: (id: string, files: File[]) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f);
+    return req<ShotUploadBatchResult>(`/projects/${id}/render/shots/upload-visual-batch`, { method: "POST", body: form });
+  },
   // Xoá ảnh/video đã sinh/upload/gán cho 1 shot (Visual Studio, 2026-09-02, theo yêu cầu
   // người dùng — cho phép bỏ 1 asset không ưng ý mà không bị buộc sinh/upload cái khác
   // ngay). Trả shot về "pending" như chưa từng sinh.
   removeShotVisual: (id: string, shotId: string) => del<RenderState>(`/projects/${id}/render/shots/${shotId}/visual`),
   regenerateShotNarration: (id: string, shotId: string) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/regenerate-narration`),
+  // Giọng đọc đa ngôn ngữ (mới 2026-09-04) — 1 ngôn ngữ (khác ngôn ngữ chính) cho MỌI
+  // shot đã có văn bản dịch, hoặc RIÊNG 1 shot. Cùng pattern startRender/
+  // regenerateShotNarration ở trên.
+  startNarrationTranslationBatch: (id: string, lang: NarrationLanguage, force = false) =>
+    post<RenderState>(`/projects/${id}/render/narration-translations/${lang}/start${force ? "?force=true" : ""}`),
+  regenerateShotNarrationTranslation: (id: string, shotId: string, lang: NarrationLanguage) =>
+    post<RenderState>(`/projects/${id}/render/shots/${shotId}/regenerate-narration-translation/${lang}`),
+  renderShotNarrationTranslationAssetUrl: (id: string, shotId: string, lang: NarrationLanguage) =>
+    `${BASE}/projects/${id}/render/shots/${shotId}/asset/narration/${lang}`,
+  downloadNarrationFullLang: (id: string, lang: NarrationLanguage) =>
+    downloadFile(`/projects/${id}/render/narration-download/${lang}`, `narration_full_${lang}.mp3`),
   // Xoá watermark (Visual Studio, 2026-08-28) — tái dùng module app/watermark/ đã build
   // cho Kho Tài Nguyên. "Không phát hiện watermark" KHÔNG phải lỗi, xem
   // ShotRenderStatus.visual_watermark_note.
-  removeShotWatermark: (id: string, shotId: string) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/remove-watermark`),
-  removeAllShotsWatermark: (id: string) => post<RenderState>(`/projects/${id}/render/remove-watermark-all`),
+  // `mode` — **mới (2026-09-18)**: "auto" (mặc định) chỉ tự xoá ảnh nếu rõ nguồn Gemini,
+  // "gemini" ép chạy bất kể provider (nút "Xoá watermark Gemini" riêng) — xem docstring
+  // backend `render.py::remove_shot_watermark`.
+  removeShotWatermark: (id: string, shotId: string, mode: "auto" | "gemini" = "auto") =>
+    post<RenderState>(`/projects/${id}/render/shots/${shotId}/remove-watermark?mode=${mode}`),
+  // `mode` — xem chú thích `removeShotWatermark` ở trên.
+  removeAllShotsWatermark: (id: string, mode: "auto" | "gemini" = "auto") =>
+    post<RenderState>(`/projects/${id}/render/remove-watermark-all?mode=${mode}`),
   // Video Slot nguồn "Video từ Kho" (CHANGE_Semantic_BRoll_Asset_Vault.md §7.3).
   getVaultCandidates: (id: string, shotId: string) => get<VaultCandidatesResult>(`/projects/${id}/render/shots/${shotId}/vault-candidates`),
   assignVaultClip: (id: string, shotId: string, clipId: string) => post<RenderState>(`/projects/${id}/render/shots/${shotId}/assign-vault-clip`, { clip_id: clipId }),
+  // Tự động điền block còn thiếu từ Kho Tài Nguyên — mới (2026-09-11), chuyển sang job
+  // nền poll được (2026-09-13) để hiện progress bar (xem `VaultAutoFillScanStatus`).
+  startVaultAutoFillScan: (id: string) => post<VaultAutoFillScanStatus>(`/projects/${id}/render/vault-auto-fill-scan`),
+  getVaultAutoFillScanStatus: (id: string) => get<VaultAutoFillScanStatus>(`/projects/${id}/render/vault-auto-fill-scan/status`),
+  applyVaultAutoFill: (id: string, items: { shot_id: string; clip_id: string }[]) =>
+    post<VaultAutoFillApplyResult>(`/projects/${id}/render/vault-auto-fill-apply`, { items }),
   assembleVideo: (id: string, config?: AssembleConfig) => post<RenderState>(`/projects/${id}/render/assemble`, config),
+  // Xuất short-video 9:16 từ 1 khoảng block — mới (2026-09-12), Output Center. Tối đa 3
+  // cái/project (400 khi bấm xuất thêm — xem `render/short_export.py`). Không có endpoint
+  // GET tiến độ riêng — `getRenderStatus`/`RenderState.short_exports` (poll sẵn có) đã đủ.
+  createShortExport: (id: string, body: { start_block_id: string; end_block_id: string; regenerate_images: boolean; lang?: NarrationLanguage | null }) =>
+    post<RenderState>(`/projects/${id}/render/short-export`, body),
+  deleteShortExport: (id: string, exportId: string) => del<RenderState>(`/projects/${id}/render/short-export/${exportId}`),
+  shortExportDownloadUrl: (id: string, exportId: string) => `${BASE}/projects/${id}/render/short-export/${exportId}/download`,
+  downloadShortExport: (id: string, exportId: string, startBlockId: string, endBlockId: string, lang: string) =>
+    downloadFile(`/projects/${id}/render/short-export/${exportId}/download`, `short_${startBlockId}-${endBlockId}_${lang}.mp4`),
   // "Đặt lại tiến trình bị treo" — mới (2026-09-02, mục 111). 409 nếu tiến trình vẫn
   // đang chạy THẬT SỰ (không phải kẹt) — xem docstring backend `reset_stuck_assembly`.
   resetStuckAssembly: (id: string) => post<RenderState>(`/projects/${id}/render/assemble/reset`),
@@ -297,6 +379,16 @@ export const api = {
   enableIntroInherit: (id: string) => patch<RenderState>(`/projects/${id}/render/intro/inherit`, {}),
   patchIntroTransition: (id: string, transition_to_next: string) => patch<RenderState>(`/projects/${id}/render/intro/transition`, { transition_to_next }),
   introAssetUrl: (id: string, kind: "visual" | "audio") => `${BASE}/projects/${id}/render/intro/asset/${kind}`,
+  // Ảnh nhân vật tham khảo — mới (2026-09-09, mục 127).
+  uploadCharacterReference: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return req<RenderState>(`/projects/${id}/render/character-reference/upload`, { method: "POST", body: form });
+  },
+  recaptionCharacterReference: (id: string) => post<RenderState>(`/projects/${id}/render/character-reference/recaption`, {}),
+  patchCharacterReferenceDescription: (id: string, description: string) => patch<RenderState>(`/projects/${id}/render/character-reference/description`, { description }),
+  deleteCharacterReference: (id: string) => del<RenderState>(`/projects/${id}/render/character-reference`),
+  characterReferenceAssetUrl: (id: string) => `${BASE}/projects/${id}/render/character-reference/asset`,
   uploadProjectBgMusic: (id: string, file: File) => {
     const form = new FormData();
     form.append("file", file);
@@ -360,6 +452,10 @@ export const api = {
     patch<RenderState>(`/projects/${id}/render/image-layers/${layerId}`, body),
   deleteProjectImageLayer: (id: string, layerId: string) => del<RenderState>(`/projects/${id}/render/image-layers/${layerId}`),
   projectImageLayerAssetUrl: (id: string, layerId: string) => `${BASE}/projects/${id}/render/image-layers/${layerId}/asset`,
+  // Layer CAPTION (phụ đề cứng burn-in) — mới (2026-09-12). 1 cấu hình duy nhất/project,
+  // không có upload — PATCH duy nhất, `lang: null`/`""` = theo ngôn ngữ đang ghép video.
+  patchCaptionLayer: (id: string, body: Partial<{ enabled: boolean; position: LayerPosition; size_pct: number; opacity: number; lang: NarrationLanguage | null }>) =>
+    patch<RenderState>(`/projects/${id}/render/caption-layer`, body),
 
   // Thư viện Creative Asset (nhạc nền/video/ảnh/giọng đọc dùng lại nhiều nơi)
   listLibraryAssets: (kind?: CreativeAssetKind) => get<CreativeAsset[]>(`/library/assets${kind ? `?kind=${kind}` : ""}`),
@@ -375,7 +471,13 @@ export const api = {
   // Kho Tài Nguyên / Asset Vault (CHANGE_Semantic_BRoll_Asset_Vault.md) — kho tư liệu
   // video TOÀN CỤC (2026-08-27, khác Thư viện Creative Asset ở trên), 1 video gốc gắn
   // được NHIỀU kênh dạng tag — lọc theo kênh qua `channelId` tuỳ chọn.
-  listRawVideos: (channelId?: string) => get<RawVideo[]>(`/asset-vault/raw${channelId ? `?channel_id=${encodeURIComponent(channelId)}` : ""}`),
+  listRawVideos: (channelId?: string, kind?: "raw" | "project") => {
+    const params = new URLSearchParams();
+    if (channelId) params.set("channel_id", channelId);
+    if (kind) params.set("kind", kind);
+    const qs = params.toString();
+    return get<RawVideo[]>(`/asset-vault/raw${qs ? `?${qs}` : ""}`);
+  },
   getAssetVaultFolders: () => get<{ raw_dir: string; clips_dir: string }>("/asset-vault/folders"),
   uploadRawVideo: (channelIds: string[], file: File, importNote = "") => {
     const form = new FormData();
@@ -434,15 +536,13 @@ export const api = {
     patch<ProviderOut>(`/providers/${id}`, body),
   deleteProvider: (id: number) => del<{ ok: boolean }>(`/providers/${id}`),
   testProvider: (id: number) => post<{ ok: boolean; message: string }>(`/providers/${id}/test`),
-  listLocalSdxlModels: (kind: "checkpoints" | "loras", baseUrl?: string) => {
+  // Đổi tên từ `listLocalSdxlModels`/`/providers/local-sdxl/models` — đợt dọn dẹp
+  // 2026-09-24 xoá `local_sdxl` (tên cũ gây hiểu nhầm khi SDXL không còn tồn tại), giờ
+  // dùng chung cho `local_qwen` (provider ComfyUI duy nhất còn lại).
+  listComfyUIModels: (kind: "checkpoints" | "loras" | "unet_gguf", baseUrl?: string) => {
     const params = new URLSearchParams({ kind });
     if (baseUrl) params.set("base_url", baseUrl);
-    return get<{ models: string[] }>(`/providers/local-sdxl/models?${params.toString()}`);
-  },
-  listLocalAiModels: (baseUrl?: string) => {
-    const params = new URLSearchParams();
-    if (baseUrl) params.set("base_url", baseUrl);
-    return get<{ models: string[] }>(`/providers/localai/models?${params.toString()}`);
+    return get<{ models: string[] }>(`/providers/comfyui/models?${params.toString()}`);
   },
 
   // Settings

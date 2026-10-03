@@ -95,6 +95,7 @@ class RetentionBody(BaseModel):
     ret_100: float | None = None
     avg_view_duration: float | None = None
     thumbnail_ctr: float | None = None
+    rpm: float | None = None
 
 
 @router.get("/projects/{project_id}/retention")
@@ -125,6 +126,7 @@ def get_retention(project_id: str, db: Session = Depends(get_db)):
             "ret_100": entry.ret_100,
             "avg_view_duration": entry.avg_view_duration,
             "thumbnail_ctr": entry.thumbnail_ctr,
+            "rpm": entry.rpm,
         },
         "target_hook_strength": target_hook,
         "guardrail_hook_strength": hook_strength,

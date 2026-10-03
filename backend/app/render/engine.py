@@ -9,7 +9,6 @@ request thread, vì video (Sora) có thể mất vài phút để hoàn tất.
 from __future__ import annotations
 
 import hashlib
-import re
 import shutil
 import subprocess
 import time
@@ -26,9 +25,7 @@ from app.filestore import read_json, unlink_retrying, write_bytes, write_json
 from app.models import Project, ProviderConfig
 from app.providers.base import GenerationInterrupted, VideoProvider
 from app.providers.factory import NoProviderConfiguredError, build_llm_provider, get_image_chain, get_tts_chain, get_video_chain
-from app.providers.gpu_lock import gpu_lock
-from app.providers.image_comfy_sdxl import estimate_cost as estimate_local_sdxl_cost
-from app.providers.image_localai import estimate_cost as estimate_localai_image_cost
+from app.providers.image_comfy_qwen import estimate_cost as estimate_local_qwen_cost
 from app.providers.image_flux import estimate_cost as estimate_flux_image_cost
 from app.providers.image_flux_kontext import estimate_cost as estimate_flux_kontext_image_cost
 from app.providers.image_gemini import estimate_cost as estimate_gemini_image_cost
@@ -37,13 +34,11 @@ from app.providers.tts_elevenlabs import estimate_cost as estimate_elevenlabs_tt
 from app.providers.tts_gemini import estimate_cost as estimate_gemini_tts_cost
 from app.providers.tts_omnivoice import estimate_cost as estimate_omnivoice_tts_cost
 from app.providers.tts_piper import estimate_cost as estimate_piper_tts_cost
-from app.providers.video_comfy_wan import estimate_cost as estimate_local_wan_cost
-from app.providers.video_localai import estimate_cost as estimate_localai_video_cost
 from app.providers.video_flux import estimate_cost as estimate_flux_video_cost
 from app.providers.video_sora import estimate_cost as estimate_sora_video_cost
 from app.providers.video_veo import estimate_cost as estimate_veo_video_cost
 from app.render.media_probe import probe_duration_sec
-from app.render.schemas import RenderState, ShotRenderStatus, WatermarkScanSummary
+from app.render.schemas import NARRATION_LANGUAGES, RenderState, ShotRenderStatus, TranslatedNarrationStatus, WatermarkScanSummary
 from app.routers.pipeline import record_asset_usage
 from app.timeutil import vn_isoformat
 from app.watermark.pipeline import remove_watermark_from_image, remove_watermark_from_video
@@ -58,24 +53,14 @@ VIDEO_MAX_WAIT_SEC = 1500
 
 # Mỗi task tra đúng hàm ước tính chi phí theo provider THẬT SỰ THÀNH CÔNG trong chain
 # fallback (không biết trước sẽ là default hay fallback) — xem _candidate_configs()
-# trong factory.py. Provider local (piper/local_sdxl/local_wan) luôn $0 — thêm dần khi
-# từng adapter local ra đời (xem IMPLEMENTATION_REPORT.md mục local AI provider).
+# trong factory.py. Provider local (piper/local_qwen) luôn $0.
 _IMAGE_COST_FN = {
     "openai": estimate_openai_image_cost, "gemini": estimate_gemini_image_cost, "flux": estimate_flux_image_cost, "flux_kontext": estimate_flux_kontext_image_cost,
-    "local_sdxl": estimate_local_sdxl_cost, "localai_image": estimate_localai_image_cost,
+    "local_qwen": estimate_local_qwen_cost,
 }
 _VIDEO_COST_FN = {
     "sora": estimate_sora_video_cost, "veo": estimate_veo_video_cost, "flux": estimate_flux_video_cost,
-    "local_wan": estimate_local_wan_cost, "localai_video": estimate_localai_video_cost,
 }
-
-# `local_sdxl`/`local_wan` (ComfyUI) SONG SONG `localai_image`/`localai_video` (LocalAI,
-# mới 2026-08-25) — dùng CHUNG mọi chỗ trong file này cần biết "provider này có phải
-# local SDXL/Wan (bất kể chạy qua ComfyUI hay LocalAI) không", tránh lặp lại tuple ở
-# nhiều nơi. Additive theo kế hoạch migrate — xoá `local_sdxl`/`local_wan` khỏi đây SAU
-# khi verify LocalAI thật qua GPU người dùng và xoá hẳn code ComfyUI.
-_LOCAL_IMAGE_PROVIDER_NAMES = ("local_sdxl", "localai_image")
-_LOCAL_VIDEO_PROVIDER_NAMES = ("local_wan", "localai_video")
 _TTS_COST_FN = {"elevenlabs": estimate_elevenlabs_tts_cost, "gemini": estimate_gemini_tts_cost, "piper": estimate_piper_tts_cost, "omnivoice": estimate_omnivoice_tts_cost}
 
 # ElevenLabs trả MP3, Gemini TTS trả WAV (tự bọc từ PCM thô — xem tts_gemini.py) —
@@ -298,6 +283,10 @@ def _reconcile_stale_generating(pdir, state: RenderState, project_id: str) -> No
         if s.narration_status == "generating":
             s.narration_status, s.narration_error, s.narration_started_at = "error", _STALE_GENERATING_MSG, None
             changed = True
+        for translation in s.narration_translations.values():
+            if translation.narration_status == "generating":
+                translation.narration_status, translation.narration_error = "error", _STALE_GENERATING_MSG
+                changed = True
     if changed:
         write_json(_render_path(pdir), state.model_dump())
 
@@ -439,7 +428,7 @@ def regenerate_single_narration(project_id: str, shot_id: str) -> None:
 # + LaMa) đã build cho Kho Tài Nguyên (IMPLEMENTATION_REPORT.md mục 96/97), theo yêu cầu
 # người dùng: quét/xoá watermark cho từng shot HOẶC cả block, trước khi ghép video cuối.
 # ---------------------------------------------------------------------------
-def _remove_watermark_for_status(pdir, shot: dict, status: ShotRenderStatus, on_progress: Callable[[int, int, str], None] | None = None) -> str:
+def _remove_watermark_for_status(pdir, shot: dict, status: ShotRenderStatus, mode: str = "auto", on_progress: Callable[[int, int, str], None] | None = None) -> str:
     """Xoá watermark khỏi asset HIỆN TẠI của `status`, cập nhật `status` tại chỗ. Trả về
     "cleaned"|"no_watermark"|"failed" — KHÔNG tự set `visual_status` (caller quyết định,
     vì đơn lẻ/hàng loạt xử lý outcome hơi khác nhau ở tầng gọi). "no_watermark" KHÔNG phải
@@ -449,7 +438,12 @@ def _remove_watermark_for_status(pdir, shot: dict, status: ShotRenderStatus, on_
     tác dụng cho shot VIDEO (`remove_watermark_from_video` tự gọi mỗi ~8 frame, xem
     `watermark/pipeline.py`); shot ẢNH vá 1 lượt LaMa duy nhất tại vị trí cố định (2026-09-
     04, xem bug thật #4 `watermark/detector.py` — không còn qua Florence-2), quá nhanh để
-    cần tiến trình dạng %."""
+    cần tiến trình dạng %.
+
+    `mode="gemini"` (2026-09-18, nút "Xoá watermark Gemini" riêng) — cho VIDEO, ép dùng vị
+    trí cố định `gemini_corner_bbox` thay vì đa-frame/Florence-2 (xem `force_gemini` ở
+    `remove_watermark_from_video`). ẢNH không đổi gì theo mode — nhánh ảnh vốn ĐÃ luôn
+    dùng `gemini_corner_bbox` mặc định từ bug #4, bất kể mode."""
     if not status.visual_asset_path:
         status.visual_error = "Chưa có ảnh/video nào để xoá watermark."
         return "failed"
@@ -465,7 +459,7 @@ def _remove_watermark_for_status(pdir, shot: dict, status: ShotRenderStatus, on_
             ffmpeg = shutil.which("ffmpeg")
             if not ffmpeg:
                 raise RuntimeError("Chưa cài ffmpeg trên máy chạy backend.")
-            remove_watermark_from_video(ffmpeg, str(old_path), new_path, tmp_dir, on_progress=on_progress)
+            remove_watermark_from_video(ffmpeg, str(old_path), new_path, tmp_dir, force_gemini=(mode == "gemini"), on_progress=on_progress)
         else:
             remove_watermark_from_image(str(old_path), new_path)
     except ValueError:
@@ -490,11 +484,12 @@ def _remove_watermark_for_status(pdir, shot: dict, status: ShotRenderStatus, on_
     return "cleaned"
 
 
-def remove_shot_watermark(project_id: str, shot_id: str) -> None:
+def remove_shot_watermark(project_id: str, shot_id: str, mode: str = "auto") -> None:
     """Xoá watermark cho ĐÚNG 1 shot — dùng cho BackgroundTasks. Cùng cờ `_in_progress`
     với sinh asset (router chặn chạy chồng TRƯỚC khi tới đây, xem `_require_not_in_
     progress` — cùng bug lớp đã sửa cho Kho Tài Nguyên ở mục 97, tránh tái diễn: 2 tiến
-    trình cùng đụng `render.json`/asset của project sẽ ghi đè tiến độ của nhau)."""
+    trình cùng đụng `render.json`/asset của project sẽ ghi đè tiến độ của nhau). `mode` —
+    xem docstring `_remove_watermark_for_status`."""
     _mark_in_progress(project_id)
     db = SessionLocal()
     try:
@@ -517,7 +512,7 @@ def remove_shot_watermark(project_id: str, shot_id: str) -> None:
             status.visual_watermark_progress_label = label
             save_render_state(pdir, state)
 
-        outcome = _remove_watermark_for_status(pdir, shot, status, on_progress=_on_progress)
+        outcome = _remove_watermark_for_status(pdir, shot, status, mode=mode, on_progress=_on_progress)
         status.visual_status = "error" if outcome == "failed" else "ready"
         save_render_state(pdir, state)
         db.commit()
@@ -526,13 +521,19 @@ def remove_shot_watermark(project_id: str, shot_id: str) -> None:
         db.close()
 
 
-def remove_all_shots_watermark(project_id: str) -> None:
+def remove_all_shots_watermark(project_id: str, mode: str = "auto") -> None:
     """Xoá watermark cho MỌI shot đang có asset sẵn sàng (`visual_status=="ready"`) —
     bỏ qua thầm lặng shot chưa sinh xong (cùng nguyên tắc `approve_all_shots`). Lỗi 1 shot
     KHÔNG dừng cả batch (cùng nguyên tắc `run_asset_generation`). Ghi tóm tắt kết quả vào
     `RenderState.watermark_scan_summary` — người dùng yêu cầu rõ "ảnh nào không phát hiện
     watermark thì có thông báo rõ ràng"; với cả BLOCK, 1 banner tóm tắt sau khi xong dễ
-    thấy hơn hẳn phải tự rà từng shot."""
+    thấy hơn hẳn phải tự rà từng shot.
+
+    `mode` (2026-09-18) — `"auto"` (nút "Xoá watermark toàn bộ slot"): bỏ qua THẦM LẶNG
+    ảnh KHÔNG rõ nguồn Gemini (không tính vào `scanned`) — tránh vá nhầm hàng loạt ảnh
+    không hề có watermark Gemini. `"gemini"` (nút riêng "Xoá watermark Gemini toàn bộ
+    slot") — người dùng đã CHẮC CHẮN cả block có watermark Gemini, xử lý MỌI shot `ready`
+    (ảnh lẫn video), không bỏ qua gì."""
     _mark_in_progress(project_id)
     db = SessionLocal()
     try:
@@ -552,6 +553,10 @@ def remove_all_shots_watermark(project_id: str) -> None:
             shot = shots_by_id.get(status.shot_id)
             if status.visual_status != "ready" or not status.visual_asset_path or not shot:
                 continue
+            # Bỏ qua THẦM LẶNG ảnh KHÔNG rõ nguồn Gemini — CHỈ khi mode="auto" (xem
+            # docstring hàm). mode="gemini" xử lý MỌI shot, không bỏ qua gì.
+            if mode == "auto" and shot.get("visual_type") != "video" and status.visual_provider != "gemini":
+                continue
             scanned += 1
             status.visual_status = "generating"
             status.visual_watermark_note = None
@@ -563,7 +568,7 @@ def remove_all_shots_watermark(project_id: str) -> None:
                 status.visual_watermark_progress_label = label
                 save_render_state(pdir, state)
 
-            outcome = _remove_watermark_for_status(pdir, shot, status, on_progress=_on_progress)
+            outcome = _remove_watermark_for_status(pdir, shot, status, mode=mode, on_progress=_on_progress)
             status.visual_status = "error" if outcome == "failed" else "ready"
             counts[outcome] += 1
             save_render_state(pdir, state)
@@ -609,68 +614,7 @@ def _load_brand_profile(channel_id: str) -> dict:
     return read_json(channel_dir(channel_id) / "brandprofile.json") or {}
 
 
-# Trần cố định (KHÔNG phụ thuộc budget còn lại) cho phần `visual_style_prompt` của kênh
-# trong prompt local — **mới (2026-08-22, đợt 3)**, sửa bug thật phát hiện khi người dùng
-# test: shot có `visual_fx` NGẮN (VD "Cô gái chăn trâu", 17 ký tự) — thiết kế CŨ tính
-# "budget CÒN LẠI sau content" rồi lấp ĐẦY chỗ đó bằng `visual_style_prompt` (đoạn văn dài
-# hàng trăm ký tự mô tả tông màu/chất liệu) → nội dung cảnh chỉ chiếm ~5% tổng prompt, bị
-# style kênh + khối từ khoá cố định (§ dưới) nhấn chìm hoàn toàn — SDXL ra ẢNH ĐÚNG STYLE
-# nhưng SAI HẲN chủ thể (xác nhận thật: prompt cũ cho shot này chỉ có 17/320 ký tự là nội
-# dung cảnh, ảnh ra không có "cô gái"/"trâu" nào). Trần CỐ ĐỊNH nhỏ ở đây đảm bảo phần
-# style kênh KHÔNG BAO GIỜ phình to hơn mức cần thiết dù content ngắn tới đâu.
-_LOCAL_SDXL_BRAND_STYLE_MAX_CHARS = 90
-# Khối style CỐ ĐỊNH chèn prompt local — **mới (2026-08-22)**, theo tài liệu đề xuất
-# `StudioFlow_Style_Checkpoint_Proposal.md`: art direction kênh "Người kể sử" đòi hỏi
-# painterly/sơn dầu/ink wash (KHÔNG photoreal, KHÔNG 3D nhựa hoá) — SDXL fine-tune/LoRA
-# painterly (đợt 2) vẫn cần từ khoá style rõ ràng đẩy đúng hướng, không chỉ dựa vào
-# checkpoint/LoRA. HẰNG SỐ dùng chung mọi kênh (đơn giản trước — CLAUDE.md "không over-
-# engineer"), CHƯA đưa vào BrandProfile theo từng kênh — cân nhắc sau nếu có kênh khác cần
-# style khác hẳn (VD kênh tài chính/tâm lý học đã có trong seed demo, không cần "sơn dầu").
-#
-# **Đổi VỊ TRÍ (đợt 3, 2026-08-22)** — TRƯỚC đứng ĐẦU prompt (theo đúng đề xuất "chèn cố
-# định ở đầu"), GIỜ đứng SAU nội dung cảnh (`visual_fx`) — người dùng báo thật "style ảnh
-# đúng nhưng nội dung ảnh không giống mô tả text": đặt khối style (bao gồm cả khối cố định
-# này lẫn `visual_style_prompt` của kênh) TRƯỚC nội dung cảnh khiến chủ thể bị đẩy xuống vị
-# trí sau, loãng tín hiệu — đúng NGƯỢC với hướng dẫn gốc ở tài liệu đề xuất ĐẦU TIÊN
-# (`StudioFlow_ImageVideo_Improvement.md`): "đưa yếu tố bố cục quan trọng nhất lên đầu câu,
-# cắt/nén mô tả style PHỤ". Chủ thể (visual_fx) mới là phần "quan trọng nhất", không phải
-# khối style cố định — đổi lại đúng thứ tự: NỘI DUNG trước, STYLE sau.
-_LOCAL_SDXL_STYLE_PREFIX = "oil painting, hand-painted, ink wash, muted warm tones, aged paper texture, cinematic concept art"
-# `[Visual]: ...` là tag DUY NHẤT mang nội dung CẢNH thật (xác nhận đọc thật pack.json
-# nhiều project — mọi shot đều bắt đầu `visual_fx` bằng đúng tag này, đôi khi lặp 2 lần
-# cho 2 nhịp camera trong cùng 1 shot) — cần TÁCH RIÊNG (unwrap: bỏ nhãn, GIỮ nội dung),
-# khác mọi tag khác (`[Title Card]`, `[Graphic]`, `[Text Overlay]`, `[Quote Text]`,
-# `[Insight Box]`, `[Animation]`, `[Graphic Overlays]`...) — toàn bộ các tag CÒN LẠI quan
-# sát được đều mang chữ/số cần "vẽ" lên ảnh (title card, trích dẫn, số liệu...), xoá HẲN
-# (tag + nội dung). Regex `_OTHER_BRACKET_TAG_RE` dùng negative lookahead để CHỈ xoá tag
-# khác "Visual", chạy TRƯỚC `_VISUAL_TAG_RE` (chỉ xoá đúng nhãn `[Visual]:`, giữ câu sau).
-_OTHER_BRACKET_TAG_RE = re.compile(r"\[(?!Visual\])[^\]]+\]:[^\[]*", re.IGNORECASE)
-_VISUAL_TAG_RE = re.compile(r"\[Visual\]:\s*", re.IGNORECASE)
-
-
-def _strip_text_overlay_tags(text: str) -> str:
-    """Bỏ các đoạn `[Tag]: nội dung` chỉ định chữ/graphic chèn lên ảnh khỏi `visual_fx`,
-    GIỮ NGUYÊN nội dung mô tả cảnh ở tag `[Visual]:` — **mới (2026-08-22)**, phát hiện
-    lúc điều tra "ảnh model local xấu hơn hẳn Gemini": `visual_fx` do LLM sinh LUÔN chứa
-    chỉ dẫn chèn CHỮ lên ảnh (`[Title Card]: TRẬN RẠCH GẦM...`, `[Text Overlay]: ...`,
-    `[Graphic]: Dòng chữ nổi lên...`) — xác nhận thật qua `pack.json` nhiều project của
-    người dùng (grep toàn bộ shot: tag nào cũng có `[Visual]:` + đúng 1 trong các tag
-    chữ/graphic kể trên). `app/render/assembly.py` KHÔNG có bước `drawtext`/overlay chữ
-    riêng nào, nên các tag này đang trông cậy HOÀN TOÀN vào chính model sinh ảnh để "vẽ"
-    chữ tiếng Việt có dấu thành pixel — SDXL (mọi checkpoint, kể cả fine-tune tốt) render
-    chữ RẤT kém, đặc biệt chữ có dấu, gần như luôn ra ký tự vô nghĩa/méo mó — khác biệt
-    lớn hơn hẳn so với Gemini (xử lý việc này khá hơn nhiều, dù không hoàn hảo). Ngoài ra
-    `_NEGATIVE_PROMPT` (`image_comfy_sdxl.py`) đã có sẵn từ khoá "text" — 2 chiều
-    positive/negative đang mâu thuẫn nhau ngay trong cùng 1 request.
-
-    CHỈ áp dụng cho local SDXL (xem `for_local_sdxl` bên dưới) — KHÔNG đổi hành vi cloud
-    (Gemini/OpenAI/Flux xử lý chữ khá hơn, và đây không phải phạm vi yêu cầu lần này)."""
-    text = re.sub(_OTHER_BRACKET_TAG_RE, "", text)
-    text = re.sub(_VISUAL_TAG_RE, "", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _build_visual_prompt(shot: dict, brand: dict, *, is_video: bool, for_local_sdxl: bool = False) -> str:
+def _build_visual_prompt(shot: dict, brand: dict, *, is_video: bool, character_reference_desc: str = "") -> str:
     """Ghép prompt THẬT gửi cho provider ảnh/video — trước đây chỉ gửi nguyên văn
     `shot.visual_fx` do LLM tự diễn giải lúc sinh script, KHÔNG kèm style kênh
     (`brand.visual_style_prompt`) dù đó là ngữ cảnh có sẵn, khiến visual giữa các shot
@@ -685,40 +629,35 @@ def _build_visual_prompt(shot: dict, brand: dict, *, is_video: bool, for_local_s
     IMPLEMENTATION_REPORT.md mục 20) thay vì chỉ dùng làm gợi ý mood như ý định ban đầu.
     Video (chuyển động theo thời gian) hợp lý hơn để giữ làm gợi ý nhịp điệu/không khí.
 
-    `for_local_sdxl` — **mới (2026-08-22)**, theo yêu cầu người dùng "cải thiện chất
-    lượng ảnh model local": SDXL (local, qua ComfyUI) khác hẳn Gemini/OpenAI/Flux ở 2
-    điểm cần prompt riêng — (1) render chữ rất kém (xem `_strip_text_overlay_tags` ở
-    trên), (2) CLIP text encoder giới hạn ~77 token, câu văn tự nhiên dài dễ bị cắt cụt
-    giữa chừng. Khi `True`: bỏ tag `[Title Card]`/... khỏi `visual_fx`, nối các phần bằng
-    ", " thay vì ". " (gần văn phong prompt SD hơn câu văn đầy đủ).
-
-    **Thứ tự (đổi lại đợt 3, 2026-08-22 — xem bug thật ở docstring
-    `_LOCAL_SDXL_BRAND_STYLE_MAX_CHARS`)**: NỘI DUNG CẢNH (`visual_fx`, đã lọc tag) LUÔN
-    đứng ĐẦU — đây là phần model cần vẽ ĐÚNG nhất, không được để bất kỳ khối style nào che
-    lấp. Theo sau là `_LOCAL_SDXL_STYLE_PREFIX` (từ khoá art direction cố định — đợt 2) rồi
-    `visual_style_prompt` của kênh, CẮT về tối đa `_LOCAL_SDXL_BRAND_STYLE_MAX_CHARS` ký
-    tự CỐ ĐỊNH (không phụ thuộc content dài/ngắn — tránh phần style "phình to" lấp chỗ
-    trống khi content ngắn, đúng bug đã sửa). `visual_fx` KHÔNG bị cắt bởi bất kỳ giới hạn
-    nào ở đây — tin tưởng LLM viết độ dài hợp lý, tầng này chỉ chắc chắn phần STYLE (phụ)
-    không bao giờ lấn át. Chỉ dẫn "không vẽ chữ" (đợt 1) đã CHUYỂN sang đúng chỗ — negative
-    prompt thật ở `image_comfy_sdxl.py::_NEGATIVE_PROMPT` (đợt 2) — không còn ở hàm này.
-
-    KHÔNG tái cấu trúc "chủ thể-hành động-vị trí" lên đầu câu bằng thuật toán — `visual_fx`
-    là văn xuôi tự do do LLM viết, tách lại đúng ngữ pháp cần thêm 1 lệnh gọi LLM riêng
-    (tốn chi phí/độ trễ mỗi shot, đi ngược tinh thần "pipeline local miễn phí").
+    **Đợt dọn dẹp (2026-09-24)** — xoá tham số `for_local_sdxl`/`lora_trigger_words`
+    (SDXL/Flux/Wan/LocalAI — 5 provider local cũ dùng 2 tham số này đều đã xoá hẳn, xem
+    IMPLEMENTATION_REPORT.md). Giờ CHỈ còn ĐÚNG 1 nhánh hành vi (câu văn tự nhiên, không
+    cắt/không tách tag chèn chữ) cho MỌI provider còn lại (`local_qwen` + cloud) — cả 2
+    hiểu câu văn tự nhiên tốt (LLM-based text encoder), không cần ép về từ khoá rời rạc
+    kiểu CLIP như SDXL trước đây.
 
     `cultural_lock_positive` — **mới (2026-08-23)**, theo yêu cầu người dùng chống thiên
     lệch văn hoá Nhật/Hàn của checkpoint/LoRA "Á Đông" (đa số train từ dữ liệu Nhật/Trung/
     Hàn): từ khoá Việt Nam cụ thể (trang phục theo triều đại, kiến trúc, hoạ tiết), nối
     NGAY SAU nội dung cảnh — ÁP DỤNG CHO MỌI provider (cloud lẫn local), khác
-    `visual_style_prompt`/`_LOCAL_SDXL_STYLE_PREFIX` (chỉ về phong cách thị giác, không
-    phải vấn đề ĐÚNG/SAI nội dung văn hoá)."""
+    `visual_style_prompt` (chỉ về phong cách thị giác, không phải vấn đề ĐÚNG/SAI nội
+    dung văn hoá).
+
+    `character_reference_desc` — **mới (2026-09-09, mục 127)**, theo yêu cầu người dùng:
+    mô tả ngoại hình nhân vật (tự sinh qua VisionProvider từ ảnh tham khảo người dùng
+    upload — xem `RenderState.character_reference`, `app/routers/render.py::
+    _caption_character_reference`) — CHÍNH LÀ giải pháp "mô tả bằng chữ" đã verify hiệu
+    quả THẬT qua GPU ở mục 126 (giữ đúng thiết kế nhân vật ở 2 hành động hoàn toàn khác
+    nhau), giờ TỰ ĐỘNG HOÁ thay vì gõ tay vào `visual_style_prompt`. Nối NGAY SAU
+    `visual_fx` (nội dung cảnh) — ĐỨNG TRƯỚC `cultural_lock_positive` vì đây là "AI nhân
+    vật nào đang xuất hiện trong cảnh", gần nghĩa "nội dung" hơn "phong cách" (khác
+    `visual_style_prompt`, luôn đứng cuối). CHỈ áp dụng cho ảnh (`is_video=False`)."""
     parts = []
     visual_fx = (shot.get("visual_fx") or "").strip()
-    if for_local_sdxl:
-        visual_fx = _strip_text_overlay_tags(visual_fx)
     if visual_fx:
         parts.append(visual_fx)
+    if character_reference_desc:
+        parts.append(f"The main character in this scene: {character_reference_desc}")
     if is_video:
         audio_sfx = (shot.get("audio_sfx") or "").strip()
         if audio_sfx:
@@ -726,108 +665,10 @@ def _build_visual_prompt(shot: dict, brand: dict, *, is_video: bool, for_local_s
     cultural_lock = (brand.get("cultural_lock_positive") or "").strip()
     if cultural_lock:
         parts.append(cultural_lock)
-    if for_local_sdxl:
-        parts.append(_LOCAL_SDXL_STYLE_PREFIX)
     style = (brand.get("visual_style_prompt") or "").strip()
     if style:
-        if for_local_sdxl:
-            style = style[:_LOCAL_SDXL_BRAND_STYLE_MAX_CHARS].strip()
-            if style:
-                parts.append(style)
-        else:
-            parts.append(f"Style hình ảnh kênh: {style}")
-    if for_local_sdxl:
-        return ", ".join(parts)
+        parts.append(f"Style hình ảnh kênh: {style}")
     return ". ".join(parts)
-
-
-def _build_video_motion_prompt(shot: dict, brand: dict) -> str:
-    """Prompt CHUYỂN ĐỘNG riêng cho Wan2.2 (`local_wan`) — **mới (2026-08-23)**, theo
-    `StudioFlow_Video_Improvement_Plan.md`: khác `_build_visual_prompt(is_video=True)`
-    (dùng cho provider video cloud — Sora/Veo/Flux, KHÔNG đổi) ở 2 điểm — (1) lọc tag
-    `[Title Card]`/... khỏi `visual_fx` (CÙNG lý do `for_local_sdxl` — Wan cũng là
-    model local, render chữ kém, xem `_strip_text_overlay_tags`); (2) thêm
-    `brand.motion_tone` làm ràng buộc chuyển động RIÊNG (khác `visual_style_prompt` —
-    đó là phong cách thị giác TĨNH, không nói gì về tốc độ/kiểu chuyển động).
-
-    Nối bằng ". " (câu văn đầy đủ), KHÔNG theo kiểu từ khoá phẩy-ngăn-cách của
-    `for_local_sdxl` — Wan dùng text encoder UMT5 XXL (kiểu T5, hiểu câu văn tự nhiên
-    tốt hơn hẳn CLIP của SDXL), giữ nguyên văn phong câu để tận dụng đúng khả năng
-    model thay vì ép về "từ khoá rời rạc" không cần thiết. Content (`visual_fx`) LUÔN
-    đứng đầu — cùng nguyên tắc content-first đã sửa cho ảnh (mục 66 IMPLEMENTATION_
-    REPORT.md), tránh ràng buộc chuyển động che lấp nội dung cảnh.
-
-    `cultural_lock_positive` (2026-08-23) — nối SAU content, TRƯỚC motion_tone — cùng lý
-    do đã thêm ở `_build_visual_prompt` (Wan cũng học từ dữ liệu Á Đông thiên lệch Nhật/
-    Hàn giống hệt SDXL, cần từ khoá Việt cụ thể như nhau)."""
-    parts = []
-    visual_fx = _strip_text_overlay_tags((shot.get("visual_fx") or "").strip())
-    if visual_fx:
-        parts.append(visual_fx)
-    cultural_lock = (brand.get("cultural_lock_positive") or "").strip()
-    if cultural_lock:
-        parts.append(cultural_lock)
-    motion_tone = (brand.get("motion_tone") or "").strip()
-    if motion_tone:
-        parts.append(motion_tone)
-    return ". ".join(parts)
-
-
-def _local_sdxl_kwargs(brand: dict) -> dict:
-    """Kwarg RIÊNG cho provider `local_sdxl` — **mới (2026-08-23)**, tách thành hàm dùng
-    chung vì cần ở CẢ `_try_generate_wan_anchor_image` (ảnh anchor cho video) LẪN nhánh
-    ảnh thường trong `generate_visual_asset`, tránh lặp lại logic đọc `brand` 2 nơi.
-    `loras` — **đổi từ 1 LoRA đơn sang STACK nhiều LoRA** (`BrandProfile.style_loras`,
-    xem docstring field đó) — theo đề xuất người dùng chống thiên lệch văn hoá Nhật/Hàn
-    (1 LoRA "chất liệu" + 1 LoRA "hướng văn hoá" không mâu thuẫn nhau). `extra_negative`
-    — `cultural_lock_negative` (mặc định đã có sẵn cụm loại trừ Nhật/Hàn), nối vào
-    negative prompt THẬT gửi ComfyUI (`image_comfy_sdxl.py::_NEGATIVE_PROMPT`).
-    `reference_images` — đọc bytes từng ảnh trong `BrandProfile.style_reference_paths`
-    (IPAdapter — mới 2026-08-23), BỎ QUA ảnh nào không đọc được (file bị xoá tay ngoài
-    app, hoặc lỗi đĩa) thay vì chặn hẳn việc sinh ảnh — đây là lớp TỐI ƯU PHONG CÁCH,
-    không phải bắt buộc."""
-    loras = [{"name": entry.get("name") or "", "strength": entry.get("strength") or 0.8} for entry in (brand.get("style_loras") or []) if entry.get("name")]
-    reference_images = []
-    for path_str in brand.get("style_reference_paths") or []:
-        try:
-            reference_images.append(Path(path_str).read_bytes())
-        except OSError:
-            continue
-    return {
-        "loras": loras,
-        "extra_negative": (brand.get("cultural_lock_negative") or "").strip(),
-        "reference_images": reference_images,
-        "style_reference_weight": brand.get("style_reference_weight") or 0.6,
-    }
-
-
-def _try_generate_wan_anchor_image(db: Session, pdir, shot: dict, brand: dict, *, seed: int, aspect_ratio: str) -> bytes | None:
-    """Sinh ẢNH ANCHOR bằng ĐÚNG pipeline SDXL đã tune (checkpoint/LoRA/prompt) cho
-    ĐÚNG shot này — dùng làm khung hình đầu (`start_image`) cho Wan2.2, thay vì để Wan
-    tự "tưởng tượng" cả cảnh từ noise thuần (T2V thuần, hành vi cũ) — **mới
-    (2026-08-23)**, theo `StudioFlow_Video_Improvement_Plan.md` §3.1. KHÁC hẳn Tier 2
-    cũ (mục ~18, đã tắt): đây là ảnh sinh RIÊNG cho từng shot (đúng nội dung/seed của
-    NÓ), không phải 1 ảnh thumbnail dùng chung cho mọi shot trong project — tránh đúng
-    lỗi lệch nội dung đã gặp trước đây.
-
-    BEST-EFFORT: trả `None` (không raise) nếu chưa cấu hình provider ảnh `local_sdxl`,
-    hoặc bước sinh ảnh lỗi bất kỳ — đây là bước TỐI ƯU CHẤT LƯỢNG, không được phép chặn
-    việc sinh video (vẫn rơi về T2V thuần y hệt hành vi trước khi có tính năng này).
-    Không gọi `record_asset_usage` — nội bộ, cost=$0 (local), tránh rác audit log."""
-    try:
-        image_providers = get_image_chain(db)
-    except NoProviderConfiguredError:
-        return None
-    sdxl = next((p for p in image_providers if p.provider_name in _LOCAL_IMAGE_PROVIDER_NAMES), None)
-    if sdxl is None:
-        return None
-    try:
-        anchor_prompt = _build_visual_prompt(shot, brand, is_video=False, for_local_sdxl=True)
-        data = sdxl.generate(anchor_prompt, seed=seed, aspect_ratio=aspect_ratio, **_local_sdxl_kwargs(brand))
-        write_bytes(pdir / "assets" / f"{shot['shot_id']}_anchor.png", data)
-        return data
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _deterministic_seed(project_id: str, shot_id: str) -> int:
@@ -839,14 +680,21 @@ def _deterministic_seed(project_id: str, shot_id: str) -> int:
     return int(digest[:8], 16) % (2**31 - 1)
 
 
-def _read_voice_clone_ref(brand: dict) -> bytes | None:
-    """Đọc bytes mẫu giọng thương hiệu (`BrandProfile.voice_clone_ref_path`, upload qua
-    `POST /channels/{id}/brandprofile/voice-sample/upload`) để truyền làm
-    `reference_audio` cho voice cloning (chỉ OmniVoice dùng tới, provider khác nhận rồi
-    bỏ qua — xem `TTSProvider.synthesize()`, app/providers/base.py). Trả None nếu chưa
-    cấu hình hoặc file bị xoá — không nên chặn sinh giọng đọc vì thiếu mẫu, coi như
-    chưa có, quay lại giọng mặc định của provider."""
-    path = brand.get("voice_clone_ref_path")
+def _read_voice_clone_ref_for_lang(brand: dict, lang: str) -> bytes | None:
+    """Đọc bytes mẫu giọng CHO 1 NGÔN NGỮ CỤ THỂ (`BrandProfile.voice_clone_ref_paths
+    [lang]`, giọng đọc đa ngôn ngữ — mới 2026-09-04) để truyền làm `reference_audio` cho
+    voice cloning (chỉ OmniVoice dùng tới, provider khác nhận rồi bỏ qua — xem
+    `TTSProvider.synthesize()`, app/providers/base.py). Trả None nếu chưa cấu hình hoặc
+    file bị xoá — không nên chặn sinh giọng đọc vì thiếu mẫu, coi như chưa có, quay lại
+    giọng mặc định của provider.
+
+    **Tương thích ngược**: dữ liệu CŨ chỉ có `voice_clone_ref_path` đơn (trước khi có
+    khái niệm đa ngôn ngữ) — coi mẫu đó là của `primary_language` khi
+    `voice_clone_ref_paths` chưa có entry riêng cho `lang` đang hỏi."""
+    paths = brand.get("voice_clone_ref_paths") or {}
+    path = paths.get(lang)
+    if not path and lang == (brand.get("primary_language") or "vi"):
+        path = brand.get("voice_clone_ref_path")
     if not path:
         return None
     p = Path(path)
@@ -856,6 +704,11 @@ def _read_voice_clone_ref(brand: dict) -> bytes | None:
         return p.read_bytes()
     except OSError:
         return None
+
+
+def _read_voice_clone_ref(brand: dict) -> bytes | None:
+    """Mẫu giọng của ngôn ngữ CHÍNH kênh — xem `_read_voice_clone_ref_for_lang`."""
+    return _read_voice_clone_ref_for_lang(brand, brand.get("primary_language") or "vi")
 
 
 def _free_llm_vram_if_local(db: Session) -> None:
@@ -914,12 +767,10 @@ def generate_visual_asset(db: Session, p: Project, pdir, shot: dict, beat: dict,
     # dung riêng từng shot bằng bối cảnh chung của thumbnail — không có điểm cân bằng ổn
     # định. Người dùng chọn quay lại Tier 1 (chỉ nhất quán qua text — `_build_visual_prompt`
     # ở trên đã gộp visual_style_prompt) — an toàn hơn, nội dung shot luôn đúng mô tả
-    # riêng. `reference_image` (biến này) vẫn dùng CHO ẢNH và CHO VIDEO CLOUD (Sora/
-    # Veo/Flux — ngoài phạm vi cải tiến 2026-08-23), giữ `None`. RIÊNG `local_wan`
-    # (video local) đã có anchor MỚI (2026-08-23, `_try_generate_wan_anchor_image`) —
-    # khác Tier 2 cũ ở chỗ ảnh anchor sinh RIÊNG cho từng shot (không dùng chung 1
-    # thumbnail cho cả project) nên không gặp lại lỗi lệch nội dung — xem biến
-    # `wan_reference_image` tính riêng trong vòng lặp provider bên dưới.
+    # riêng. `reference_image` vẫn dùng cho MỌI provider ảnh/video (Sora/Veo/Flux), giữ
+    # `None`. Cơ chế anchor ảnh RIÊNG cho video local (Wan, `_try_generate_wan_anchor_
+    # image`) đã xoá hẳn cùng lúc xoá `local_wan` (đợt dọn dẹp 2026-09-24, xem
+    # IMPLEMENTATION_REPORT.md) — không còn provider video local nào cần tới.
     reference_image = None
     # Short-form (9:16) — mới (2026-08-21), theo yêu cầu người dùng: `Project.format`
     # quyết định tỷ lệ khung sinh ảnh/video — xem app/providers/base.py::AspectRatio.
@@ -935,53 +786,21 @@ def generate_visual_asset(db: Session, p: Project, pdir, shot: dict, beat: dict,
 
     errors = []
     for provider in providers:
-        # `for_local_sdxl` — mới (2026-08-22), theo yêu cầu người dùng: 1 chain có thể
-        # vừa có local_sdxl (default) vừa có provider cloud (fallback), MỖI provider cần
-        # đúng biến thể prompt của nó — không còn tính 1 lần dùng chung như trước (xem
-        # docstring `_build_visual_prompt`).
-        #
-        # `local_wan` — **đổi (2026-08-23)**, Image-to-Video (xem `_build_video_motion_
-        # prompt`/`_try_generate_wan_anchor_image`): prompt + ảnh mồi RIÊNG cho Wan,
-        # khác hẳn nhánh `_build_visual_prompt` dùng chung cho provider video cloud.
-        if is_video and provider.provider_name in _LOCAL_VIDEO_PROVIDER_NAMES:
-            wan_reference_image = _try_generate_wan_anchor_image(db, pdir, shot, brand, seed=seed, aspect_ratio=aspect_ratio)
-            prompt = _build_video_motion_prompt(shot, brand)
-        else:
-            wan_reference_image = None
-            prompt = _build_visual_prompt(shot, brand, is_video=is_video, for_local_sdxl=(provider.provider_name in _LOCAL_IMAGE_PROVIDER_NAMES))
+        # `character_reference_desc` — mới (2026-09-09, mục 127): CHỈ áp dụng cho ảnh
+        # (is_video=False, xem docstring _build_visual_prompt) — provider video chưa
+        # cần, ngoài phạm vi mục 127.
+        character_reference_desc = "" if is_video else (state.character_reference.description if (state and state.character_reference) else "")
+        prompt = _build_visual_prompt(shot, brand, is_video=is_video, character_reference_desc=character_reference_desc)
         try:
             if is_video:
                 seconds = _video_duration_sec(beat)
-                # gpu_lock chỉ cần cho provider GPU LOCAL (local_wan qua ComfyUI) —
-                # Sora/Veo chạy trên hạ tầng nhà cung cấp, không tranh VRAM máy này,
-                # không nên bị chặn chờ bởi LLM/Image local đang chạy (xem gpu_lock.py).
-                # Giữ khoá suốt cả submit + poll (không chỉ start_generation) vì đây là
-                # cả quá trình GPU máy này bận cho tới khi ComfyUI trả kết quả.
-                if provider.provider_name in _LOCAL_VIDEO_PROVIDER_NAMES:
-                    # `extra_negative` (cultural_lock_negative) — cùng lý do đã thêm cho
-                    # local_sdxl (`_local_sdxl_kwargs`): Wan cũng học từ dữ liệu Á Đông
-                    # thiên lệch Nhật/Hàn, cần loại trừ y hệt qua negative prompt THẬT.
-                    with gpu_lock:
-                        job_id = provider.start_generation(
-                            prompt, seconds=seconds, seed=seed, reference_image=wan_reference_image, aspect_ratio=aspect_ratio,
-                            extra_negative=(brand.get("cultural_lock_negative") or "").strip(),
-                        )
-                        data = _poll_video_until_done(provider, job_id, p.id)
-                else:
-                    job_id = provider.start_generation(prompt, seconds=seconds, seed=seed, reference_image=reference_image, aspect_ratio=aspect_ratio)
-                    data = _poll_video_until_done(provider, job_id, p.id)
+                job_id = provider.start_generation(prompt, seconds=seconds, seed=seed, reference_image=reference_image, aspect_ratio=aspect_ratio)
+                data = _poll_video_until_done(provider, job_id, p.id)
                 ext = "mp4"
                 cost = _VIDEO_COST_FN.get(provider.provider_name, estimate_sora_video_cost)(seconds, getattr(provider, "model_name", ""))
                 unit_label = f"1 video (~{seconds}s)"
             else:
-                # `loras`/`extra_negative` — **mới (2026-08-22, đổi 2026-08-23)** — CHỈ
-                # truyền cho đúng `local_sdxl` (BrandProfile.style_loras + cultural_lock_
-                # negative), không gọi chung cho mọi provider — xem docstring
-                # `ComfySDXLImageProvider.generate()` (app/providers/image_comfy_sdxl.py)
-                # lý do KHÔNG khai báo tham số này trên `ImageProvider` interface chung,
-                # và `_local_sdxl_kwargs()` ở trên cho lý do gộp logic dùng chung.
-                extra_kwargs = _local_sdxl_kwargs(brand) if provider.provider_name in _LOCAL_IMAGE_PROVIDER_NAMES else {}
-                data = provider.generate(prompt, seed=seed, reference_image=reference_image, aspect_ratio=aspect_ratio, **extra_kwargs)
+                data = provider.generate(prompt, seed=seed, reference_image=reference_image, aspect_ratio=aspect_ratio)
                 ext = "png"
                 cost = _IMAGE_COST_FN.get(provider.provider_name, estimate_openai_image_cost)(1, getattr(provider, "model_name", ""))
                 unit_label = "1 ảnh"
@@ -1071,7 +890,151 @@ def generate_narration_asset(db: Session, p: Project, pdir, beat: dict, status: 
     status.narration_started_at = None
 
 
-def build_narration_download(project_id: str) -> Path:
+def generate_narration_translation(db: Session, p: Project, pdir, beat: dict, status: ShotRenderStatus, lang: str, state: RenderState | None = None) -> None:
+    """Sinh 1 clip giọng đọc cho NGÔN NGỮ KHÔNG PHẢI ngôn ngữ chính của kênh — giọng đọc
+    đa ngôn ngữ cho thị trường nước ngoài (**mới 2026-09-04**). Văn bản lấy từ
+    `beat.audio_by_lang[lang]` (đã dịch sẵn, nhập từ file import — xem
+    `app/pipeline/script_import.py`), KHÔNG PHẢI `beat.audio` (đó luôn là ngôn ngữ
+    CHÍNH — xem `generate_narration_asset` ở trên, KHÔNG đổi). Ghi trạng thái vào
+    `status.narration_translations[lang]` — tách biệt hoàn toàn khỏi field `narration_*`
+    gốc (ngôn ngữ chính vẫn nuôi render/timestamp/SRT y nguyên, 0 rủi ro hồi quy).
+
+    Cùng cơ chế fallback chain (`get_tts_chain`) + `reference_audio` (mẫu giọng RIÊNG
+    của `lang`, xem `_read_voice_clone_ref_for_lang`) như `generate_narration_asset()`.
+    Bỏ qua nếu đã `ready`, hoặc coi là "xong" (không lỗi) nếu chưa có văn bản dịch cho
+    ngôn ngữ này — người dùng có thể dịch dần từng ngôn ngữ, không bắt buộc đủ 1 lượt."""
+    entry = status.narration_translations.get(lang)
+    if entry is None:
+        entry = TranslatedNarrationStatus()
+        status.narration_translations[lang] = entry
+    if entry.narration_status == "ready":
+        return
+    text = ((beat.get("audio_by_lang") or {}).get(lang) or "").strip()
+    if not text:
+        entry.narration_status = "ready"  # chưa có văn bản dịch ngôn ngữ này — bỏ qua, không phải lỗi
+        if state is not None:
+            save_render_state(pdir, state)
+        return
+    entry.narration_status = "generating"
+    entry.narration_error = None
+    if state is not None:
+        save_render_state(pdir, state)
+    brand = _load_brand_profile(p.channel_id)
+    reference_audio = _read_voice_clone_ref_for_lang(brand, lang)
+    try:
+        providers = get_tts_chain(db)
+    except NoProviderConfiguredError as e:
+        entry.narration_status = "error"
+        entry.narration_error = str(e)
+        if state is not None:
+            save_render_state(pdir, state)
+        return
+
+    # Ưu tiên OmniVoice khi CÓ mẫu giọng clone cho ngôn ngữ này — provider DUY NHẤT
+    # thật sự dùng `reference_audio` (zero-shot voice cloning, xem app/providers/
+    # tts_omnivoice.py); provider khác trong chain nhận `reference_audio` rồi ÂM THẦM
+    # bỏ qua (TTSProvider.synthesize() base.py) — nếu OmniVoice không phải provider mặc
+    # định/fallback đã cấu hình ở Cài đặt, mẫu giọng vừa upload sẽ KHÔNG có tác dụng gì.
+    # Đưa OmniVoice (nếu có trong chain) lên ĐẦU chỉ khi có mẫu giọng thật — không đụng
+    # thứ tự chain khi KHÔNG có mẫu (giữ đúng lựa chọn provider mặc định của người dùng).
+    if reference_audio is not None:
+        providers = sorted(providers, key=lambda pr: 0 if pr.provider_name == "omnivoice" else 1)
+
+    emotion = beat.get("direction", "")
+    errors = []
+    for provider in providers:
+        try:
+            data = provider.synthesize(text, emotion=emotion, reference_audio=reference_audio)
+            ext = _TTS_EXT.get(provider.provider_name, "mp3")
+            path = pdir / "assets" / f"{status.shot_id}_{lang}.{ext}"
+            write_bytes(path, data)
+            if state is not None and state.narration_speed != 1.0:
+                _apply_narration_speed(path, state.narration_speed)
+            entry.narration_asset_path = str(path)
+            entry.narration_provider = provider.provider_name
+            entry.narration_duration_sec = _probe_audio_duration_sec(path)
+            entry.narration_status = "ready"
+            entry.narration_error = None
+            entry.narration_updated_at = vn_isoformat(datetime.now(timezone.utc))
+            cost = _TTS_COST_FN.get(provider.provider_name, estimate_elevenlabs_tts_cost)(len(text), getattr(provider, "model_name", ""))
+            record_asset_usage(db, p.channel_id, p.title, provider=provider.provider_name, stage=f"narration_{lang}", unit_label=f"{len(text)} ký tự", cost=cost)
+            if state is not None:
+                save_render_state(pdir, state)
+            return
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{provider.provider_name}: {e}")
+
+    entry.narration_status = "error"
+    entry.narration_error = "; ".join(errors)
+    if state is not None:
+        save_render_state(pdir, state)
+
+
+def run_narration_translation_batch(project_id: str, lang: str) -> None:
+    """Sinh giọng đọc cho 1 NGÔN NGỮ (khác ngôn ngữ chính) cho MỌI shot có văn bản dịch
+    sẵn — nút "Sinh giọng đọc" theo từng ngôn ngữ đang kích hoạt ở Script Studio (2026-
+    09-04). Cùng nguyên tắc `run_asset_generation`: lỗi 1 shot KHÔNG dừng cả batch, kiểm
+    tra cờ huỷ trước mỗi shot, `_mark_in_progress`/`_mark_done` chống chạy chồng."""
+    _mark_in_progress(project_id)
+    db = SessionLocal()
+    try:
+        p = db.query(Project).filter(Project.id == project_id).first()
+        if not p:
+            return
+        pdir = project_dir(p.channel_id, p.id)
+        pack = read_json(pdir / "pack.json") or {}
+        shots = pack.get("shots", [])
+
+        state = load_render_state(pdir, project_id)
+        by_id = _ensure_shot_entries(state, shots)
+        save_render_state(pdir, state)
+
+        for shot in shots:
+            if is_cancel_requested(project_id):
+                break
+            status = by_id[shot["shot_id"]]
+            beat = _find_beat(pack, shot)
+            generate_narration_translation(db, p, pdir, beat, status, lang, state)
+            save_render_state(pdir, state)
+
+        db.commit()
+    finally:
+        _clear_cancel(project_id)
+        _mark_done(project_id)
+        db.close()
+
+
+def regenerate_single_narration_translation(project_id: str, shot_id: str, lang: str) -> None:
+    """Sinh lại giọng đọc 1 NGÔN NGỮ cho ĐÚNG 1 shot — dùng cho BackgroundTasks trong
+    app/routers/render.py. Cùng pattern `regenerate_single_visual`/`regenerate_single_
+    narration` (tự mở session riêng — session request-scoped đã đóng trước khi
+    BackgroundTasks chạy)."""
+    _mark_in_progress(project_id)
+    db = SessionLocal()
+    try:
+        p = db.query(Project).filter(Project.id == project_id).first()
+        if not p:
+            return
+        pdir = project_dir(p.channel_id, p.id)
+        pack = read_json(pdir / "pack.json") or {}
+        shot = next((s for s in pack.get("shots", []) if s["shot_id"] == shot_id), None)
+        if not shot:
+            return
+        beat = _find_beat(pack, shot)
+
+        state = load_render_state(pdir, project_id)
+        by_id = _ensure_shot_entries(state, pack.get("shots", []))
+        status = by_id[shot_id]
+        generate_narration_translation(db, p, pdir, beat, status, lang, state)
+        save_render_state(pdir, state)
+        db.commit()
+    finally:
+        _clear_cancel(project_id)
+        _mark_done(project_id)
+        db.close()
+
+
+def build_narration_download(project_id: str, lang: str | None = None) -> Path:
     """Ghép narration TỪNG shot (đã sinh, `narration_status=="ready"`) thành 1 file
     audio DUY NHẤT cho toàn bộ script, theo đúng thứ tự timestamp — nút "Tải giọng đọc
     toàn bộ script" ở Script Studio (mục 30 IMPLEMENTATION_REPORT.md, 2026-08-16).
@@ -1084,7 +1047,13 @@ def build_narration_download(project_id: str) -> Path:
     gốc — an toàn với danh sách provider hỗn hợp.
 
     Raise `RuntimeError` (thông điệp tiếng Việt, hiển thị thẳng cho người dùng) nếu
-    thiếu shot/ffmpeg/còn block chưa sinh xong."""
+    thiếu shot/ffmpeg/còn block chưa sinh xong.
+
+    `lang` — **mới (2026-09-04)**, giọng đọc đa ngôn ngữ: `None`/ngôn ngữ chính giữ
+    NGUYÊN hành vi cũ. Ngôn ngữ khác ghép từ `ShotRenderStatus.narration_translations
+    [lang]` — shot CHƯA có văn bản dịch cho ngôn ngữ đó bị BỎ QUA (không tính "thiếu",
+    khác ngôn ngữ chính) vì rollout từng ngôn ngữ dần theo tiến độ dự án là bình thường;
+    chỉ chặn khi shot ĐÃ có văn bản nhưng chưa sinh xong giọng đọc."""
     db = SessionLocal()
     try:
         p = db.query(Project).filter(Project.id == project_id).first()
@@ -1095,6 +1064,9 @@ def build_narration_download(project_id: str) -> Path:
         shots = sorted(pack.get("shots", []), key=lambda s: s.get("linked_timestamp_sec") or 0)
         if not shots:
             raise RuntimeError("Chưa có shot nào — cần sinh giọng đọc trước.")
+        brand = _load_brand_profile(p.channel_id)
+        primary_language = brand.get("primary_language") or "vi"
+        is_primary = lang is None or lang == primary_language
 
         state = load_render_state(pdir, project_id)
         by_id = {s.shot_id: s for s in state.shots}
@@ -1102,19 +1074,32 @@ def build_narration_download(project_id: str) -> Path:
         paths: list[str] = []
         for shot in shots:
             status = by_id.get(shot["shot_id"])
-            if not status or status.narration_status != "ready" or not status.narration_asset_path:
-                missing.append(shot["shot_id"])
+            if is_primary:
+                if not status or status.narration_status != "ready" or not status.narration_asset_path:
+                    missing.append(shot["shot_id"])
+                else:
+                    paths.append(status.narration_asset_path)
             else:
-                paths.append(status.narration_asset_path)
+                beat = _find_beat(pack, shot)
+                text = ((beat.get("audio_by_lang") or {}).get(lang) or "").strip()
+                if not text:
+                    continue
+                translation = status.narration_translations.get(lang) if status else None
+                if translation is None or translation.narration_status != "ready" or not translation.narration_asset_path:
+                    missing.append(shot["shot_id"])
+                else:
+                    paths.append(translation.narration_asset_path)
         if missing:
             preview = ", ".join(missing[:5]) + ("…" if len(missing) > 5 else "")
             raise RuntimeError(f"Còn {len(missing)} block chưa có giọng đọc sẵn sàng ({preview}) — sinh xong hết mới ghép/tải được.")
+        if not paths:
+            raise RuntimeError("Chưa có giọng đọc nào sẵn sàng cho ngôn ngữ này.")
 
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise RuntimeError("Chưa cài ffmpeg trên máy chạy backend.")
 
-        out_path = pdir / "renders" / "narration_full.mp3"
+        out_path = pdir / "renders" / (f"narration_full_{lang}.mp3" if not is_primary else "narration_full.mp3")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         n = len(paths)
         cmd = [ffmpeg, "-y"]

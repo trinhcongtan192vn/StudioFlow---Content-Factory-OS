@@ -1,14 +1,79 @@
 import { useEffect, useState } from "react";
+import type { DragEvent } from "react";
 import { useApp } from "../store/AppContext";
 import { api } from "../api/client";
 import type { ProjectSummary } from "../api/types";
 import { STATUS_DOT_COLOR } from "./statusMeta";
 import ChannelDialog from "./ChannelDialog";
 
+// Kéo thả sắp xếp lại thứ tự kênh/dự án — mới (2026-09-19), theo yêu cầu người dùng.
+// HTML5 drag-and-drop THUẦN (không thêm thư viện — app hiện chỉ có đúng react/react-dom,
+// danh sách chỉ là 1 cột dọc đơn giản không cần dnd-kit/react-beautiful-dnd). 3 danh sách
+// ĐỘC LẬP dùng chung 1 cơ chế: kênh, project long-form trong 1 kênh, short-form con của 1
+// project — `scope` phân biệt để không kéo nhầm giữa các nhóm (VD kéo 1 kênh thả vào danh
+// sách project).
+function reorderIds(ids: string[], draggedId: string, targetId: string): string[] {
+  const next = ids.filter((id) => id !== draggedId);
+  const targetIdx = next.indexOf(targetId);
+  next.splice(targetIdx, 0, draggedId);
+  return next;
+}
+
 export default function Sidebar() {
   const app = useApp();
   const [projectsByChannel, setProjectsByChannel] = useState<Record<string, ProjectSummary[]>>({});
   const [newChannelOpen, setNewChannelOpen] = useState(false);
+  const [dragState, setDragState] = useState<{ scope: string; id: string } | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+
+  function isBeingDragged(scope: string, id: string) {
+    return dragState?.scope === scope && dragState.id === id;
+  }
+  function isDragOverTarget(scope: string, id: string) {
+    return dragOverId === id && dragState?.scope === scope && dragState.id !== id;
+  }
+  function dragHandlers(scope: string, id: string, currentIds: string[], persist: (newIds: string[]) => void) {
+    return {
+      draggable: true,
+      onDragStart: (e: DragEvent) => {
+        e.stopPropagation();
+        setDragState({ scope, id });
+      },
+      onDragOver: (e: DragEvent) => {
+        if (dragState?.scope !== scope) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (dragOverId !== id) setDragOverId(id);
+      },
+      onDragLeave: () => setDragOverId((cur) => (cur === id ? null : cur)),
+      onDrop: (e: DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragOverId(null);
+        if (!dragState || dragState.scope !== scope || dragState.id === id) return;
+        persist(reorderIds(currentIds, dragState.id, id));
+      },
+      onDragEnd: () => {
+        setDragState(null);
+        setDragOverId(null);
+      },
+    };
+  }
+
+  function persistProjectOrder(channelId: string, newIds: string[], isInGroup: (p: ProjectSummary) => boolean) {
+    setProjectsByChannel((s) => {
+      const all = s[channelId] || [];
+      const others = all.filter((p) => !isInGroup(p));
+      const byId = new Map(all.map((p) => [p.id, p]));
+      const reordered = newIds.map((id) => byId.get(id)).filter((p): p is ProjectSummary => !!p);
+      return { ...s, [channelId]: [...others, ...reordered] };
+    });
+    api.reorderProjects(channelId, newIds).catch(() => {
+      // Lỗi persist — refetch lại đúng trạng thái server, cùng pattern rollback đã dùng
+      // cho `AppContext::reorderChannels`.
+      api.listProjects(channelId).then((ps) => setProjectsByChannel((s) => ({ ...s, [channelId]: ps })));
+    });
+  }
 
   useEffect(() => {
     // Refetch mỗi khi 1 kênh được mở HOẶC `projectsVersion` của kênh đó tăng (đổi tên/
@@ -97,7 +162,17 @@ export default function Sidebar() {
             <div key={ch.id}>
               <div
                 onClick={() => app.toggleChannel(ch.id)}
-                style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 6px", cursor: "pointer", borderRadius: 6 }}
+                {...dragHandlers(
+                  "channels",
+                  ch.id,
+                  app.channels.map((c) => c.id),
+                  (newIds) => app.reorderChannels(newIds),
+                )}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "6px 6px", cursor: "pointer", borderRadius: 6,
+                  opacity: isBeingDragged("channels", ch.id) ? 0.4 : 1,
+                  boxShadow: isDragOverTarget("channels", ch.id) ? "inset 0 2px 0 var(--color-accent)" : undefined,
+                }}
               >
                 <Chevron down={expanded} />
                 <div style={{ width: 20, height: 20, borderRadius: 6, background: "var(--color-accent-900)", color: "var(--color-accent-300)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, flex: "none" }}>{ch.letter}</div>
@@ -109,10 +184,14 @@ export default function Sidebar() {
                     .filter((p) => !p.parent_project_id)
                     .map((p) => {
                       const shorts = projects.filter((c) => c.parent_project_id === p.id);
+                      const topLevelIds = projects.filter((tp) => !tp.parent_project_id).map((tp) => tp.id);
                       const projectExpanded = !!app.expandedProjects[p.id];
                       return (
                         <div key={p.id}>
                           <div
+                            {...dragHandlers("projects:" + ch.id, p.id, topLevelIds, (newIds) =>
+                              persistProjectOrder(ch.id, newIds, (pr) => !pr.parent_project_id),
+                            )}
                             style={{
                               display: "flex",
                               alignItems: "center",
@@ -123,6 +202,8 @@ export default function Sidebar() {
                               fontSize: 12,
                               background: app.activeProjectId === p.id ? "color-mix(in srgb, var(--color-accent) 14%, transparent)" : "transparent",
                               color: app.activeProjectId === p.id ? "var(--color-accent-300)" : "inherit",
+                              opacity: isBeingDragged("projects:" + ch.id, p.id) ? 0.4 : 1,
+                              boxShadow: isDragOverTarget("projects:" + ch.id, p.id) ? "inset 0 2px 0 var(--color-accent)" : undefined,
                             }}
                           >
                             <div
@@ -149,6 +230,12 @@ export default function Sidebar() {
                                 <div
                                   key={s.id}
                                   onClick={() => app.openProject(ch.id, s.id)}
+                                  {...dragHandlers(
+                                    "shorts:" + p.id,
+                                    s.id,
+                                    shorts.map((sh) => sh.id),
+                                    (newIds) => persistProjectOrder(ch.id, newIds, (pr) => pr.parent_project_id === p.id),
+                                  )}
                                   style={{
                                     display: "flex",
                                     alignItems: "center",
@@ -159,6 +246,8 @@ export default function Sidebar() {
                                     fontSize: 11.5,
                                     background: app.activeProjectId === s.id ? "color-mix(in srgb, var(--color-accent) 14%, transparent)" : "transparent",
                                     color: app.activeProjectId === s.id ? "var(--color-accent-300)" : "inherit",
+                                    opacity: isBeingDragged("shorts:" + p.id, s.id) ? 0.4 : 1,
+                                    boxShadow: isDragOverTarget("shorts:" + p.id, s.id) ? "inset 0 2px 0 var(--color-accent)" : undefined,
                                   }}
                                 >
                                   <div style={{ width: 5, height: 5, borderRadius: "50%", background: STATUS_DOT_COLOR[s.status] || "var(--color-neutral-600)", flex: "none" }} />

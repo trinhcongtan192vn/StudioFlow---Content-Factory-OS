@@ -79,6 +79,20 @@ class Channel(Base):
     brandprofile_path = Column(String, nullable=True)
     brandprofile_version = Column(Integer, default=0)
     archived = Column(Boolean, default=False)
+    # Chỉ số YouTube — mới (2026-09-12), theo yêu cầu người dùng: kéo dữ liệu thật từ
+    # YouTube thay "Nạp retention thủ công" (xem `RetentionEntry` dưới). Gán SAU khi OAuth
+    # thành công (`routers/youtube_analytics.py::connect_channel`) — đọc THẬT từ Data API
+    # `channels.list(mine=true)`, KHÔNG bắt người dùng tự tìm/dán Channel ID. `None` =
+    # kênh StudioFlow này CHƯA kết nối YouTube (bình thường — không bắt buộc).
+    youtube_channel_id = Column(String, nullable=True)
+    youtube_channel_title = Column(String, nullable=True)
+    youtube_connected_at = Column(String, nullable=True)  # ISO string (vn_isoformat)
+    # Thứ tự hiển thị TUỲ CHỌN người dùng trên Sidebar — mới (2026-09-19), theo yêu cầu
+    # "cho phép kéo thả để sắp xếp lại thứ tự". Trước đây KHÔNG có `ORDER BY` nào ở
+    # `GET /channels` (phụ thuộc thứ tự vật lý SQLite, không phải hợp đồng đảm bảo) — giờ
+    # `list_channels` sort theo cột này. Kênh mới luôn nhận giá trị LỚN NHẤT hiện có + 1
+    # (xuất hiện cuối danh sách), xem `routers/channels.py::create_channel`.
+    order_index = Column(Integer, default=0)
 
     projects = relationship("Project", back_populates="channel", cascade="all, delete-orphan")
     brandprofile_versions = relationship(
@@ -135,10 +149,23 @@ class Project(Base):
     archived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Video YouTube tương ứng — mới (2026-09-12). Người dùng TỰ CHỌN từ danh sách video
+    # thật của kênh đã kết nối OAuth (`GET /projects/{id}/youtube-videos-available`) —
+    # KHÔNG tự đoán theo tên trùng khớp (rủi ro gán nhầm project khác video). `None` =
+    # project chưa publish/chưa liên kết.
+    youtube_video_id = Column(String, nullable=True)
+    # Thứ tự hiển thị TUỲ CHỌN người dùng trên Sidebar — mới (2026-09-19), cùng lý do
+    # `Channel.order_index`. Project mới nhận giá trị NHỎ NHẤT hiện có TRONG CÙNG NHÓM
+    # anh em (cùng `channel_id` và `parent_project_id`) - 1 (xuất hiện ĐẦU danh sách nhóm
+    # đó — khớp đúng hành vi optimistic đã có ở `Sidebar.tsx::handleNewProject`, chèn lên
+    # đầu local state nhưng trước đây KHÔNG hề persist). Xem `routers/projects.py::
+    # create_project`.
+    order_index = Column(Integer, default=0)
 
     channel = relationship("Channel", back_populates="projects")
     pack_versions = relationship("PackVersion", back_populates="project", cascade="all, delete-orphan")
     retention_entries = relationship("RetentionEntry", back_populates="project", cascade="all, delete-orphan")
+    youtube_video_metrics = relationship("YoutubeVideoMetricsSnapshot", back_populates="project", cascade="all, delete-orphan")
 
 
 class PackVersion(Base):
@@ -166,9 +193,67 @@ class RetentionEntry(Base):
     ret_100 = Column(Float, nullable=True)
     avg_view_duration = Column(Float, nullable=True)
     thumbnail_ctr = Column(Float, nullable=True)
+    # RPM (doanh thu ước tính/1.000 view) — mới (2026-09-12). GIỮ NHẬP TAY (không tự động
+    # hoá như 5 field ret_0/25/50/100 và các chỉ số ở YoutubeVideoMetricsSnapshot) — quyền
+    # OAuth `yt-analytics-monetary.readonly` cần cho dữ liệu doanh thu THỰC TẾ rất khó xin
+    # cho app cá nhân/nhỏ (Google yêu cầu audit CMS/Content Owner), quyết định đã chốt lúc
+    # lên kế hoạch tính năng chỉ số YouTube — xem `app/youtube_analytics.py`.
+    rpm = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     project = relationship("Project", back_populates="retention_entries")
+
+
+class YoutubeChannelMetricsSnapshot(Base):
+    """1 lượt "Đồng bộ chỉ số YouTube" cấp KÊNH — **mới (2026-09-12)**, theo yêu cầu
+    người dùng: hiển thị chỉ số cốt lõi (North-star) theo TOÀN KÊNH ở Dashboard. LUÔN
+    INSERT dòng MỚI mỗi lần đồng bộ (KHÔNG update tại chỗ) — cùng nguyên tắc
+    `RetentionEntry` (giữ lịch sử theo thời gian; UI đọc dòng MỚI NHẤT để hiển thị hiện
+    tại). Các chỉ số tổng hợp (APV/CTR/retention giây 30/DE-AT-CH trung bình) tính TRUNG
+    BÌNH CÓ TRỌNG SỐ theo lượt xem của từng video — KHÔNG phải trung bình cộng đơn giản
+    (video nhiều view ảnh hưởng đúng tỷ trọng thật của nó tới sức khoẻ kênh)."""
+    __tablename__ = "youtube_channel_metrics_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    channel_id = Column(String, ForeignKey("channel.id"), nullable=False)
+    synced_at = Column(String, nullable=False)  # ISO string (vn_isoformat)
+    subscriber_count = Column(Integer, nullable=True)
+    total_views = Column(Integer, nullable=True)
+    video_count = Column(Integer, nullable=True)
+    avg_view_percentage = Column(Float, nullable=True)  # APV trung bình có trọng số theo view
+    avg_impression_ctr = Column(Float, nullable=True)
+    avg_retention_at_30s = Column(Float, nullable=True)
+    comments_per_1000_views = Column(Float, nullable=True)
+    de_at_ch_views_pct = Column(Float, nullable=True)  # % view từ DE+AT+CH trên tổng view đã đồng bộ
+
+    channel = relationship("Channel")
+
+
+class YoutubeVideoMetricsSnapshot(Base):
+    """1 lượt "Đồng bộ chỉ số YouTube" cho ĐÚNG 1 video ĐÃ LIÊN KẾT project — **mới
+    (2026-09-12)**. LUÔN INSERT dòng MỚI (không update tại chỗ), cùng nguyên tắc
+    `YoutubeChannelMetricsSnapshot`/`RetentionEntry` — UI đọc dòng MỚI NHẤT theo
+    `project_id`. `retention_curve` — JSON `[{ratio, watch_ratio}]` (dimension
+    `elapsedVideoTimeRatio` của Analytics API), dùng dựng biểu đồ retention theo TỪNG
+    CHƯƠNG (khớp `pack.script.body[]` theo TỶ LỆ vị trí, không phải giây tuyệt đối của
+    kịch bản gốc — xem docstring `youtube_analytics.py::correlate_retention_with_blocks`)."""
+    __tablename__ = "youtube_video_metrics_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(String, ForeignKey("project.id"), nullable=False)
+    synced_at = Column(String, nullable=False)  # ISO string (vn_isoformat)
+    views = Column(Integer, nullable=True)
+    avg_view_percentage = Column(Float, nullable=True)  # APV (%)
+    avg_view_duration_sec = Column(Float, nullable=True)
+    retention_at_30s = Column(Float, nullable=True)  # % người xem còn lại tại giây 30
+    impressions = Column(Integer, nullable=True)
+    impression_ctr = Column(Float, nullable=True)  # % CTR thumbnail
+    comment_count = Column(Integer, nullable=True)
+    video_duration_sec = Column(Float, nullable=True)
+    views_by_country = Column(Text, nullable=True)  # JSON {"DE": n, "AT": n, "CH": n, ...}
+    retention_curve = Column(Text, nullable=True)  # JSON [{ratio, watch_ratio}, ...]
+
+    project = relationship("Project", back_populates="youtube_video_metrics")
 
 
 class ProviderConfig(Base):
@@ -279,6 +364,16 @@ class RawVideo(Base):
     progress_total = Column(Integer, nullable=True)
     progress_label = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Đánh dấu hàng "ảo" (2026-09-11) — KHÔNG phải video thật user upload/dán URL, mà là
+    # 1 hàng đại diện 1 `Project` (Visual Studio) để thoả FK NOT NULL của
+    # `ProcessedClip.raw_video_id` khi lưu ảnh/video sinh ở Visual Studio vào Kho Tài
+    # Nguyên (không có file thật để "cắt cảnh" — `file_path` chỉ là placeholder không
+    # tồn tại trên đĩa). `original_filename` set = tên project, khớp đúng ý người dùng
+    # "video nguồn chính là video project". Loại khỏi "Raw Library" (`list_raw_videos`
+    # lọc `source_project_id IS NULL`) vì không có hành động cắt cảnh/xoá watermark nào
+    # áp dụng được cho hàng này. Xem `asset_vault/from_visual_studio.py::
+    # get_or_create_project_raw_video`.
+    source_project_id = Column(String, nullable=True)
 
     channels = relationship("Channel", secondary=raw_video_channel, back_populates="raw_videos")
 
@@ -316,6 +411,18 @@ class ProcessedClip(Base):
     # để gắn cờ lỗi). Null = chưa từng lỗi hoặc lần gần nhất đã thành công (xoá khi thành
     # công, xem `ingest.py::caption_clips`).
     caption_error = Column(Text, nullable=True)
+    # Loại tài liệu (2026-09-11) — "video" (mặc định, khớp NGUYÊN mọi clip cắt cảnh cũ +
+    # mới — B-roll cắt từ RawVideo LUÔN là video) hoặc "image" (asset ảnh lưu từ Visual
+    # Studio, xem `source_shot_id` dưới). Dùng để lọc đúng loại khi gợi ý/gán vào shot
+    # (`assign_vault_clip`/`matching.py` — shot ảnh chỉ nhận clip "image", shot video chỉ
+    # nhận "video").
+    media_kind = Column(String, default="video")
+    # `shot_id` GỐC (2026-09-11) — chỉ có giá trị khi clip này được LƯU từ Visual Studio
+    # (không phải cắt từ RawVideo thật), cùng `raw_video_id` trỏ tới RawVideo "ảo" của
+    # project đó — dùng để nhận diện "shot này đã lưu vào Kho chưa" (cập nhật đè thay vì
+    # tạo dòng mới khi lưu lại). Xem `asset_vault/from_visual_studio.py::
+    # save_shots_to_vault`.
+    source_shot_id = Column(String, nullable=True)
 
     # Chỉ đọc, không cần back_populates (RawVideo không cần collection ngược
     # `.processed_clips`, chưa nơi nào trong app cần dùng chiều đó) — dùng để hiện "video

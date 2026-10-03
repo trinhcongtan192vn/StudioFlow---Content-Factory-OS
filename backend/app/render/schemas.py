@@ -13,6 +13,29 @@ from pydantic import BaseModel, Field
 AssetStatus = Literal["pending", "generating", "ready", "error"]
 AssemblyStatus = Literal["not_started", "assembling", "done", "error"]
 
+# Giọng đọc đa ngôn ngữ (2026-09-04) — 6 ngôn ngữ hỗ trợ, khớp `BrandProfile.
+# primary_language` (app/schemas/__init__.py). Danh sách CỐ ĐỊNH (không mở rộng tuỳ ý)
+# theo đúng yêu cầu người dùng — nguồn sự thật DUY NHẤT, mọi nơi khác (router validate,
+# frontend LANGUAGE_LABELS) phải khớp danh sách này.
+NarrationLanguage = Literal["vi", "en", "de", "pt_br", "es", "fr"]
+NARRATION_LANGUAGES: tuple[str, ...] = ("vi", "en", "de", "pt_br", "es", "fr")
+
+
+class TranslatedNarrationStatus(BaseModel):
+    """Trạng thái sinh giọng đọc cho 1 ngôn ngữ KHÔNG PHẢI ngôn ngữ chính của kênh —
+    **mới (2026-09-04)**, tính năng giọng đọc đa ngôn ngữ cho thị trường nước ngoài. Văn
+    bản nguồn (`ScriptBodyItem.audio_by_lang[lang]`) sống ở `pack.json` (script core),
+    KHÔNG phải ở đây — field này CHỈ theo dõi trạng thái sinh audio, cùng nguyên tắc
+    "render module chỉ đọc pack.json". Ngôn ngữ CHÍNH của kênh KHÔNG dùng struct này —
+    vẫn dùng nguyên field `narration_status`/`narration_asset_path`/... gốc trên
+    `ShotRenderStatus` (0 thay đổi hành vi render/timestamp/SRT hiện có)."""
+    narration_status: AssetStatus = "pending"
+    narration_asset_path: Optional[str] = None
+    narration_provider: Optional[str] = None
+    narration_error: Optional[str] = None
+    narration_duration_sec: Optional[float] = None
+    narration_updated_at: Optional[str] = None
+
 
 class ShotRenderStatus(BaseModel):
     shot_id: str
@@ -43,6 +66,13 @@ class ShotRenderStatus(BaseModel):
     # pack.json's Shot) để việc "gán clip vào shot" đi ĐÚNG con đường `upload-visual` đã
     # có (render.py chỉ đọc pack.json, không bao giờ ghi lại — xem docstring đầu file đó).
     linked_clip_id: Optional[str] = None
+    # Chiều NGƯỢC lại `linked_clip_id` — mới (2026-09-11) — set khi visual CỦA CHÍNH
+    # shot này (ảnh/video AI sinh) đã được LƯU vào Kho Tài Nguyên (nút "Lưu vào Kho tài
+    # nguyên" ở Visual Studio, xem `asset_vault/from_visual_studio.py::
+    # save_shots_to_vault`). Trỏ tới `ProcessedClip.clip_id` vừa tạo/cập nhật — dùng để
+    # (1) hiện badge "Đã lưu" trên ShotCard, (2) khi lưu LẠI (VD sinh lại ảnh rồi lưu
+    # lần nữa) biết CẬP NHẬT ĐÈ đúng clip cũ thay vì tạo dòng mới.
+    saved_to_vault_clip_id: Optional[str] = None
     # Xoá watermark (2026-08-28, tái dùng `app/watermark/` từ Kho Tài Nguyên) — "quét
     # xong, KHÔNG tìm thấy watermark" KHÔNG phải lỗi (asset gốc vẫn hợp lệ, giữ nguyên),
     # nên KHÔNG dùng `visual_error` (field đó gắn với UI báo lỗi đỏ, dành cho lỗi thật) —
@@ -67,6 +97,10 @@ class ShotRenderStatus(BaseModel):
     narration_duration_sec: Optional[float] = None  # đo thật qua ffprobe — dùng cho thời lượng video THỰC ở Pack Review
     narration_started_at: Optional[str] = None
     narration_updated_at: Optional[str] = None  # cùng lý do/cách dùng `visual_updated_at` ở trên, áp cho giọng đọc
+    # Giọng đọc CÁC NGÔN NGỮ KHÁC ngôn ngữ chính — **mới (2026-09-04)**, key = mã ngôn
+    # ngữ trong `NARRATION_LANGUAGES` (trừ `BrandProfile.primary_language` — ngôn ngữ đó
+    # dùng field `narration_*` gốc ở trên). Xem `TranslatedNarrationStatus`.
+    narration_translations: dict[str, TranslatedNarrationStatus] = Field(default_factory=dict)
 
 
 class IntroAssetStatus(BaseModel):
@@ -125,6 +159,37 @@ class OverlayEffectOverride(BaseModel):
     asset_path: Optional[str] = None
     opacity: float = 0.5
     disabled: bool = False
+
+
+class CharacterReferenceStatus(BaseModel):
+    """Ảnh nhân vật tham khảo RIÊNG của project — **mới (2026-09-09, mục 127)**, theo yêu
+    cầu người dùng: giữ nhân vật đồng nhất giữa các shot. Bối cảnh — đã thử 2 hướng cơ chế
+    (Flux Redux, PuLID-Flux) đều không phù hợp/rủi ro (xem IMPLEMENTATION_REPORT.md mục
+    126); hướng hiệu quả nhất tìm được là mô tả ngoại hình nhân vật bằng CHỮ trong prompt.
+    Field này TỰ ĐỘNG HOÁ việc đó: người dùng upload 1 ảnh nhân vật (VD ảnh đã ưng ý từ
+    shot trước), backend tự sinh `description` qua `VisionProvider` (CÙNG cơ chế Channel
+    Asset Vault dùng để caption clip — xem `app/asset_vault/ingest.py::caption_clip`,
+    `app/providers/base.py::VisionProvider`) — không phải người dùng tự gõ tay như cách
+    làm thủ công ban đầu. `description` sinh ra được nối vào MỌI prompt sinh ảnh CỦA
+    PROJECT NÀY (xem `app/render/engine.py::_build_visual_prompt` tham số
+    `character_reference_desc`).
+
+    KHÔNG có field tương ứng ở BrandProfile (khác `intro`/`bg_music`/`overlay` — đều có
+    default cấp kênh override được) — nhân vật tham khảo đặc thù TỪNG project/video cụ
+    thể, không có khái niệm "mặc định chung cho cả kênh" hợp lý (mỗi video 1 kênh có thể
+    có nhân vật khác nhau).
+
+    Caption chạy ĐỒNG BỘ ngay trong request upload (không cần `*_status`/polling như
+    `ShotRenderStatus` — 1 ảnh, không phải batch, độ trễ tương đương sinh caption 1
+    keyframe clip ở Asset Vault, chấp nhận được) — cùng triết lý "đơn giản khi việc đơn
+    giản" như `IntroAssetStatus` (cũng không có `*_status`, vì đây là asset người dùng tự
+    upload, không phải AI sinh nhiều bước). `caption_error` giữ lại thông báo lỗi (nếu
+    VisionProvider lỗi/chưa cấu hình) — ảnh vẫn được lưu (không chặn upload), chỉ
+    `description` rỗng — người dùng có thể tự gõ tay `description` qua PATCH hoặc bấm sinh
+    lại caption."""
+    image_path: Optional[str] = None
+    description: str = ""
+    caption_error: Optional[str] = None
 
 
 class BackgroundVideoOverride(BaseModel):
@@ -232,6 +297,39 @@ class ImageLayer(BaseModel):
     blend_mode: LayerBlendMode = "alpha"
 
 
+class CaptionLayer(BaseModel):
+    """Layer CAPTION (phụ đề cứng burn-in) — **mới (2026-09-12)**, theo yêu cầu người
+    dùng: "Bổ sung tính năng cho phép user thêm caption vào video ở bước visual
+    studio... chọn 9 vị trí, kích thước, độ mờ tương tự phần Layer video định vị". KHÁC
+    `VideoLayer`/`ImageLayer` (list, nhiều instance, nguồn là FILE upload) — đây là 1
+    CẤU HÌNH DUY NHẤT/project (chỉ 1 track caption có ý nghĩa), nguồn nội dung là TEXT
+    lấy thẳng từ `pack.script.body[].audio`/`audio_by_lang[lang]` (không upload gì) —
+    tái dùng `LayerPosition` (9 ô lưới) cho đồng nhất trải nghiệm chọn vị trí.
+
+    `size_pct` — cỡ chữ tính theo % CHIỀU CAO khung hình xuất (khác `width_pct` của
+    VideoLayer/ImageLayer tính theo % chiều RỘNG — đổi trục vì đây là cỡ CHỮ, không phải
+    cỡ khung ảnh/video). `0.045` mặc định ≈ cỡ phụ đề tiêu chuẩn dễ đọc.
+
+    `lang` — **theo yêu cầu người dùng xác nhận thêm** ("chọn cả loại ngôn ngữ nữa"):
+    `None` (mặc định) = dùng ĐÚNG ngôn ngữ đang ghép video (`export_lang` của lượt
+    `assemble`/xuất short-video đó) — user đổi được sang ngôn ngữ KHÁC (VD ghép giọng đọc
+    tiếng Việt nhưng muốn caption tiếng Anh để học ngôn ngữ). Timing của cue LUÔN theo
+    ĐÚNG thời lượng THẬT của shot trên timeline (không phụ thuộc ngôn ngữ caption đã sinh
+    giọng đọc hay chưa — chỉ cần CÓ chữ, không cần audio) — xem
+    `assembly.py::_build_segment`/`captions.py::write_shot_caption_srt`.
+
+    Đốt (burn) TRỰC TIẾP vào TỪNG SEGMENT (không phải 1 lượt trên video ghép xong) —
+    xem docstring quyết định kiến trúc ở `captions.py`. Áp dụng CHO CẢ video chính
+    (`assembly.py::_assemble_video_impl`) LẪN short-video export
+    (`short_export.py::run_short_export`) — 2 nơi dùng CHUNG `state.caption_layer`, nhất
+    quán theo yêu cầu người dùng. KHÔNG áp dụng cho intro (không có nội dung script)."""
+    enabled: bool = False
+    position: LayerPosition = "bottom-center"
+    size_pct: float = 0.045
+    opacity: float = 1.0
+    lang: Optional[str] = None
+
+
 class AssemblyProgress(BaseModel):
     """Tiến trình ghép MP4 theo đơn vị TỰ NHIÊN sẵn có — mỗi shot 1 segment ffmpeg
     riêng, không cần parse `-progress` real-time của ffmpeg (phức tạp hơn nhiều, không
@@ -268,6 +366,52 @@ class WatermarkScanSummary(BaseModel):
     finished_at: str
 
 
+class ShortVideoExport(BaseModel):
+    """Xuất short-video 9:16 từ 1 KHOẢNG BLOCK của project long-form — mới (2026-09-12),
+    theo yêu cầu người dùng: repurpose 1 đoạn thành YouTube Shorts/TikTok mà KHÔNG cần
+    tạo 1 project short-form riêng (khác hẳn `Project.format=="short"`/
+    `parent_project_id` — đó là 1 project TRỐNG hoàn toàn, không copy/tham chiếu block
+    nào từ project cha, xem `routers/projects.py::create_project`). Artifact này sống
+    NGAY trong `RenderState` của CHÍNH project long-form, tối đa 3 cái/project (chặn ở
+    router, xem `render/short_export.py::create_short_export`).
+
+    `regenerate_images` — `True` = sinh lại ẢNH (không phải video) cho từng shot ẢNH
+    trong khoảng theo đúng tỷ lệ 9:16 (ép `aspect_ratio="9:16"` bất kể `Project.format`
+    thật), lưu file RIÊNG (`renders/short/{id}/assets/`), KHÔNG đụng
+    `ShotRenderStatus.visual_asset_path` gốc 16:9. `False` (mặc định) = giữ nguyên asset
+    16:9 gốc, ép crop-fill vào khung dọc (`aspect_fill_mode="crop"`,
+    `assembly.py::_scale_cover_filter`) — phóng khung ngang lên vừa CHIỀU CAO khung dọc
+    rồi cắt bớt 2 bên, KHÔNG co nhỏ nội dung (đổi từ letterbox/viền đen — 2026-09-12,
+    người dùng test thật báo ảnh bị "co hẹp" giữa 2 viền đen, yêu cầu không co ảnh, chỉ
+    crop phần giữa). Shot dạng VIDEO trong khoảng LUÔN crop bản gốc CÙNG kiểu, KHÔNG BAO
+    GIỜ được sinh lại (theo yêu cầu người dùng — sinh lại video 9:16 tốn kém/chậm hơn hẳn
+    ảnh, ngoài phạm vi tính năng này).
+
+    `lang` — **mới (2026-09-12)**, theo yêu cầu người dùng ("cho phép chọn ngôn ngữ khi
+    xuất short-video, tương tự như khi render long-video"): ngôn ngữ giọng đọc dùng cho
+    short-video này — LUÔN đã RESOLVE (không bao giờ `None` với export mới, xem
+    `render/short_export.py::create_short_export`; `None` chỉ còn gặp ở export CŨ tạo
+    trước tính năng này, fallback về `BrandProfile.primary_language` khi đọc). Cùng gate
+    cứng như `assemble` chính: 400 NGAY nếu giọng đọc ngôn ngữ này CHƯA sinh xong cho MỌI
+    shot TRONG KHOẢNG đã chọn (không phải toàn project — chỉ khoảng đang xuất)."""
+    id: str
+    start_block_id: str
+    end_block_id: str
+    regenerate_images: bool = False
+    lang: Optional[str] = None
+    status: Literal["pending", "generating_images", "assembling", "done", "error"] = "pending"
+    error: Optional[str] = None
+    # Tiến trình THẬT khi `regenerate_images=True` — số ẢNH đã sinh xong / tổng số ảnh
+    # cần sinh trong khoảng (chỉ đếm shot ẢNH, shot video không tính vào đây vì không bao
+    # giờ sinh lại). `None` khi không có gì đang chạy (khớp quy ước `RawVideo.progress_*`
+    # đã dùng ở Kho Tài Nguyên).
+    progress_current: Optional[int] = None
+    progress_total: Optional[int] = None
+    progress_label: Optional[str] = None
+    video_path: Optional[str] = None
+    created_at: Optional[str] = None
+
+
 class RenderState(BaseModel):
     project_id: str
     shots: list[ShotRenderStatus] = Field(default_factory=list)
@@ -285,11 +429,16 @@ class RenderState(BaseModel):
     intro: Optional[IntroAssetStatus] = None
     bg_music: Optional[BgMusicOverride] = None
     overlay: Optional[OverlayEffectOverride] = None
+    # Ảnh nhân vật tham khảo — mới (2026-09-09, mục 127) — xem docstring
+    # `CharacterReferenceStatus`.
+    character_reference: Optional[CharacterReferenceStatus] = None
     background_video: Optional[BackgroundVideoOverride] = None
     # Layer video định vị theo lưới 3x3 (VD voice wave, logo) — mới (2026-09-02, mục 112).
     layers: list[VideoLayer] = Field(default_factory=list)
     # Layer ẢNH định vị theo lưới 3x3 HOẶC toàn khung hình — mới (2026-09-02, mục 115).
     image_layers: list[ImageLayer] = Field(default_factory=list)
+    # Layer CAPTION (phụ đề cứng burn-in) — mới (2026-09-12). Xem docstring `CaptionLayer`.
+    caption_layer: Optional[CaptionLayer] = None
     assembly_status: AssemblyStatus = "not_started"
     assembly_error: Optional[str] = None
     assembly_progress: Optional[AssemblyProgress] = None
@@ -300,4 +449,15 @@ class RenderState(BaseModel):
     # lại SAU lần ghép này" — xem `OutputCenter.tsx`.
     assembly_completed_at: Optional[str] = None
     final_video_path: Optional[str] = None
+    # Ngôn ngữ giọng đọc đã dùng cho lần ghép GẦN NHẤT thành công — mới (2026-09-11,
+    # theo yêu cầu người dùng: đặt hậu tố ngôn ngữ vào tên file video lúc xuất Pack).
+    # `None` cho render cũ (trước khi có tính năng chọn ngôn ngữ xuất video) — caller tự
+    # fallback về `BrandProfile.primary_language`, xem `pack_export.py::export_pack_
+    # bundle`.
+    final_video_lang: Optional[str] = None
     watermark_scan_summary: Optional[WatermarkScanSummary] = None
+    # Short-video 9:16 xuất từ 1 khoảng block — mới (2026-09-12). Xem docstring
+    # `ShortVideoExport`. Tối đa 3 phần tử/project, chặn ở router
+    # (`render/short_export.py::create_short_export`), không chặn ở schema (list rỗng
+    # hợp lệ, chưa xuất cái nào).
+    short_exports: list[ShortVideoExport] = Field(default_factory=list)

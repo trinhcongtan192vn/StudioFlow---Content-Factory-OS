@@ -72,6 +72,23 @@ export default function ScriptImportControls({ project, refresh }: { project: Pr
         </svg>
         Tải file mẫu
       </button>
+      {/* Giọng đọc đa ngôn ngữ (2026-09-04) — mẫu 11 cột (1 VO/ngôn ngữ), cho kênh phục
+          vụ thị trường nước ngoài. Đặt CẠNH nút mẫu đơn ngôn ngữ ở đây (không chỉ ở
+          Script Studio) vì đây là nơi upload kịch bản LẦN ĐẦU — người dùng cần chọn đúng
+          mẫu TRƯỚC KHI điền, không phải sau khi đã vào Script Studio. */}
+      <button
+        className="btn btn-secondary"
+        style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}
+        onClick={() => api.downloadScriptImportTemplate(project.id, true)}
+        title="Tải file Excel mẫu 11 cột (1 cột VO/ngôn ngữ) — dùng cho kênh phục vụ thị trường nước ngoài, điền sẵn bản dịch từng ngôn ngữ trước khi nhập"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+        Mẫu đa ngôn ngữ
+      </button>
 
       {(importPreview || importError) && (
         <div className="dialog-backdrop" onClick={closeImportDialog}>

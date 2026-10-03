@@ -24,6 +24,7 @@ from app.asset_vault.ingest import (
     download_raw_video_from_url,
     import_raw_video_upload,
     manual_cut_clip,
+    reconcile_raw_video_status,
     remove_watermark_from_raw_video,
 )
 from app.config import asset_vault_clips_dir, asset_vault_raw_dir
@@ -110,6 +111,13 @@ def _clip_out(c: ProcessedClip) -> dict:
         "rights_note": c.rights_note,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "caption_error": c.caption_error,
+        # Mới (2026-09-11) — lưu ảnh/video từ Visual Studio vào Kho Tài Nguyên, xem
+        # `asset_vault/from_visual_studio.py`. `media_kind` phân biệt ảnh/video (mọi clip
+        # cắt cảnh cũ đều "video"). `from_visual_studio` = clip này đến từ Visual Studio
+        # (raw_video CHA là hàng "ảo" đại diện project) hay từ cắt cảnh B-roll thật —
+        # frontend dùng để tách 2 section riêng trong Kho Tài Nguyên.
+        "media_kind": c.media_kind or "video",
+        "from_visual_studio": bool(c.raw_video and c.raw_video.source_project_id),
     }
 
 
@@ -135,11 +143,28 @@ def _raw_video_ids_for_channel(db: Session, channel_id: str):
 # Raw Library (§7.2 khu trên)
 # ---------------------------------------------------------------------------
 @router.get("/asset-vault/raw")
-def list_raw_videos(channel_id: str | None = Query(default=None), db: Session = Depends(get_db)):
-    q = db.query(RawVideo)
+def list_raw_videos(channel_id: str | None = Query(default=None), kind: str = Query(default="raw"), db: Session = Depends(get_db)):
+    # Loại hàng "ảo" đại diện project (2026-09-11, xem docstring `models.py::RawVideo.
+    # source_project_id`) — không phải video thật user upload/dán URL, không có hành
+    # động cắt cảnh/xoá watermark nào áp dụng được, không thuộc "Raw Library". `kind`
+    # (mới 2026-09-13) đảo ngược filter này khi ="project" — dùng riêng để build dropdown
+    # "Video nguồn" ở bảng "Asset từ Visual Studio" (Kho Tài Nguyên), nơi mỗi clip trỏ
+    # ĐÚNG 1 hàng ảo này qua `raw_video_id` chứ không phải video thật nào.
+    if kind == "project":
+        q = db.query(RawVideo).filter(RawVideo.source_project_id.isnot(None))
+    else:
+        q = db.query(RawVideo).filter(RawVideo.source_project_id.is_(None))
     if channel_id:
         q = q.join(raw_video_channel, raw_video_channel.c.raw_video_id == RawVideo.id).filter(raw_video_channel.c.channel_id == channel_id)
     rows = q.order_by(RawVideo.created_at.desc()).all()
+    # Tự phục hồi status kẹt do backend crash giữa task nền (mục 132) — KHÔNG chạy job
+    # nào mới, chỉ suy lại từ dữ liệu clip con đã có sẵn, trước khi trả response.
+    changed = False
+    for r in rows:
+        if reconcile_raw_video_status(db, r):
+            changed = True
+    if changed:
+        db.commit()
     return [_raw_out(r) for r in rows]
 
 
@@ -437,6 +462,19 @@ def list_processed_clips(
     if tag:
         tag_lower = tag.lower()
         rows = [c for c in rows if tag_lower in (c.tags or "").lower()]
+    # Tự phục hồi status kẹt của raw_video CHA (mục 132) — `_clip_out` đọc
+    # `c.raw_video.status`, nên "Clip đã cắt" cũng cần thấy status đã suy lại, không chỉ
+    # "Raw Library". Suy theo từng raw_video CHA riêng biệt (1 raw_video có thể xuất hiện
+    # nhiều lần qua nhiều clip con).
+    seen_raw_ids: set[str] = set()
+    changed = False
+    for c in rows:
+        if c.raw_video and c.raw_video.id not in seen_raw_ids:
+            seen_raw_ids.add(c.raw_video.id)
+            if reconcile_raw_video_status(db, c.raw_video):
+                changed = True
+    if changed:
+        db.commit()
     return [_clip_out(c) for c in rows]
 
 

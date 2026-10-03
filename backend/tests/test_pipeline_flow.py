@@ -167,3 +167,69 @@ def test_guardrail_check_requires_body(client, project):
 def test_visual_generate_requires_body(client, project):
     resp = client.post(f"/projects/{project['id']}/visual/generate")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# _ensure_shots — đồng bộ shot list theo `body` (đơn vị, không qua HTTP) — mới
+# (2026-09-10, mục 131): bug thật "APPEND vào cuối" (fix mục 31) làm shot mới bị dồn
+# CUỐI mảng thay vì đúng vị trí xen kẽ trong body khi re-import script thêm block RẢI
+# RÁC (không phải toàn bộ ở cuối) — ảnh hưởng CẢ hiển thị Visual Studio LẪN thứ tự ghép
+# video thật (assembly.py duyệt pack.shots đúng theo thứ tự mảng).
+# ---------------------------------------------------------------------------
+def test_ensure_shots_creates_shots_matching_body_order_when_empty():
+    from app.routers.pipeline import _ensure_shots
+
+    body = [{"block_id": "B01", "visual": "canh 1"}, {"block_id": "B02", "visual": "canh 2"}, {"block_id": "B03", "visual": "canh 3"}]
+    shots = _ensure_shots({"shots": []}, body)
+    assert [s["shot_id"] for s in shots] == ["B01", "B02", "B03"]
+
+
+def test_ensure_shots_preserves_existing_shot_data_when_block_id_matches():
+    """Shot ĐÃ có (đã sinh visual/narration) không bị tạo mới đè lên — GIỮ NGUYÊN object cũ,
+    kể cả khi thứ tự trong `body` không đổi gì."""
+    from app.routers.pipeline import _ensure_shots
+
+    existing_shot = {"shot_id": "B01", "block_id": "B01", "visual_fx": "ĐÃ SỬA TAY", "provider": "local_qwen"}
+    body = [{"block_id": "B01", "visual": "canh goc, khac voi shot da sua"}]
+    shots = _ensure_shots({"shots": [existing_shot]}, body)
+    assert shots == [existing_shot]
+    assert shots[0]["visual_fx"] == "ĐÃ SỬA TAY"  # KHÔNG bị ghi đè lại từ body
+
+
+def test_ensure_shots_inserts_new_interspersed_blocks_at_correct_position():
+    """Bug thật mục 131 — re-import thêm block RẢI RÁC (không dồn cuối) giữa các block
+    cũ đã có shot. Shot MỚI phải nằm ĐÚNG vị trí khớp `body`, không bị dồn hết xuống cuối
+    mảng shots (hành vi SAI của fix mục 31, `existing + new_shots`)."""
+    from app.routers.pipeline import _ensure_shots
+
+    existing_shots = [{"shot_id": "B01", "block_id": "B01"}, {"shot_id": "B02", "block_id": "B02"}, {"shot_id": "B03", "block_id": "B03"}]
+    # Re-import: chèn K1 giữa B01/B02, K2 giữa B02/B03 — đúng kiểu "rải rác" người dùng gặp thật.
+    body = [{"block_id": "B01"}, {"block_id": "K1"}, {"block_id": "B02"}, {"block_id": "K2"}, {"block_id": "B03"}]
+    shots = _ensure_shots({"shots": existing_shots}, body)
+    assert [s["shot_id"] for s in shots] == ["B01", "K1", "B02", "K2", "B03"]
+    # 2 shot cũ vẫn ĐÚNG OBJECT cũ (identity), không bị tạo lại.
+    assert shots[0] is existing_shots[0]
+    assert shots[2] is existing_shots[1]
+    assert shots[4] is existing_shots[2]
+
+
+def test_ensure_shots_preserves_orphaned_shot_when_block_removed_from_body():
+    """Block bị xoá khỏi `body` lúc re-import (hiếm) — shot cũ (có thể đã sinh visual)
+    KHÔNG bị xoá theo, chỉ không còn "đúng vị trí" nào để xếp vào — nối ở CUỐI, không mất
+    dữ liệu đã sinh."""
+    from app.routers.pipeline import _ensure_shots
+
+    existing_shots = [{"shot_id": "B01", "block_id": "B01"}, {"shot_id": "B02", "block_id": "B02", "visual_asset_path": "da_sinh.png"}]
+    body = [{"block_id": "B01"}]  # B02 không còn trong body
+    shots = _ensure_shots({"shots": existing_shots}, body)
+    assert [s["shot_id"] for s in shots] == ["B01", "B02"]
+    assert shots[1]["visual_asset_path"] == "da_sinh.png"
+
+
+def test_ensure_shots_idempotent_when_nothing_changed():
+    from app.routers.pipeline import _ensure_shots
+
+    existing_shots = [{"shot_id": "B01", "block_id": "B01"}, {"shot_id": "B02", "block_id": "B02"}]
+    body = [{"block_id": "B01"}, {"block_id": "B02"}]
+    shots = _ensure_shots({"shots": existing_shots}, body)
+    assert shots == existing_shots

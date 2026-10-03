@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "comfy-mcp": {
+      "command": "C:\\Tools\\comfy-mcp\\.venv\\Scripts\\comfy-mcp.exe",
+      "env": {
+        "COMFY_BIN": "C:\\Tools\\comfy-mcp\\.venv\\Scripts\\comfy.exe",
+        "COMFY_LOCAL_URL": "http://127.0.0.1:8188"
+      }
+    }
+  }
+}

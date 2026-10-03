@@ -33,6 +33,7 @@ from app.db import SessionLocal
 from app.filestore import read_json
 from app.models import Project
 from app.render.camera_motion import build_camera_motion_filter
+from app.render.captions import write_shot_caption_ass
 from app.render.engine import (
     _find_beat,
     _load_brand_profile,
@@ -47,7 +48,7 @@ from app.render.bg_music import resolve_bg_music_source as _resolve_bg_music_sou
 from app.render.intro import intro_duration_sec as _intro_duration_sec, resolve_intro_source as _resolve_intro_source
 from app.render.media_probe import probe_video_dimensions
 from app.render.overlay import resolve_overlay_source as _resolve_overlay_source
-from app.render.schemas import AssemblyProgress, ImageLayer, ShotRenderStatus, VideoLayer
+from app.render.schemas import NARRATION_LANGUAGES, AssemblyProgress, ImageLayer, ShotRenderStatus, VideoLayer
 from app.render.transitions import TRANSITIONS
 from app.timeutil import vn_isoformat
 
@@ -122,8 +123,16 @@ def _scale_blurfill_filter(resolution: str) -> str:
 
 def _resolve_scale_filter(resolution: str, brand: dict) -> str:
     """`BrandProfile.aspect_fill_mode` (§9b.3) — `"crop"` (mặc định, hành vi cover-crop
-    cũ NGUYÊN VẸN) hoặc `"blur"` (blur-fill, xem `_scale_blurfill_filter`)."""
-    if (brand or {}).get("aspect_fill_mode") == "blur":
+    cũ NGUYÊN VẸN) hoặc `"blur"` (blur-fill, xem `_scale_blurfill_filter`).
+
+    **Đã có 1 chế độ thứ 3 `"letterbox"` (viền đen) rồi BỎ LẠI (2026-09-12)** — dựng
+    riêng cho `render/short_export.py` lúc mới build tính năng short-video, nhưng người
+    dùng test thật báo ảnh gốc bị "co hẹp" (thumbnail nhỏ lại giữa 2 viền đen) — yêu cầu
+    đổi hẳn sang crop (không co ảnh, chỉ cắt bớt 2 bên). `short_export.py` giờ ép
+    `aspect_fill_mode="crop"` (giá trị THẬT, không cần biến thể riêng nữa) — xoá hẳn
+    `_scale_letterbox_filter`/nhánh `"letterbox"` ở đây, không để lại code chết."""
+    mode = (brand or {}).get("aspect_fill_mode")
+    if mode == "blur":
         return _scale_blurfill_filter(resolution)
     return _scale_cover_filter(resolution)
 
@@ -332,7 +341,29 @@ def _beat_duration(beat: dict) -> float:
     return DEFAULT_BEAT_DURATION_SEC
 
 
-def _shot_base_duration(status: ShotRenderStatus, beat: dict) -> float:
+def _narration_for_lang(status: ShotRenderStatus, lang: str, primary_language: str) -> tuple[str, str | None, float | None]:
+    """Tra RAW field giọng đọc CỦA 1 shot THEO NGÔN NGỮ XUẤT VIDEO đã chọn — `lang`
+    (mới 2026-09-11, theo yêu cầu người dùng: chọn được ngôn ngữ lúc xuất video, mặc
+    định ngôn ngữ chính của kênh, thời lượng từng cảnh ăn theo giọng đọc của ngôn ngữ
+    đó). Ngôn ngữ CHÍNH của kênh dùng field PHẲNG trên `status` (`narration_*`); ngôn
+    ngữ KHÁC tra `status.narration_translations[lang]` (`TranslatedNarrationStatus`) —
+    cùng pattern đã dùng ở `engine.py::build_narration_download`. Trả về NGUYÊN
+    `(narration_status, narration_asset_path, narration_duration_sec)` — KHÔNG tự áp
+    điều kiện "ready" nào ở đây, để từng nơi gọi tự quyết định đúng điều kiện gốc của
+    mình (`_shot_base_duration`/`_narration_floor` chỉ cần `duration_sec` có giá trị,
+    trong khi đoạn chọn audio mux vào segment cần CẢ `asset_path` — 2 điều kiện khác
+    nhau đã tồn tại TỪ TRƯỚC tính năng này, gộp làm 1 sẽ đổi hành vi ẩn). Ngôn ngữ chưa
+    từng được sinh cho shot (`narration_translations` không có key) trả về
+    `("pending", None, None)`."""
+    if lang == primary_language:
+        return status.narration_status, status.narration_asset_path, status.narration_duration_sec
+    translation = status.narration_translations.get(lang)
+    if translation is None:
+        return "pending", None, None
+    return translation.narration_status, translation.narration_asset_path, translation.narration_duration_sec
+
+
+def _shot_base_duration(status: ShotRenderStatus, beat: dict, lang: str, primary_language: str) -> float:
     """Thời lượng GỐC (trước khi `_reflow_video_durations` điều chỉnh thêm cho video
     lệch slot) của 1 shot — **đổi nguồn 2026-08-20, theo yêu cầu người dùng**: ưu tiên
     độ dài GIỌNG ĐỌC THẬT (`narration_duration_sec`, đo qua ffprobe lúc sinh xong TTS)
@@ -342,9 +373,13 @@ def _shot_base_duration(status: ShotRenderStatus, beat: dict) -> float:
     mới bắt đầu, vì segment cũ dựng đúng NGUYÊN 40s bất kể giọng đọc đã hết từ lâu.
     Dùng giọng đọc thật làm segment dài chính xác bằng audio → không còn khoảng chết,
     khớp trải nghiệm xem video có phụ đề/giọng đọc liền mạch. Fallback về
-    `_beat_duration` khi CHƯA sinh giọng đọc (shot toàn hình, hoặc chưa TTS xong)."""
-    if status.narration_status == "ready" and status.narration_duration_sec:
-        return status.narration_duration_sec
+    `_beat_duration` khi CHƯA sinh giọng đọc (shot toàn hình, hoặc chưa TTS xong).
+
+    **Theo ngôn ngữ xuất video** (2026-09-11) — `lang`/`primary_language` quyết định
+    giọng đọc NÀO được coi là "thật" cho shot này, qua `_narration_for_lang`."""
+    n_status, _, duration = _narration_for_lang(status, lang, primary_language)
+    if n_status == "ready" and duration:
+        return duration
     return _beat_duration(beat)
 
 
@@ -375,16 +410,18 @@ _MIN_DONOR_DURATION_SEC = 0.5
 _REFLOW_EPSILON_SEC = 0.05
 
 
-def _narration_floor(status: ShotRenderStatus) -> float:
+def _narration_floor(status: ShotRenderStatus, lang: str, primary_language: str) -> float:
     """Độ dài TỐI THIỂU 1 shot phải giữ để không cắt cụt giọng đọc CỦA CHÍNH shot đó —
     0 nếu shot không có giọng đọc (sẵn sàng) để bảo vệ. Dùng làm sàn (floor) khi
-    `_reflow_video_durations` định co ngắn 1 shot video, xem bug thật ở đó."""
-    if status.narration_status == "ready" and status.narration_duration_sec:
-        return status.narration_duration_sec
+    `_reflow_video_durations` định co ngắn 1 shot video, xem bug thật ở đó. Theo ngôn
+    ngữ xuất video đã chọn (2026-09-11) — xem `_narration_for_lang`."""
+    n_status, _, duration = _narration_for_lang(status, lang, primary_language)
+    if n_status == "ready" and duration:
+        return duration
     return 0.0
 
 
-def _reflow_video_durations(statuses: list[ShotRenderStatus], durations: list[float]) -> None:
+def _reflow_video_durations(statuses: list[ShotRenderStatus], durations: list[float], lang: str, primary_language: str) -> None:
     """**Tính năng mới (2026-08-17)** — theo yêu cầu người dùng: lỗi ghép thường gặp khi
     upload video tay cho 1 shot là do độ dài VIDEO THẬT không khớp `duration` quy định
     theo timestamp kịch bản của shot đó. Cách xử lý CŨ (mục 43, `_build_segment`) ép
@@ -432,7 +469,7 @@ def _reflow_video_durations(statuses: list[ShotRenderStatus], durations: list[fl
         actual = _probe_audio_duration_sec(path)
         if actual is None or actual <= 0:
             continue  # không đo được (thiếu ffprobe/file lỗi) — để _build_segment tự đóng băng/cắt như cũ
-        target = max(actual, _narration_floor(status))
+        target = max(actual, _narration_floor(status, lang, primary_language))
         diff = round(durations[i] - target, 3)
         if abs(diff) < _REFLOW_EPSILON_SEC:
             continue
@@ -442,16 +479,38 @@ def _reflow_video_durations(statuses: list[ShotRenderStatus], durations: list[fl
             donor = i - 1
         else:
             continue  # chỉ có 1 shot duy nhất — không có ai để bù, giữ hành vi cũ
-        donor_floor = _narration_floor(statuses[donor])
+        donor_floor = _narration_floor(statuses[donor], lang, primary_language)
         durations[donor] = max(_MIN_DONOR_DURATION_SEC, donor_floor, durations[donor] + diff)
         durations[i] = target
+
+
+def _escape_ffmpeg_filter_path(path: str) -> str:
+    """Escape đường dẫn file để nhét AN TOÀN vào bên trong 1 filter ffmpeg dạng
+    `filtername=arg:opt=val` (VD `subtitles=...`) — mới (2026-09-12), dùng cho caption
+    burn-in. `:` là ký tự PHÂN TÁCH option của cú pháp filter (VD ổ đĩa Windows
+    `E:\\...` sẽ bị hiểu NHẦM thành ranh giới option nếu không escape). Backslash Windows
+    đổi sang `/` trước (tương thích tốt hơn qua nhiều lớp parse của ffmpeg, cùng quy ước
+    `Path.as_posix()` dùng ở `_concat_fast`/nơi khác trong file này), rồi escape dấu `:`
+    CÒN LẠI (ổ đĩa) bằng `\\:`.
+
+    **Bug thật xác nhận bằng ffmpeg THẬT (2026-09-12)** — chỉ escape `:` KHÔNG ĐỦ: thử
+    `subtitles=E\\:/path/cap.srt:original_size=...` ra lỗi `Unable to parse
+    "original_size" option value "/path/cap.srt" as image size` — filter graph parser
+    của ffmpeg (KHÁC layer escape của libass bên trong) đọc lố qua dấu `:` đã escape rồi
+    "nuốt" luôn phần `original_size=...` phía sau vào giá trị filename. Fix: BỌC THÊM 1
+    lớp NHÁY ĐƠN quanh toàn bộ đường dẫn đã escape (`'E\\:/path/cap.srt'`) — verify thật:
+    KHÔNG bọc nháy đơn → lỗi trên; CÓ bọc → chạy ffmpeg thành công, trích frame ra thấy
+    ĐÚNG vùng caption có pixel khác biệt (không suy đoán, đã test trực tiếp bằng ffmpeg
+    + so pixel vùng có/không caption)."""
+    escaped = path.replace("\\", "/").replace(":", "\\:")
+    return f"'{escaped}'"
 
 
 def _build_segment(
     ffmpeg: str, visual_path: str, narration_path: str | None, duration: float, out_path: Path,
     *, resolution: str, video_codec: str, audio_codec: str, crf: int, ensure_audio_track: bool = False,
     camera_motion: str = "none", narration_lead_in_sec: float = 0.0, narration_lead_out_sec: float = 0.0,
-    brand: dict | None = None,
+    brand: dict | None = None, caption_ass_path: str | None = None,
 ) -> None:
     """`brand` — **mới (2026-08-26, CHANGE_Semantic_BRoll_Asset_Vault.md §9b.2/§9b.3)**:
     style normalization theo BrandProfile — `_resolve_scale_filter` (crop/blur-fill theo
@@ -515,7 +574,18 @@ def _build_segment(
     thật bằng ffmpeg: video test 2s ép tpad+`-t 5` ra đúng 5s, trích frame ở giây 1.96
     (gần cuối clip gốc) và giây 4.9 (trong vùng đệm) giống hệt nhau — xác nhận ĐÓNG BĂNG
     đúng, không lặp lại từ đầu. Xem thêm `_VIDEO_ASSET_EXTS` (trước đây chỉ nhận diện
-    `.mp4`, bỏ sót `.webm`/`.mov` mà tính năng upload cũng cho phép — cùng sửa 1 lượt)."""
+    `.mp4`, bỏ sót `.webm`/`.mov` mà tính năng upload cũng cho phép — cùng sửa 1 lượt).
+
+    `caption_ass_path` — **mới (2026-09-12)**, theo yêu cầu người dùng "thêm caption vào
+    video... chọn 9 vị trí, kích thước, độ mờ". Burn caption TRỰC TIẾP vào SEGMENT NÀY
+    (không phải 1 lượt trên video ghép xong — xem quyết định kiến trúc ở docstring
+    `CaptionLayer`, `render/schemas.py`) qua filter `subtitles` (libass), nối vào CUỐI
+    chuỗi `vf` đã dựng. File `.ass` HOÀN CHỈNH (tự khai `PlayResX`/`PlayResY`/Style,
+    KHÔNG dùng `force_style`/`original_size` — xem bug thật đã sửa ở docstring
+    `captions.py::write_shot_caption_ass`), timestamp CỤC BỘ `[0, duration)` sinh RIÊNG
+    cho segment này (KHỚP KHÍT vì chính `duration` này quyết định `-t duration` bên
+    dưới). `None`/rỗng (mặc định) → KHÔNG đổi gì (không caller nào khác truyền tham số
+    này)."""
     is_video = visual_path.lower().endswith(_VIDEO_ASSET_EXTS)
 
     cmd = [ffmpeg, "-y"]
@@ -542,12 +612,19 @@ def _build_segment(
     # đã gặp ở `_mix_overlay_effect` làm bài học tương tự về input vô hạn + filter chờ EOF).
     color_grade = _resolve_color_grade_filter(brand)
     grain = _grain_filter_suffix(brand)
+    # Caption burn-in — mới (2026-09-12), nối vào CUỐI CÙNG chuỗi vf (sau color-grade/
+    # grain/tpad) ở CẢ 3 nhánh — caption luôn nổi TRÊN CÙNG mọi hiệu ứng khác của CHÍNH
+    # segment này. File `.ass` đã tự khai PlayRes/Style đầy đủ — không cần `force_style`/
+    # `original_size` (xem docstring tham số `caption_ass_path` ở trên).
+    caption_filter = ""
+    if caption_ass_path:
+        caption_filter = f",subtitles={_escape_ffmpeg_filter_path(caption_ass_path)}"
     if motion_filter:
-        vf = f"{motion_filter},{color_grade},setsar=1{grain}"
+        vf = f"{motion_filter},{color_grade},setsar=1{grain}{caption_filter}"
     elif is_video:
-        vf = f"{_resolve_scale_filter(resolution, brand)},{color_grade},fps={_OUTPUT_FPS}{grain},tpad=stop_mode=clone:stop_duration={duration}"
+        vf = f"{_resolve_scale_filter(resolution, brand)},{color_grade},fps={_OUTPUT_FPS}{grain},tpad=stop_mode=clone:stop_duration={duration}{caption_filter}"
     else:
-        vf = f"{_resolve_scale_filter(resolution, brand)},{color_grade},fps={_OUTPUT_FPS}{grain}"
+        vf = f"{_resolve_scale_filter(resolution, brand)},{color_grade},fps={_OUTPUT_FPS}{grain}{caption_filter}"
 
     cmd += ["-t", str(duration), "-vf", vf, "-c:v", video_codec, *_quality_flags(video_codec, crf), "-pix_fmt", "yuv420p"]
     if narration_path and (narration_lead_in_sec > 0 or narration_lead_out_sec > 0):
@@ -1272,10 +1349,24 @@ def assemble_video(
     codec: Codec = "h264",
     quality: Quality = "medium",
     use_gpu: bool = False,
+    lang: str | None = None,
 ) -> None:
     """Chạy trong FastAPI BackgroundTasks (app/routers/render.py::POST .../assemble).
     Yêu cầu MỌI shot đã `visual_status=="ready"` VÀ `approved=True` (human review) —
     thiếu 1 shot chưa duyệt sẽ raise lỗi rõ ràng, không ghép thiếu cảnh.
+
+    `lang` — **mới (2026-09-11)**, theo yêu cầu người dùng: chọn được NGÔN NGỮ giọng đọc
+    dùng để xuất video (mặc định `None` → ngôn ngữ chính của kênh, xem `BrandProfile.
+    primary_language`) — thời lượng từng cảnh + audio thật sự mux vào video ĐỀU ăn theo
+    giọng đọc của ngôn ngữ này (không còn LUÔN cố định ngôn ngữ chính như trước), qua
+    `_narration_for_lang`/`_shot_base_duration`/`_narration_floor`. Gate CHẶN CỨNG (400,
+    không cho ghép) khi giọng đọc ngôn ngữ này CHƯA sinh hết cho mọi shot nằm ở ROUTER
+    (`routers/render.py::start_assemble`, giống hệt gate visual đã có từ trước) — người
+    dùng yêu cầu chặn cứng sau khi thử bản đầu chỉ cảnh báo không chặn. Hàm NÀY (chạy
+    trong BackgroundTasks, sau khi router đã cho qua gate) vẫn giữ fallback
+    `_beat_duration` cho shot thiếu giọng đọc như lưới an toàn thứ 2 (VD gọi trực tiếp
+    ngoài router, như nhiều test trong `test_background_video.py`/`test_intro.py`/...
+    KHÔNG cố tình set narration cho mục đích test khác).
 
     `use_gpu` — **mới (2026-08-17)**: đổi encoder cuối sang NVENC (`resolve_video_codec`)
     thay vì libx264/libx265 CPU — router đã validate trước (400 tức thì nếu use_gpu +
@@ -1302,7 +1393,7 @@ def assemble_video(
     project TỰ PHỤC HỒI mà không cần sửa tay."""
     _mark_assembly_in_progress(project_id)
     try:
-        _assemble_video_impl(project_id, resolution=resolution, codec=codec, quality=quality, use_gpu=use_gpu)
+        _assemble_video_impl(project_id, resolution=resolution, codec=codec, quality=quality, use_gpu=use_gpu, lang=lang)
     finally:
         _mark_assembly_done(project_id)
 
@@ -1313,6 +1404,7 @@ def _assemble_video_impl(
     codec: Codec = "h264",
     quality: Quality = "medium",
     use_gpu: bool = False,
+    lang: str | None = None,
 ) -> None:
     """Thân hàm THẬT của `assemble_video` — tách riêng (2026-09-02, mục 111) chỉ để bọc
     `_mark_assembly_in_progress`/`_mark_assembly_done` ở ngoài CÙNG mà không phải re-indent
@@ -1337,6 +1429,11 @@ def _assemble_video_impl(
             shots = pack.get("shots", [])
             by_id = {s.shot_id: s for s in state.shots}
             brand = _load_brand_profile(p.channel_id)
+            # Ngôn ngữ xuất video (2026-09-11) — mặc định ngôn ngữ chính của kênh nếu
+            # không truyền `lang`, hoặc nếu `lang` không hợp lệ (VD project cũ gọi lại
+            # 1 lượt ghép đã lưu trước khi có field này).
+            primary_language = brand.get("primary_language") or "vi"
+            export_lang = lang if lang in NARRATION_LANGUAGES else primary_language
             intro_source = _resolve_intro_source(state.intro, brand, shots, by_id)
             bg_music_source = _resolve_bg_music_source(state.bg_music, brand)
             overlay_source = _resolve_overlay_source(state.overlay, brand)
@@ -1398,9 +1495,9 @@ def _assemble_video_impl(
                     raise RuntimeError(f"Shot {shot['shot_id']} chưa sinh xong visual — không thể ghép.")
                 status = status or ShotRenderStatus(shot_id=shot["shot_id"])
                 statuses.append(status)
-                durations.append(_shot_base_duration(status, _find_beat(pack, shot)))
+                durations.append(_shot_base_duration(status, _find_beat(pack, shot), export_lang, primary_language))
 
-            _reflow_video_durations(statuses, durations)
+            _reflow_video_durations(statuses, durations, export_lang, primary_language)
 
             # Đệm lặng đầu/cuối giọng đọc tại ranh giới transition — **mới (2026-08-23)**,
             # bug thật người dùng báo: bật transition (khác "cut") giữa các shot làm giọng
@@ -1417,7 +1514,8 @@ def _assemble_video_impl(
             lead_ins: list[float] = []
             lead_outs: list[float] = []
             for i, shot in enumerate(shots):
-                has_narration = statuses[i].narration_status == "ready" and bool(statuses[i].narration_asset_path)
+                _n_status, _n_asset_path, _ = _narration_for_lang(statuses[i], export_lang, primary_language)
+                has_narration = _n_status == "ready" and bool(_n_asset_path)
                 needs_lead_in = has_narration and (
                     (i == 0 and intro_transition != "cut") or (i > 0 and (shots[i - 1].get("transition_to_next") or "cut") != "cut")
                 )
@@ -1508,18 +1606,43 @@ def _assemble_video_impl(
             def _build_one_segment(i: int, shot: dict) -> Path:
                 status = statuses[i]
                 duration = durations[i]
-                narration_path = status.narration_asset_path if status.narration_status == "ready" else None
+                _n_status, narration_path, _ = _narration_for_lang(status, export_lang, primary_language)
+                if _n_status != "ready":
+                    narration_path = None
                 seg_path = segments_dir / f"segment_{i:03d}.{ext}"
                 # Shot chưa có visual riêng + đang dùng video nền chung → đoạn nền ĐÃ cắt
                 # sẵn (xem trên) đóng vai trò "visual của shot" cho ĐÚNG khung thời gian
                 # này — thay thế TOÀN MÀN HÌNH khi shot CÓ visual riêng (nhánh else giữ
                 # nguyên hành vi cũ 100%), không phải chồng mờ/PiP.
                 visual_path = status.visual_asset_path or str(background_chunk_paths[i])
+
+                # Caption Layer (burn-in) — mới (2026-09-12), theo yêu cầu người dùng.
+                # Chuẩn bị NGAY TRƯỚC KHI gọi `_build_segment` — timestamp CỤC BỘ `[0,
+                # duration)` khớp khít CHÍNH `duration` segment này (xem docstring
+                # `CaptionLayer`/`_build_segment` cho lý do burn per-segment).
+                # `state.caption_layer.lang` — `None`/không hợp lệ → dùng ĐÚNG ngôn ngữ
+                # đang ghép (`export_lang`), khác đi thì dùng ngôn ngữ người dùng tự
+                # chọn riêng cho caption (độc lập ngôn ngữ giọng đọc).
+                caption_ass_path = None
+                if state.caption_layer and state.caption_layer.enabled:
+                    beat = _find_beat(pack, shot)
+                    caption_lang = state.caption_layer.lang if state.caption_layer.lang in NARRATION_LANGUAGES else export_lang
+                    caption_text = (beat.get("audio") if caption_lang == primary_language else (beat.get("audio_by_lang") or {}).get(caption_lang, "")) or ""
+                    ass_path = segments_dir / f"caption_{i:03d}.ass"
+                    cap_w, cap_h = map(int, scale.split(":"))
+                    if write_shot_caption_ass(
+                        ass_path, caption_text, duration,
+                        position=state.caption_layer.position, size_pct=state.caption_layer.size_pct, opacity=state.caption_layer.opacity,
+                        out_w=cap_w, out_h=cap_h,
+                    ):
+                        caption_ass_path = str(ass_path)
+
                 _build_segment(
                     ffmpeg, visual_path, narration_path, duration, seg_path,
                     resolution=scale, video_codec=video_codec, audio_codec=audio_codec, crf=crf,
                     ensure_audio_track=needs_audio_track, camera_motion=shot.get("camera_motion") or "none",
                     narration_lead_in_sec=lead_ins[i], narration_lead_out_sec=lead_outs[i], brand=brand,
+                    caption_ass_path=caption_ass_path,
                 )
                 return seg_path
 
@@ -1735,6 +1858,7 @@ def _assemble_video_impl(
             normalized_path.rename(final_path)
 
             state.final_video_path = str(final_path)
+            state.final_video_lang = export_lang
             state.assembly_status = "done"
             state.assembly_completed_at = vn_isoformat(datetime.now(timezone.utc))
         except subprocess.CalledProcessError as e:

@@ -32,12 +32,13 @@ Provider AI ẩn sau **một interface chung**. Pipeline không biết đang g�
 
 > **Đã build (2026-08-13):** mở rộng `local_endpoint` từ chỉ `llm` sang cả `tts`/`image`/
 > `video` — trước đây câu này ghi "Chỉ áp dụng cho llm ở phạm vi MVP", không còn đúng.
-> Adapter local thật đã có cho cả 4 nhóm: `LocalOpenAICompatProvider` (llm, Ollama —
-> verify thật với `qwen3:14b` trên GPU), `PiperTTSProvider` (tts, in-process CPU),
-> `ComfySDXLImageProvider` (image, ComfyUI+SDXL, GPU), `ComfyWanVideoProvider` (video,
-> ComfyUI+Wan2.2 TI2V-5B chế độ text-to-video, GPU). Chi tiết đầy đủ (lý do chọn từng
-> model, sự cố tương thích torch/CUDA với GPU Blackwell, kết quả verify qua pipeline
-> thật) xem `IMPLEMENTATION_REPORT.md` mục 16.
+> Adapter local: `LocalOpenAICompatProvider` (llm, Ollama), `PiperTTSProvider`/
+> `OmniVoiceProvider` (tts). **Ảnh/video local đã đổi nhiều lần** — hiện (2026-09-24) chỉ
+> còn `ComfyQwenImageProvider` (`local_qwen`, ComfyUI + Qwen-Image-2.1 GGUF, xem §8n) cho
+> ảnh, KHÔNG còn provider video local nào (5 provider cũ — SDXL/Flux/Wan2.2/LocalAI ảnh/
+> LocalAI video — đã xoá hẳn, xem §8h/8i/8j/8m, `IMPLEMENTATION_REPORT.md` mục 156). Chi
+> tiết lịch sử (lý do chọn từng model, sự cố tương thích torch/CUDA với GPU Blackwell, kết
+> quả verify qua pipeline thật) xem `IMPLEMENTATION_REPORT.md` mục 16.
 
 ## 3. Interface adapter (backend)
 
@@ -385,6 +386,20 @@ OmniVoice lẫn nội dung tham chiếu vào narration sinh ra (đo thật: ch�
 với baseline Piper ~26-29). Model tự trim mẫu >20s nhưng chính tài liệu package khuyến
 nghị 3-10s — app chủ động cắt sớm hơn hẳn ngưỡng đó thay vì tin cậy hoàn toàn vào model.
 
+**Giọng đọc đa ngôn ngữ — ưu tiên OmniVoice khi có mẫu giọng (2026-09-04)**: cùng cơ chế
+trên áp dụng cho `BrandProfile.voice_clone_ref_paths[lang]` (mẫu RIÊNG từng ngôn ngữ, xem
+§04) qua `app/render/engine.py::generate_narration_translation`. Provider DUY NHẤT thật
+sự dùng `reference_audio` là OmniVoice (provider khác nhận rồi bỏ qua, xem `TTSProvider.
+synthesize()`) — nếu chain `get_tts_chain(db)` có OmniVoice nhưng KHÔNG phải provider đầu
+(VD ElevenLabs mặc định, OmniVoice là fallback), cứ thử đúng thứ tự chain sẽ khiến mẫu
+giọng vừa upload KHÔNG có tác dụng gì (bug thật phát hiện lúc tự rà soát thiết kế). Fix:
+khi CÓ mẫu giọng cho ngôn ngữ đang sinh, `providers` được sắp lại đưa OmniVoice lên ĐẦU
+(stable sort, giữ nguyên thứ tự phần còn lại) — KHÔNG đụng thứ tự khi không có mẫu. Fix
+này CHỈ áp dụng cho `generate_narration_translation` (ngôn ngữ khác ngôn ngữ chính) —
+`generate_narration_asset` (ngôn ngữ chính, dùng `voice_clone_ref_path` đơn) GIỮ NGUYÊN
+hành vi cũ (cùng khoảng trống lý thuyết nhưng đã tồn tại từ trước, ngoài phạm vi yêu cầu
+đợt này).
+
 **Không làm — Voice Design map từ `brand_voice.tone`** (đề xuất #3 của người dùng): tài
 liệu OmniVoice ghi rõ Voice Design "chỉ train chính trên dữ liệu tiếng Trung + tiếng
 Anh", tiếng Việt "kết quả không ổn định". App này tiếng Việt là ngôn ngữ DUY NHẤT —
@@ -509,118 +524,19 @@ toàn vì Tier 2 vốn tắt mặc định toàn app). Chưa có bảng giá cô
 **Cách lấy API key**: đăng ký tại **fluxapi.ai** (KHÔNG phải bfl.ai) → lấy API key → Cài
 đặt → Provider AI → Thêm provider → nhóm Image → chọn "Flux Kontext (fluxapi.ai)".
 
-## 8h. Cải thiện chất lượng ảnh model local SDXL — đợt 1 (đã build 2026-08-22)
+## 8h/8i/8j. Cải thiện ảnh SDXL + video Wan2.2 local — ĐÃ XOÁ HOÀN TOÀN (2026-09-24)
 
-Người dùng báo ảnh sinh từ `local_sdxl` (ComfyUI) "khác hoàn toàn và xấu hơn nhiều" so
-với Gemini API. Điều tra xác nhận sampler (`steps=30, cfg=7.0, dpmpp_2m+karras`)/resolution
-(`1344x768`, đúng bucket SDXL) đều chuẩn — nguyên nhân THẬT gồm 2 phần, xem
-IMPLEMENTATION_REPORT.md mục 63:
-
-1. **`visual_fx` chứa chỉ dẫn chèn chữ tiếng Việt lên ảnh** (`[Title Card]:`,
-   `[Text Overlay]:`, `[Graphic]:`...) mà pipeline KHÔNG có bước `drawtext`/overlay riêng
-   nào — SDXL render chữ rất kém so với Gemini, đây là khác biệt lớn nhất. Fix:
-   `app/render/engine.py::_strip_text_overlay_tags()` — xoá các tag này (giữ nguyên nội
-   dung của tag `[Visual]:`, tag DUY NHẤT mang mô tả cảnh thật) khỏi prompt gửi riêng cho
-   `local_sdxl` (KHÔNG đổi prompt gửi provider khác).
-2. **Checkpoint SDXL base gốc chưa fine-tune** — nguyên nhân lớn thứ 2 (theo cộng đồng
-   SDXL, xác nhận qua test thật: cùng prompt đã lọc sạch vẫn ra nội dung sai hẳn so với
-   mô tả). Xử lý ở đợt 2 (§8i) — checkpoint painterly + Style LoRA thay base gốc.
-
-**`_build_visual_prompt(shot, brand, *, is_video, for_local_sdxl=False)`** — tham số mới
-`for_local_sdxl`: `True` (chỉ dùng cho `local_sdxl`) áp `_strip_text_overlay_tags`, nối
-bằng ", " (văn phong tag thay câu văn). **Thứ tự (đã sửa mục 66, 2026-08-22)**: NỘI DUNG
-CẢNH (`visual_fx`) LUÔN đứng ĐẦU (KHÔNG bị cắt), khối style cố định (§8i) + style kênh
-đứng SAU — style kênh cắt về trần CỐ ĐỊNH `_LOCAL_SDXL_BRAND_STYLE_MAX_CHARS=90` ký tự
-(không phụ thuộc content dài/ngắn — trước đây "budget còn lại" khiến style phình to nhấn
-chìm content ngắn, bug thật đã sửa). `generate_visual_asset()` tính prompt NGAY TRONG
-vòng lặp fallback chain (trước tính 1 lần dùng chung) — 1 chain vừa có local vừa có cloud
-cần đúng biến thể prompt cho từng provider thử.
-
-**Checkpoint đổi được qua Cài đặt → Provider AI, không cần sửa code** — trước đây
-`ComfySDXLImageProvider.model_name` tồn tại nhưng không dùng ở đâu (field "chết", mặc
-định giả `"sdxl"`). Giờ: `factory.py::_build_asset_provider` truyền `model_name` cho
-`local_sdxl`/`local_wan`; `image_comfy_sdxl.py` dùng `self.model_name or _CHECKPOINT_NAME`
-làm `ckpt_name` thật trong workflow ComfyUI. Đổi checkpoint: tải file `.safetensors` vào
-`ComfyUI/models/checkpoints/`, điền ĐÚNG tên file (kể cả đuôi) vào ô "Model" của provider
-`local_sdxl` — để trống dùng mặc định (xem §8i cho giá trị mặc định hiện tại).
-
-## 8i. Checkpoint & Style LoRA đúng art direction kênh — đợt 2 (đã build 2026-08-22)
-
-Bổ sung §8h — người dùng chỉ ra bảng checkpoint đợt 1 (Juggernaut XL/RealVisXL) SAI HƯỚNG
-cho kênh cần phong cách "tranh vẽ tay/sơn dầu, tránh 3D nhựa hoá" (2/3 lựa chọn đó là
-photoreal). Chi tiết đầy đủ xem IMPLEMENTATION_REPORT.md mục 64.
-
-**Checkpoint mặc định MỚI**: `paintersCheckpointOilPaint_v11.safetensors` ("Painter's
-Checkpoint" v1.1, CivitAI model 240154 — SDXL 1.0 fine-tune hướng painterly, KHÔNG
-photoreal) — thay `sd_xl_base_1.0.safetensors`. Xác nhận tải được (không cần đăng nhập)
-qua endpoint download API của CivitAI (trang web yêu cầu sign-in nhưng API public).
-
-**Style LoRA** (`BrandProfile.style_lora_path`/`style_lora_strength`, §04) — node
-`LoraLoader` (CÓ SẴN trong ComfyUI core, KHÔNG phải custom node — khác IPAdapter Plus đã
-cố tình bỏ ở §8d) chèn giữa `CheckpointLoaderSimple` và `KSampler`/`CLIPTextEncode` trong
-CẢ 2 workflow (`_build_txt2img_workflow`/`_build_img2img_workflow`) khi `style_lora_path`
-khác rỗng. `ComfySDXLImageProvider.generate()` nhận `lora_name`/`lora_strength` — KHÔNG
-khai báo trên `ImageProvider` interface chung (chỉ `local_sdxl` cần) — `engine.py` đọc
-từ BrandProfile, CHỈ truyền khi gọi đúng provider `local_sdxl`.
-
-2 LoRA đã tải sẵn vào `ComfyUI/models/loras/` (mirror MIỄN PHÍ trên HuggingFace
-`EldritchAdam/SDXL_Eldritch_LoRAs` — bản gốc trên CivitAI bị khoá tải, cần API key):
-`ClassipeintXL2.1.safetensors` (oil painting) và `InkArtXL_1.2.safetensors` (ink wash —
-đặt active mặc định cho kênh demo, khớp "mực tàu, giấy dó" trong `visual_style_prompt`).
-
-**Negative prompt** (`image_comfy_sdxl.py::_NEGATIVE_PROMPT`) mở rộng — "no text, no
-title card, no captions" CHUYỂN từ prompt dương (đợt 1) sang đây (negative conditioning
-thật, hiệu quả hơn câu phủ định trong prompt dương); thêm `3d render, plastic, cgi,
-glossy, photorealistic, smooth plastic surface` chặn hướng bị cấm trong art direction.
-
-**Khối style cố định** (`_LOCAL_SDXL_STYLE_PREFIX`, `engine.py`): `"oil painting,
-hand-painted, ink wash, muted warm tones, aged paper texture, cinematic concept art"` —
-chèn SAU nội dung cảnh (đổi từ "đầu prompt" sang "sau nội dung" ở mục 66 — xem §8h, bug
-thật content ngắn bị style nhấn chìm). HẰNG SỐ dùng chung mọi kênh hiện tại (đơn giản
-trước) — CHƯA đưa vào BrandProfile theo từng kênh.
-
-**KHÔNG làm đợt này**: train Style LoRA riêng cho kênh (cần hạ tầng train chưa có), IP-
-Adapter (mâu thuẫn quyết định kiến trúc cũ ở §8d — **đã ĐẢO NGƯỢC một phần ở §8k**, xem
-bên dưới).
-
-## 8j. Cải thiện sinh video local Wan2.2 — Image-to-Video (đã build 2026-08-23)
-
-Theo `StudioFlow_Video_Improvement_Plan.md` (đợt cải thiện video, tiếp nối §8h/§8i vốn
-chỉ áp cho ẢNH). Chi tiết đầy đủ xem IMPLEMENTATION_REPORT.md mục 73.
-
-**Độ phân giải** (`video_comfy_wan.py::_WIDTH/_HEIGHT`): đổi `1280×704` → **`1344×768`**
-— khớp CHÍNH XÁC bucket SDXL (`image_comfy_sdxl.py`), tránh `ImageScale` co/crop ảnh
-anchor bên dưới.
-
-**Image-to-Video** (`app/render/engine.py::_try_generate_wan_anchor_image`): khi
-provider đang thử là `local_wan`, sinh 1 ảnh anchor bằng ĐÚNG provider `local_sdxl`
-(nếu đã cấu hình) — cùng prompt/seed/Style LoRA (§8i) với shot đó — dùng làm
-`start_image` cho Wan2.2 (cơ chế đã có sẵn trong code từ Tier 2, xem §8d, giờ dùng
-theo cách KHÁC: anchor RIÊNG từng shot, không dùng chung 1 thumbnail). Best-effort —
-không cấu hình `local_sdxl`/sinh anchor lỗi đều rơi về text-to-video thuần, không
-chặn video. **KHÔNG giảm `denoise` KSampler** — video cần denoise đủ mọi frame để
-chuyển động mạch lạc, hạ denoise không có lợi ích tốc độ rõ ràng (chi phí vẫn là
-frame×step) mà có rủi ro artifact — I2V ở đây là đòn bẩy CHẤT LƯỢNG, không phải tốc độ.
-
-**Motion prompt riêng** (`_build_video_motion_prompt`): dùng `BrandProfile.motion_tone`
-(§04) làm ràng buộc chuyển động, tách khỏi `visual_style_prompt` (phong cách thị giác
-tĩnh). Nối bằng câu văn đầy đủ (". ") — Wan dùng text encoder UMT5 XXL (kiểu T5, hiểu
-câu tự nhiên tốt hơn CLIP), KHÔNG theo kiểu từ khoá phẩy-ngăn-cách của `for_local_sdxl`.
-
-**Negative prompt** (`_NEGATIVE_PROMPT`) thêm cụm chống lỗi ĐẶC THÙ video diffusion:
-`flickering, morphing, warping face, identity drift between frames, jittery motion`.
-
-**Rút ngắn clip generation** (`_MAX_GENERATE_SECONDS = 4`): số khung THỰC SỰ gửi cho
-Wan bị chặn ở 4s bất kể shot dài hơn — `assembly.py` tự lặp (`-stream_loop -1`) hoặc
-hấp thụ chênh lệch (`_reflow_video_durations`) để lấp đầy đúng thời lượng thật, không
-vỡ đồng bộ audio/giọng đọc.
-
-**Chiến lược "giảm phụ thuộc Wan"**: đề xuất gốc muốn thêm `shot.motion_type` phân loại
-shot cần AI video thật vs shot dùng ảnh tĩnh + chuyển động camera — QUYẾT ĐỊNH KHÔNG
-thêm field mới, vì cơ chế này ĐÃ CÓ SẴN: `Shot.visual_type=image` + `Shot.camera_motion`
-(Ken Burns 2D — `app/render/camera_motion.py`) phục vụ đúng nhu cầu "ảnh tĩnh + chuyển
-động mượt", chỉ cần HƯỚNG DẪN sử dụng đúng thay vì đổi schema (xem `06_uiux.md`/
-`07_prompt_templates.md`).
+3 mục này (đã build 2026-08-22/23) mô tả các cải tiến chất lượng cho `local_sdxl`
+(checkpoint painterly, Style LoRA, xử lý tag chèn chữ) và `local_wan` (Image-to-Video
+anchor, motion prompt riêng). Toàn bộ 2 provider này (cùng `local_flux`/`localai_image`/
+`localai_video`) đã bị **xoá hẳn khỏi codebase** — người dùng đánh giá chất lượng kém
+hơn hẳn `local_qwen` (Qwen-Image-2.1, xem §8n bên dưới) sau khi so sánh trực tiếp qua GPU
+thật, quyết định bỏ toàn bộ pipeline local cũ thay vì giữ song song. Toàn bộ hằng số/hàm
+liên quan (`_strip_text_overlay_tags`, `_LOCAL_SDXL_STYLE_PREFIX`, `_local_sdxl_kwargs`,
+`_try_generate_wan_anchor_image`, `_build_video_motion_prompt`...) đã xoá khỏi
+`app/render/engine.py`; field `BrandProfile.style_loras`/`flux_style_loras`/`motion_tone`
+đã xoá khỏi schema (§04). Không còn provider video LOCAL nào — video giờ CHỈ qua cloud
+(Runway/Sora/Veo/Flux). Chi tiết đầy đủ xem `IMPLEMENTATION_REPORT.md` mục 156.
 
 ## 8k. Cultural lock + multi-LoRA + IPAdapter tham chiếu — chống thiên lệch văn hoá Nhật/Hàn (đã build 2026-08-23)
 
@@ -695,10 +611,9 @@ kỹ thuật" trước, IPAdapter khoá "cảm hứng thị giác" sau). Áp d�
 **Fallback khi IPAdapter lỗi**: `_generate_locked()` — nếu ComfyUI từ chối job có node
 IPAdapter (HTTP ≥ 400, submit `/prompt`), tự động thử lại NGAY 1 lần KHÔNG có IPAdapter
 (coi như không có ảnh tham chiếu) thay vì chặn hẳn sinh ảnh; nếu lần thử lại cũng lỗi mới
-raise. `engine.py::_local_sdxl_kwargs(brand)` (hàm mới, dùng chung cho cả sinh ảnh và
-sinh anchor cho video §8j) đọc `style_loras`/`cultural_lock_negative`/
-`style_reference_paths`/`style_reference_weight` từ BrandProfile thành kwargs cho
-`local_sdxl.generate()`.
+raise. (`engine.py::_local_sdxl_kwargs(brand)` mô tả ở đây — đọc `style_loras`/
+`cultural_lock_negative`/`style_reference_paths`/`style_reference_weight` thành kwargs
+cho `local_sdxl.generate()` — **đã xoá cùng `local_sdxl` (2026-09-24), xem §8h/8i/8j.**)
 
 **RỦI RO CHƯA GIẢI QUYẾT — cần người dùng verify thật**: Phần C dùng bộ node
 (`CLIPVisionLoader`/`IPAdapterModelLoader`/`IPAdapterApply` của
@@ -716,6 +631,72 @@ theo đúng bản đã cài.
 mới cho IPAdapter — `LoadImage`/`ImageBatch`/`IPAdapterApply`/thứ tự sau LoRA/fallback
 HTTP 400), `tsc --noEmit` sạch. KHÔNG/CHƯA verify: hành vi thật của ComfyUI khi chạy
 workflow có IPAdapter (xem rủi ro ở trên).
+
+**CẬP NHẬT — Phần C (IPAdapter) ĐÃ GỠ BỎ HOÀN TOÀN (2026-09-09).** Rủi ro "CHƯA GIẢI
+QUYẾT" ở trên chưa từng được người dùng verify — điều tra lại xác nhận
+`ComfyUI_IPAdapter_plus` chưa từng được cài trên máy người dùng (mọi lần gọi âm thầm rơi
+vào nhánh fallback "không có IPAdapter" mô tả ở trên, tính năng thực chất KHÔNG BAO GIỜ
+hoạt động kể từ khi build). Khi rà soát tính năng LoRA Flux mới (xem §8m), người dùng
+được hỏi thẳng "ảnh tham chiếu còn work không?" và quyết định: "nếu không work thì bỏ
+luôn tính năng ảnh tham chiếu". Đã xoá: `BrandProfile.style_reference_paths`/
+`style_reference_weight` (schema), `_add_ipadapter_nodes` + mọi tham số
+`reference_images`/`style_reference_weight` (`image_comfy_sdxl.py`), toàn bộ cơ chế
+img2img (`image_localai.py` — img2img CHỈ tồn tại để phục vụ tính năng này), 3 endpoint
+CRUD `style-references/*` (`routers/channels.py`), UI upload/preview/weight-slider
+(`ChannelDialog.tsx`). Tier-2 `reference_image` (số ít — cơ chế anchor/img2img RIÊNG dùng
+Thumbnail, §8d/§8j) KHÔNG bị ảnh hưởng — khác cơ chế, không liên quan quyết định này.
+
+## 8m. `local_flux` — ComfyUI + Flux.1-dev (GGUF quantized) — ĐÃ XOÁ HOÀN TOÀN (2026-09-24)
+
+Provider ComfyUI + Flux.1-dev (GGUF quantized, LoRA riêng cho kênh phong cách đặc thù —
+đã build 2026-09-09) đã bị **xoá hẳn khỏi codebase** cùng lúc với `local_sdxl`/`local_wan`/
+`localai_image`/`localai_video` — người dùng đánh giá chất lượng kém hơn hẳn `local_qwen`
+(§8n bên dưới) sau khi so sánh trực tiếp qua GPU thật, quyết định bỏ toàn bộ pipeline
+local cũ. `BrandProfile.flux_style_loras` đã xoá khỏi schema (§04). Chi tiết đầy đủ xem
+`IMPLEMENTATION_REPORT.md` mục 156.
+
+## 8n. `local_qwen` — ComfyUI + Qwen-Image-2.1 (GGUF quantized) — provider ảnh local DUY NHẤT còn lại (mới 2026-09-24)
+
+Sau khi xoá 5 provider local cũ (§8h/8i/8j/8m), `local_qwen` (`app/providers/
+image_comfy_qwen.py`, `ComfyQwenImageProvider`) là provider ẢNH LOCAL DUY NHẤT còn lại
+trong app — theo yêu cầu người dùng "muốn dùng model qwen image, chọn model nào phù hợp
+VRAM hiện tại" (RTX 5060 Ti, ~16GB, verify thật qua `system_stats`).
+
+**Quyết định kiến trúc đã chốt (hỏi trực tiếp người dùng qua nhiều vòng)**:
+- **Qwen-Image-2.1** (Alibaba, 20/9/2026 — 7B tham số, benchmark cao hơn hẳn bản gốc 20B)
+  thay vì bản gốc — **license "Qwen Research", CHỈ nghiên cứu, KHÔNG thương mại** (khác
+  bản gốc Apache 2.0). App đang vận hành kênh YouTube thật — người dùng đã được báo rõ
+  rủi ro này và TỰ quyết định chấp nhận, KHÔNG phải app tự ý chọn.
+- Cân nhắc Nunchaku NVFP4 (tận dụng đúng kiến trúc Blackwell RTX 5060 Ti, nhanh hơn GGUF)
+  rồi **loại bỏ** sau khi verify thật: MIT HAN Lab (tác giả gốc Nunchaku,
+  `github.com/mit-han-lab/ComfyUI-nunchaku`) CHƯA phát hành NVFP4 chính thức cho riêng
+  bản 2.1 — bản cộng đồng (ModelsLab) yêu cầu `torch==2.12.1` (máy đang chạy
+  `torch 2.8.0+cu129` — lệch 4 phiên bản) + không có wheel Windows dựng sẵn, phải build
+  từ source — rủi ro cao ảnh hưởng cả pipeline local đang chạy ổn. **Quyết định cuối:
+  GGUF qua `ComfyUI-GGUF`** (đã cài sẵn từ trước, dùng lại được).
+
+**Đồ thị workflow — ĐÃ VERIFY THẬT qua GPU (không suy đoán)**: `UnetLoaderGGUF` →
+`CLIPLoader` (`type="qwen_image"`) → `TextEncodeQwenImage21` (node RIÊNG cho 2.1, xuất
+CẢ positive lẫn negative — negative_prompt THẬT, khác Flux) → `EmptyLatentImage` (RIÊNG,
+KHÔNG dùng `latent` output của chính node text-encode — cho phép kiểm soát tỷ lệ 16:9/
+9:16 giống `local_sdxl`/`local_flux` cũ) → `KSampler` (`steps=15` — đổi từ 25 sau khi đo
+thật: nhanh hơn ~40%, chất lượng không đổi thấy được — `cfg=1.0, sampler=euler,
+scheduler=simple`) → `VAEDecode` → `SaveImage`. Phát hiện quan trọng lúc verify: input
+`images` (autogrow, dành cho multi-reference edit) của `TextEncodeQwenImage21` bị
+`comfy-cli validate_workflow` báo lỗi giả khi bỏ trống — gọi THẲNG `POST /prompt` (bỏ qua
+lớp validate phía client) xác nhận ComfyUI thật chấp nhận bình thường cho T2I thuần.
+
+**File model** (community GGUF cho unet — city96 chưa làm bản 2.1; text encoder + VAE
+CHÍNH THỨC từ `Comfy-Org/Qwen-Image-2.1`): `Qwen-Image-2.1-Q4.gguf` (5.96GB,
+`realrebelai/Qwen-Image-2.1_GGUFs` — đã tự kiểm tra tên file THẬT qua HF API, không tin
+mù workflow mẫu tải về vì nó ghi SAI tên file), `qwen3vl_8b_w4a8.safetensors` (6.31GB),
+`qwen_image_2.1_vae_bf16.safetensors` (0.68GB). Tổng ~13GB/16GB.
+
+**KHÔNG có ở đợt này**: LoRA style riêng (như `style_loras`/`flux_style_loras` cũ —
+ecosystem LoRA Qwen-Image-2.1 còn rất mới), img2img/multi-reference edit (`images` input
+để dành mở rộng sau), cơ chế anchor ảnh cho video (không còn provider video local nào cần
+tới). Chi tiết đầy đủ + toàn bộ quá trình verify xem docstring
+`app/providers/image_comfy_qwen.py` + `IMPLEMENTATION_REPORT.md` mục 155/156.
 
 ## 8l. Task "vision"/"embedding" — Channel Asset Vault (mới 2026-08-26)
 
@@ -752,7 +733,7 @@ sẽ ảnh hưởng MỌI call site LLM đang có — hook scoring, v.v. — r�
 
 Cả `ollama_*` và `localai_*` đều `connection_type="local_endpoint"` (base_url+model_name,
 không api_key) — dùng CHUNG nhánh `_build_asset_provider` (`factory.py`) đã xử lý cho
-`local_sdxl`/`local_wan`/`localai_image`/`localai_video`, không thêm nhánh riêng.
+`local_qwen` (provider ComfyUI ảnh còn lại, xem §8n), không thêm nhánh riêng.
 
 ## 9. Ràng buộc MVP
 

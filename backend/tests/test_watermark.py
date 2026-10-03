@@ -144,6 +144,29 @@ def test_remove_watermark_from_video_processes_all_frames_and_reports_progress(m
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
+def test_remove_watermark_from_video_force_gemini_uses_corner_bbox(monkeypatch, tmp_path):
+    """Bug thật (2026-09-19, user báo lỗi khi bấm 'Xoá watermark Gemini' cho shot video):
+    `UnboundLocalError: cannot access local variable 'bboxes'` — hàm trả `return bboxes`
+    nhưng biến đó CHỈ được gán trong nhánh dự phòng Florence-2 (mục 148), trong khi nhánh
+    `force_gemini`/`detect_static_watermark_bbox` thành công chỉ gán `bbox` (số ít). Test
+    này gọi THẬT (không mock `detect_static_watermark_bbox`/`gemini_corner_bbox`, chỉ mock
+    bước vá LaMa) với `force_gemini=True` để bắt lại đúng lớp lỗi này nếu tái diễn."""
+    monkeypatch.setattr(wm_pipeline, "inpaint_regions_batch_cropped", _fake_inpaint_batch_cropped)
+
+    ffmpeg = _ffmpeg()
+    video_path = tmp_path / "in.mp4"
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=green:s=320x240:d=1:r=5", "-pix_fmt", "yuv420p", str(video_path)],
+        capture_output=True, check=True, text=True,
+    )
+    out_path = tmp_path / "out.mp4"
+    tmp_dir = tmp_path / "wm_tmp"
+    bboxes = wm_pipeline.remove_watermark_from_video(ffmpeg, str(video_path), out_path, tmp_dir, force_gemini=True)
+    assert bboxes == [wm_detector.gemini_corner_bbox((320, 240))]
+    assert out_path.exists()
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="cần ffmpeg thật trên PATH")
 def test_remove_watermark_from_video_cleans_up_tmp_dir_on_detection_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(wm_pipeline, "detect_watermark_bboxes_robust", lambda image, text_input="watermark": [])
 
@@ -321,3 +344,70 @@ def test_gemini_corner_bbox_has_generous_margin_after_bug5():
     width_fraction, height_fraction = (x2 - x1) / w, (y2 - y1) / h
     assert width_fraction >= 0.13  # 2x half-size = 0.14, chừa chút dung sai làm tròn pixel
     assert height_fraction >= 0.17  # 2x half-size = 0.18
+
+
+# ---------------------------------------------------------------------------
+# detect_static_watermark_bbox — phát hiện video qua ĐỘ LỆCH CHUẨN THEO THỜI GIAN trên
+# nhiều frame (2026-09-18, theo đề xuất người dùng: "cần ít nhất 2 ảnh rồi so khớp mảng
+# pixel giống hệt nhau giữa các frame" — watermark không di chuyển, nội dung thật luôn
+# đổi). Test THUẦN thống kê — KHÔNG cần Florence-2/LaMa/GPU, dựng frame tổng hợp bằng
+# numpy/PIL trực tiếp trên đĩa (không cần ffmpeg thật).
+# ---------------------------------------------------------------------------
+def _make_synthetic_frames(tmp_path, n=30, wm_box=None, wm_alpha=1.0, seed=42):
+    """Dựng `n` frame JPG giả — nền NHIỄU + TRÔI DẦN mỗi frame (mô phỏng nội dung thật
+    luôn đổi qua thời gian), cộng thêm 1 vùng `wm_box` giữ NGUYÊN qua alpha-blend với hệ
+    số `wm_alpha` (1.0 = watermark ĐẶC hoàn toàn tĩnh, <1.0 = BÁN TRONG SUỐT — giá trị vùng
+    đó vẫn đổi theo nền bên dưới nhưng đổi ÍT HƠN hẳn phần còn lại). `wm_box=None` = không
+    có watermark nào (case âm)."""
+    import numpy as np
+    from PIL import Image as PILImage
+
+    w, h = 640, 480
+    rng = np.random.default_rng(seed)
+    paths = []
+    for i in range(n):
+        bg = rng.integers(0, 255, size=(h, w), dtype=np.uint8).astype(np.float32)
+        drift = np.linspace(0, 60, w) + i * 4
+        bg = np.clip(bg * 0.3 + drift[None, :], 0, 255)
+        if wm_box is not None:
+            x1, y1, x2, y2 = wm_box
+            overlay = 230.0
+            region = bg[y1:y2, x1:x2]
+            bg[y1:y2, x1:x2] = region * (1 - wm_alpha) + overlay * wm_alpha
+        arr = np.clip(bg, 0, 255).astype(np.uint8)
+        img = PILImage.fromarray(arr, mode="L").convert("RGB")
+        p = tmp_path / f"frame_{i:04d}.jpg"
+        img.save(p, quality=95)
+        paths.append(p)
+    return paths
+
+
+def test_detect_static_watermark_bbox_finds_opaque_watermark(tmp_path):
+    wm_box = (560, 400, 620, 450)  # gần góc dưới-phải, khớp quy ước đặt watermark thật
+    paths = _make_synthetic_frames(tmp_path, wm_box=wm_box, wm_alpha=1.0)
+    result = wm_detector.detect_static_watermark_bbox(paths)
+    assert result == wm_box
+
+
+def test_detect_static_watermark_bbox_finds_translucent_watermark(tmp_path):
+    """Watermark BÁN TRONG SUỐT (alpha-blend, giá trị pixel VẪN đổi theo nền bên dưới,
+    không giống hệt tuyệt đối giữa các frame) — vẫn phải phát hiện được qua ngưỡng
+    percentile (không cần pixel giống hệt nhau 100%, chỉ cần lệch chuẩn THẤP HƠN hẳn phần
+    còn lại của khung hình)."""
+    wm_box = (555, 395, 620, 452)
+    paths = _make_synthetic_frames(tmp_path, wm_box=wm_box, wm_alpha=0.45)
+    result = wm_detector.detect_static_watermark_bbox(paths)
+    assert result == wm_box
+
+
+def test_detect_static_watermark_bbox_returns_none_when_nothing_static(tmp_path):
+    """Không có watermark nào (toàn khung hình đều đổi liên tục) — trả `None`, để caller
+    (`pipeline.py::remove_watermark_from_video`) tự rơi về Florence-2."""
+    paths = _make_synthetic_frames(tmp_path, wm_box=None)
+    result = wm_detector.detect_static_watermark_bbox(paths)
+    assert result is None
+
+
+def test_detect_static_watermark_bbox_returns_none_for_too_few_frames(tmp_path):
+    paths = _make_synthetic_frames(tmp_path, n=1, wm_box=(560, 400, 620, 450))
+    assert wm_detector.detect_static_watermark_bbox(paths) is None

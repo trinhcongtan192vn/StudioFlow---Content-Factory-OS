@@ -96,8 +96,11 @@ class PromptTemplateCreate(BaseModel):
 @router.post("/prompt-templates")
 def create_prompt_template(body: PromptTemplateCreate, db: Session = Depends(get_db)):
     import time
+    import uuid
 
-    tid = f"pt_{int(time.time() * 1000)}"
+    # Hậu tố hex ngẫu nhiên (2026-09-12) — tránh trùng ID khi 2 hàng tạo trong CÙNG 1
+    # mili giây, xem giải thích đầy đủ ở `asset_vault/ingest.py::_new_id`.
+    tid = f"pt_{int(time.time() * 1000)}{uuid.uuid4().hex[:6]}"
     t = PromptTemplate(id=tid, name=body.name, task=body.task, active_version="v1")
     db.add(t)
     db.add(PromptTemplateVersion(template_id=tid, version="v1", content=body.body, note="Khởi tạo", updated_by="Bạn"))

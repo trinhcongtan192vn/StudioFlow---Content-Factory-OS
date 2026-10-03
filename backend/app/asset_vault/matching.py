@@ -23,26 +23,38 @@ from app.providers.factory import get_embedding
 DEFAULT_SIMILARITY_THRESHOLD = 0.65
 
 
-def _clips_for_channel(db: Session, channel_id: str) -> Query:
+def _clips_for_channel(db: Session, channel_id: str, media_kind: str | None = None) -> Query:
     """`ProcessedClip` đang `active`, có gắn tag kênh RIÊNG `channel_id` — không phụ
-    thuộc `raw_video` cha còn tồn tại hay không."""
-    return (
+    thuộc `raw_video` cha còn tồn tại hay không. `media_kind` — **mới (2026-09-11)** —
+    lọc thêm theo loại ("video"/"image", xem `models.py::ProcessedClip.media_kind`) khi
+    truyền; `None` (mặc định) = không lọc, giữ NGUYÊN hành vi cũ cho caller chưa cần phân
+    biệt loại."""
+    q = (
         db.query(ProcessedClip)
         .join(processed_clip_channel, processed_clip_channel.c.clip_id == ProcessedClip.clip_id)
         .filter(processed_clip_channel.c.channel_id == channel_id, ProcessedClip.active == True)  # noqa: E712
     )
+    if media_kind is not None:
+        q = q.filter(ProcessedClip.media_kind == media_kind)
+    return q
 
 
-def match_by_keyword(db: Session, channel_id: str, scene_description: str, limit: int = 5) -> list[ProcessedClip]:
+def match_by_keyword(db: Session, channel_id: str, scene_description: str, limit: int = 5, *, media_kind: str | None = None) -> list[tuple[ProcessedClip, float]]:
     """Phase A — so khớp THÔ theo từ khoá (không cần Chroma/embedding provider nào cấu
     hình) — đủ dùng ngay, giá trị tức thì trước khi Phase B (semantic) sẵn sàng. Tách mô
     tả shot thành từ ≥3 ký tự, đếm số từ khớp trong `caption`/`tags` của mỗi clip (OR,
-    không cần khớp hết), sắp theo điểm giảm dần."""
+    không cần khớp hết), sắp theo điểm giảm dần. `media_kind` — xem `_clips_for_channel`.
+
+    Trả kèm điểm CHUẨN HOÁ về thang 0-1 (`số từ khớp / tổng số từ mô tả`, **mới
+    2026-09-13** — trước đây chỉ trả `ProcessedClip` trần, bỏ điểm sau khi sort) — cùng
+    thang với `match_semantic` (similarity 0-1) để `get_vault_candidates` hiển thị VÀ sắp
+    xếp ĐỒNG NHẤT cho cả 2 nguồn gợi ý, theo yêu cầu người dùng "thêm matching score và
+    xếp theo thứ tự giảm dần" ở Vault Clip Picker."""
     words = [w.lower().strip(",.;:!?\"'()") for w in scene_description.split() if len(w) >= 3]
     words = [w for w in words if w]
     if not words:
         return []
-    clips = _clips_for_channel(db, channel_id).all()
+    clips = _clips_for_channel(db, channel_id, media_kind).all()
     scored: list[tuple[int, ProcessedClip]] = []
     for clip in clips:
         haystack = f"{clip.caption} {clip.tags}".lower()
@@ -50,21 +62,22 @@ def match_by_keyword(db: Session, channel_id: str, scene_description: str, limit
         if score > 0:
             scored.append((score, clip))
     scored.sort(key=lambda t: t[0], reverse=True)
-    return [c for _, c in scored[:limit]]
+    return [(c, count / len(words)) for count, c in scored[:limit]]
 
 
 def match_semantic(
-    db: Session, channel_id: str, scene_description: str, *, threshold: float = DEFAULT_SIMILARITY_THRESHOLD, top_k: int = 3
+    db: Session, channel_id: str, scene_description: str, *, threshold: float = DEFAULT_SIMILARITY_THRESHOLD, top_k: int = 3, media_kind: str | None = None
 ) -> list[tuple[ProcessedClip, float]]:
     """Phase B — embed mô tả shot (CÙNG embedding provider/model đã dùng lúc index clip,
     §3 giai đoạn C bước 2 — bắt buộc để cùng không gian vector), cosine similarity trong
     Chroma collection TOÀN CỤC (không còn tách theo kênh vật lý — xem
     `vector_store.py`). Lọc theo kênh + `active` + `threshold` ở tầng SQL SAU khi có kết
     quả Chroma — overfetch `top_k*10` (hệ số lớn hơn hẳn bản cũ `top_k*3` vì giờ Chroma
-    trả candidate từ MỌI kênh, cần dư nhiều hơn để đủ `top_k` sau khi lọc đúng kênh)."""
+    trả candidate từ MỌI kênh, cần dư nhiều hơn để đủ `top_k` sau khi lọc đúng kênh).
+    `media_kind` — xem `_clips_for_channel`."""
     embedding = get_embedding(db).embed(scene_description)
     raw_matches = query_similar_clips(embedding, top_k=top_k * 10)
-    channel_clip_ids = {c.clip_id for c in _clips_for_channel(db, channel_id).all()}
+    channel_clip_ids = {c.clip_id for c in _clips_for_channel(db, channel_id, media_kind).all()}
     results: list[tuple[ProcessedClip, float]] = []
     for clip_id, similarity in raw_matches:
         if similarity < threshold or clip_id not in channel_clip_ids:
@@ -94,9 +107,10 @@ def rank_by_usage(candidates: list[ProcessedClip]) -> list[ProcessedClip]:
     return sorted(candidates, key=lambda c: (c.usage_count, c.last_used_at or ""))
 
 
-def fallback_neutral_broll(db: Session, channel_id: str, limit: int = 3) -> list[ProcessedClip]:
+def fallback_neutral_broll(db: Session, channel_id: str, limit: int = 3, *, media_kind: str | None = None) -> list[ProcessedClip]:
     """§5 fallback bước 2 — B-roll trung tính (tag `"ambient"`) khi hết candidate đạt
     ngưỡng. Trả rỗng nếu kênh không gắn clip nào có tag này — caller tự rơi tiếp về
-    fallback ảnh tĩnh + Ken Burns (KHÔNG đổi gì ở render engine, đã có sẵn)."""
-    clips = _clips_for_channel(db, channel_id).all()
+    fallback ảnh tĩnh + Ken Burns (KHÔNG đổi gì ở render engine, đã có sẵn). `media_kind`
+    — xem `_clips_for_channel`."""
+    clips = _clips_for_channel(db, channel_id, media_kind).all()
     return [c for c in clips if "ambient" in (c.tags or "").lower()][:limit]

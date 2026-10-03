@@ -25,6 +25,14 @@ def _ffmpeg() -> str:
     return path
 
 
+def test_new_id_unique_even_when_time_collides(monkeypatch):
+    """Cùng bug/fix `_new_id` đã sửa ở `test_projects_brief.py` (xem docstring đầy đủ ở
+    đó) — `asset_vault/ingest.py` có bản copy RIÊNG, cần verify riêng."""
+    monkeypatch.setattr(ingest.time, "time", lambda: 1789999999.999)
+    ids = [ingest._new_id("clip") for _ in range(50)]
+    assert len(set(ids)) == 50
+
+
 def _make_two_scene_video(path) -> None:
     """Video 6s, 2 cảnh màu tách biệt (0-3s đỏ, 3-6s xanh) — cùng clip test đã verify
     tay `scenedetect.AdaptiveDetector` phát hiện đúng 2 scene tại mốc 3.0s."""
@@ -396,7 +404,8 @@ def test_match_by_keyword_scores_by_word_overlap(channel):
         _seed_clip(db, [channel["id"]], "clip_kw_1", caption="a river flowing through a green forest", tags=["river", "forest"])
         _seed_clip(db, [channel["id"]], "clip_kw_2", caption="a busy city street at night", tags=["city", "night"])
         results = matching.match_by_keyword(db, channel["id"], "footage of a river in the forest")
-        assert results[0].clip_id == "clip_kw_1"
+        assert results[0][0].clip_id == "clip_kw_1"
+        assert 0 < results[0][1] <= 1
     finally:
         db.close()
 
@@ -406,7 +415,7 @@ def test_match_by_keyword_excludes_inactive_clips(channel):
     try:
         _seed_clip(db, [channel["id"]], "clip_inactive", caption="mountain river", tags=["river"], active=False)
         results = matching.match_by_keyword(db, channel["id"], "river")
-        assert all(c.clip_id != "clip_inactive" for c in results)
+        assert all(c.clip_id != "clip_inactive" for c, _ in results)
     finally:
         db.close()
 
@@ -418,7 +427,7 @@ def test_match_by_keyword_excludes_clips_from_other_channel(channel, channel2):
     try:
         _seed_clip(db, [channel2["id"]], "clip_other_ch", caption="a river in the forest", tags=["river"])
         results = matching.match_by_keyword(db, channel["id"], "river forest")
-        assert all(c.clip_id != "clip_other_ch" for c in results)
+        assert all(c.clip_id != "clip_other_ch" for c, _ in results)
     finally:
         db.close()
 
@@ -429,8 +438,8 @@ def test_match_by_keyword_includes_clip_tagged_to_multiple_channels(channel, cha
         _seed_clip(db, [channel["id"], channel2["id"]], "clip_multi_ch", caption="a river in the forest", tags=["river"])
         results_a = matching.match_by_keyword(db, channel["id"], "river forest")
         results_b = matching.match_by_keyword(db, channel2["id"], "river forest")
-        assert any(c.clip_id == "clip_multi_ch" for c in results_a)
-        assert any(c.clip_id == "clip_multi_ch" for c in results_b)
+        assert any(c.clip_id == "clip_multi_ch" for c, _ in results_a)
+        assert any(c.clip_id == "clip_multi_ch" for c, _ in results_b)
     finally:
         db.close()
 
@@ -943,6 +952,131 @@ def test_list_clips_survives_orphaned_clip_after_raw_video_deleted(client, chann
     assert any(c["clip_id"] == "clip_orphan" for c in resp.json())
 
 
+# ---------------------------------------------------------------------------
+# Tự phục hồi status kẹt (mục 132) — bug thật báo bởi người dùng: "Video đã cắt cảnh vẫn
+# hiện đang cắt cảnh, đã gán nhãn nhưng vẫn hiện đang gán nhãn" — gốc rễ do BackgroundTasks
+# không có try/except quanh lệnh gọi lõi, backend crash giữa task để lại status kẹt dù dữ
+# liệu con (clip/caption) đã hoàn tất thật.
+# ---------------------------------------------------------------------------
+def test_reconcile_heals_stuck_tagging_status_when_all_clips_captioned(client, channel):
+    """Case CONFIRMED thật trên dữ liệu production (raw_1789050452744: 36/36 clip đã có
+    caption nhưng status vẫn "tagging") — mô phỏng lại bằng 2 clip đều đã caption."""
+    db = SessionLocal()
+    try:
+        _seed_raw_video(db, [channel["id"]], "raw_stuck_tagging")
+        _seed_clip(db, [channel["id"]], "clip_stuck_1", caption="a river", raw_video_id="raw_stuck_tagging")
+        _seed_clip(db, [channel["id"]], "clip_stuck_2", caption="a mountain", raw_video_id="raw_stuck_tagging")
+    finally:
+        db.close()
+
+    listed = client.get("/asset-vault/raw").json()
+    updated = next(r for r in listed if r["id"] == "raw_stuck_tagging")
+    assert updated["status"] == "indexed"
+    assert updated["error_message"] is None
+
+
+def test_reconcile_heals_stuck_tagging_status_to_error_when_a_clip_failed(client, channel):
+    db = SessionLocal()
+    try:
+        _seed_raw_video(db, [channel["id"]], "raw_stuck_tagging_err")
+        _seed_clip(db, [channel["id"]], "clip_stuck_err_1", caption="ok", raw_video_id="raw_stuck_tagging_err")
+        clip2 = _seed_clip(db, [channel["id"]], "clip_stuck_err_2", raw_video_id="raw_stuck_tagging_err")
+        clip2.caption_error = "vision provider timeout"
+        db.commit()
+    finally:
+        db.close()
+
+    listed = client.get("/asset-vault/raw").json()
+    updated = next(r for r in listed if r["id"] == "raw_stuck_tagging_err")
+    assert updated["status"] == "error"
+    assert "clip_stuck_err_2" in updated["error_message"]
+
+
+def test_reconcile_leaves_tagging_status_when_some_clips_still_uncaptioned(client, channel):
+    """Task gắn nhãn ĐANG thật sự chạy dở (chưa crash) — không được vội suy "indexed"."""
+    db = SessionLocal()
+    try:
+        _seed_raw_video(db, [channel["id"]], "raw_tagging_in_progress")
+        _seed_clip(db, [channel["id"]], "clip_pending_1", caption="done", raw_video_id="raw_tagging_in_progress")
+        _seed_clip(db, [channel["id"]], "clip_pending_2", caption="", raw_video_id="raw_tagging_in_progress")
+    finally:
+        db.close()
+
+    listed = client.get("/asset-vault/raw").json()
+    updated = next(r for r in listed if r["id"] == "raw_tagging_in_progress")
+    assert updated["status"] == "tagging"
+
+
+def test_reconcile_heals_stuck_detecting_status_when_clips_already_exist(client, channel):
+    """Cắt cảnh đã cắt xong (clip con đã tồn tại) nhưng crash trước khi kịp ghi "tagging"
+    — `progress_*` đều None (không có task nào đang chạy dở) là tín hiệu phân biệt với
+    task đang chạy thật."""
+    db = SessionLocal()
+    try:
+        raw = _seed_raw_video(db, [channel["id"]], "raw_stuck_detecting")
+        raw.status = "detecting"
+        db.commit()
+        _seed_clip(db, [channel["id"]], "clip_after_stuck_detect", raw_video_id="raw_stuck_detecting")
+    finally:
+        db.close()
+
+    listed = client.get("/asset-vault/raw").json()
+    updated = next(r for r in listed if r["id"] == "raw_stuck_detecting")
+    assert updated["status"] == "tagging"
+
+
+def test_reconcile_does_not_touch_detecting_status_with_no_clips_yet(client, channel):
+    """7 video thật trên production ở đúng case này (mới upload, 0 clip) — ĐÂY LÀ trạng
+    thái ban đầu đúng, KHÔNG phải bug, không được tự đổi status."""
+    db = SessionLocal()
+    try:
+        raw = _seed_raw_video(db, [channel["id"]], "raw_fresh_upload")
+        raw.status = "detecting"
+        db.commit()
+    finally:
+        db.close()
+
+    listed = client.get("/asset-vault/raw").json()
+    updated = next(r for r in listed if r["id"] == "raw_fresh_upload")
+    assert updated["status"] == "detecting"
+
+
+def test_reconcile_does_not_touch_detecting_status_while_task_actively_running(client, channel):
+    """`progress_*` đã set (task thật đang chạy dở) — dù ĐÃ có vài clip cắt xong, KHÔNG
+    được vội chuyển "tagging" khi task còn đang cắt tiếp các clip còn lại."""
+    db = SessionLocal()
+    try:
+        raw = _seed_raw_video(db, [channel["id"]], "raw_detecting_active")
+        raw.status = "detecting"
+        raw.progress_current = 2
+        raw.progress_total = 5
+        raw.progress_label = "Đang cắt cảnh 2/5"
+        db.commit()
+        _seed_clip(db, [channel["id"]], "clip_mid_detect", raw_video_id="raw_detecting_active")
+    finally:
+        db.close()
+
+    listed = client.get("/asset-vault/raw").json()
+    updated = next(r for r in listed if r["id"] == "raw_detecting_active")
+    assert updated["status"] == "detecting"
+
+
+def test_reconcile_also_applies_via_clips_list_endpoint(client, channel):
+    """`GET /asset-vault/clips` hiện `raw_video_status` (bảng "Clip đã cắt") — phải thấy
+    status ĐÃ suy lại, không chỉ `GET /asset-vault/raw` (bảng "Raw Library")."""
+    db = SessionLocal()
+    try:
+        _seed_raw_video(db, [channel["id"]], "raw_stuck_via_clips")
+        _seed_clip(db, [channel["id"]], "clip_via_clips_1", caption="a", raw_video_id="raw_stuck_via_clips")
+    finally:
+        db.close()
+
+    resp = client.get("/asset-vault/clips?raw_video_id=raw_stuck_via_clips")
+    assert resp.status_code == 200, resp.text
+    clip = resp.json()[0]
+    assert clip["raw_video_status"] == "indexed"
+
+
 def test_matching_clips_for_channel_finds_clip_after_raw_video_deleted(client, channel):
     """Hệ quả NẶNG nhất của bug #98 — `matching.py::_clips_for_channel` TỪNG INNER JOIN
     qua `RawVideo`, nên xoá raw_video cha làm clip biến mất khỏi MỌI kết quả matching
@@ -1188,7 +1322,42 @@ def test_vault_candidates_uses_keyword_fallback_without_embedding_provider(clien
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["used_semantic"] is False
-    assert any(c["clip_id"] == "clip_candidate_1" for c in body["candidates"])
+    cand = next(c for c in body["candidates"] if c["clip_id"] == "clip_candidate_1")
+    # from_visual_studio=False cho clip B-roll thật (raw_video KHÔNG phải hàng ảo đại
+    # diện project) — mới (2026-09-13), xem test riêng trong test_visual_studio_vault.py
+    # cho trường hợp ngược lại (asset lưu từ Visual Studio).
+    assert cand["from_visual_studio"] is False
+    assert cand["tags"] == ["river", "forest"]
+    # match_score cho keyword fallback — mới (2026-09-13, theo yêu cầu người dùng "thêm
+    # matching score") — trước đây LUÔN null cho nhánh keyword, giờ có điểm chuẩn hoá 0-1.
+    assert cand["match_score"] is not None and 0 < cand["match_score"] <= 1
+
+
+def test_vault_candidates_sorted_by_match_score_descending(client, project_with_brief):
+    """Theo yêu cầu người dùng — Vault Clip Picker phải xếp candidate theo match score
+    GIẢM DẦN. `clip_best` khớp cả 5 từ mô tả, `clip_partial` chỉ khớp 2/5 — xác nhận thứ
+    tự VÀ điểm số đúng, không chỉ tình cờ đúng nhờ thứ tự insert."""
+    pid = project_with_brief["id"]
+    channel_id = project_with_brief["channel_id"]
+    shot_id = _import_one_shot_csv(client, pid, visual_fx="a calm river flowing through green forest")
+
+    db = SessionLocal()
+    try:
+        # Chèn "clip_partial" TRƯỚC "clip_best" — nếu code chỉ dựa vào thứ tự insert/query
+        # mặc định (không sort tường minh theo score) thì test này sẽ fail.
+        _seed_clip(db, [channel_id], "clip_partial", caption="a busy river street", tags=[])
+        _seed_clip(db, [channel_id], "clip_best", caption="a calm river flowing through green forest", tags=[])
+    finally:
+        db.close()
+
+    resp = client.get(f"/projects/{pid}/render/shots/{shot_id}/vault-candidates")
+    assert resp.status_code == 200, resp.text
+    candidates = resp.json()["candidates"]
+    ids = [c["clip_id"] for c in candidates]
+    assert ids.index("clip_best") < ids.index("clip_partial")
+    scores = {c["clip_id"]: c["match_score"] for c in candidates}
+    assert scores["clip_best"] > scores["clip_partial"]
+    assert all(a["match_score"] >= b["match_score"] for a, b in zip(candidates, candidates[1:]) if a["match_score"] is not None and b["match_score"] is not None)
 
 
 def test_vault_candidates_requires_shot_description(client, project_with_brief):

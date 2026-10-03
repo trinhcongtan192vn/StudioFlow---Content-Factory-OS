@@ -38,11 +38,11 @@ def test_create_cloud_provider(client):
 def test_local_endpoint_allowed_for_asset_tasks(client):
     """Trước đây `local_endpoint` chỉ cho task=="llm" — đã nới cho cả tts/image/video
     (xem factory.py::_build_asset_provider + specs/05_ai_providers.md §2, mục local AI
-    provider trong IMPLEMENTATION_REPORT.md) vì giờ có adapter local thật cho cả 3
-    (piper/local_sdxl/local_wan), không chỉ LLM (Ollama)."""
+    provider trong IMPLEMENTATION_REPORT.md) vì giờ có adapter local thật cho cả 2
+    (piper/local_qwen), không chỉ LLM (Ollama)."""
     resp = client.post(
         "/providers",
-        json={"task": "image", "provider_name": "local_sdxl", "display_name": "ComfyUI SDXL", "connection_type": "local_endpoint", "endpoint_url": "http://127.0.0.1:8188"},
+        json={"task": "image", "provider_name": "local_qwen", "display_name": "ComfyUI Qwen-Image-2.1", "connection_type": "local_endpoint", "endpoint_url": "http://127.0.0.1:8188"},
     )
     assert resp.status_code == 200
     pv = resp.json()
@@ -89,38 +89,52 @@ def test_patch_provider_set_default_unsets_others(client):
 
 
 # ---------------------------------------------------------------------------
-# GET /providers/local-sdxl/models — liệt kê checkpoint/LoRA ComfyUI cho dropdown
-# (mới 2026-08-22, theo yêu cầu người dùng "cho chọn thay vì phải gõ")
+# GET /providers/comfyui/models — liệt kê checkpoint/LoRA/GGUF ComfyUI cho dropdown
+# (mới 2026-08-22, theo yêu cầu người dùng "cho chọn thay vì phải gõ"; đổi tên endpoint
+# từ /providers/local-sdxl/models — đợt dọn dẹp 2026-09-24 xoá local_sdxl, tên cũ gây
+# hiểu nhầm khi SDXL không còn tồn tại, xem IMPLEMENTATION_REPORT.md)
 # ---------------------------------------------------------------------------
 import respx
 from httpx import Response
 
 
 @respx.mock
-def test_list_local_sdxl_checkpoints(client):
+def test_list_comfyui_checkpoints(client):
     respx.get("http://127.0.0.1:8188/models/checkpoints").mock(return_value=Response(200, json=["paintersCheckpointOilPaint_v11.safetensors", "sd_xl_base_1.0.safetensors"]))
-    resp = client.get("/providers/local-sdxl/models", params={"kind": "checkpoints"})
+    resp = client.get("/providers/comfyui/models", params={"kind": "checkpoints"})
     assert resp.status_code == 200
     assert resp.json()["models"] == ["paintersCheckpointOilPaint_v11.safetensors", "sd_xl_base_1.0.safetensors"]
 
 
 @respx.mock
-def test_list_local_sdxl_loras_with_custom_base_url(client):
+def test_list_comfyui_loras_with_custom_base_url(client):
     respx.get("http://127.0.0.1:9999/models/loras").mock(return_value=Response(200, json=["InkArtXL_1.2.safetensors", "ClassipeintXL2.1.safetensors"]))
-    resp = client.get("/providers/local-sdxl/models", params={"kind": "loras", "base_url": "http://127.0.0.1:9999"})
+    resp = client.get("/providers/comfyui/models", params={"kind": "loras", "base_url": "http://127.0.0.1:9999"})
     assert resp.status_code == 200
     assert resp.json()["models"] == ["InkArtXL_1.2.safetensors", "ClassipeintXL2.1.safetensors"]
 
 
-def test_list_local_sdxl_models_rejects_invalid_kind(client):
-    resp = client.get("/providers/local-sdxl/models", params={"kind": "bogus"})
+def test_list_comfyui_models_rejects_invalid_kind(client):
+    resp = client.get("/providers/comfyui/models", params={"kind": "bogus"})
     assert resp.status_code == 400
 
 
 @respx.mock
-def test_list_local_sdxl_models_502_when_comfyui_unreachable(client):
+def test_list_comfyui_models_unet_gguf_for_qwen(client):
+    """`unet_gguf` — mới (2026-09-09, ban đầu cho `local_flux`, đã xoá), giờ dùng cho
+    provider `local_qwen` (dropdown chọn file GGUF ở Cài đặt → Provider AI) — dùng CHUNG
+    endpoint ComfyUI `/models/{kind}`, thư mục `unet_gguf` do custom node ComfyUI-GGUF
+    tự đăng ký."""
+    respx.get("http://127.0.0.1:8188/models/unet_gguf").mock(return_value=Response(200, json=["Qwen-Image-2.1-Q4.gguf", "Qwen-Image-2.1-Q6.gguf"]))
+    resp = client.get("/providers/comfyui/models", params={"kind": "unet_gguf"})
+    assert resp.status_code == 200
+    assert resp.json()["models"] == ["Qwen-Image-2.1-Q4.gguf", "Qwen-Image-2.1-Q6.gguf"]
+
+
+@respx.mock
+def test_list_comfyui_models_502_when_comfyui_unreachable(client):
     respx.get("http://127.0.0.1:8188/models/checkpoints").mock(side_effect=Exception("connection refused"))
-    resp = client.get("/providers/local-sdxl/models", params={"kind": "checkpoints"})
+    resp = client.get("/providers/comfyui/models", params={"kind": "checkpoints"})
     assert resp.status_code == 502
 
 

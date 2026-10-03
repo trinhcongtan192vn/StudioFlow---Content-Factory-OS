@@ -60,6 +60,30 @@ _ORBIT_ZOOM_MIN, _ORBIT_ZOOM_MAX = 1.05, 1.22
 _UPSCALE = "scale=iw*2:ih*2"
 
 
+def _cover_crop_to_target(out_w: int, out_h: int) -> str:
+    """Crop-fill ảnh nguồn về ĐÚNG tỷ lệ khung xuất (`out_w:out_h`) TRƯỚC khi vào
+    `zoompan`/`rotate` — **bug thật (2026-09-12), phát hiện lúc test tính năng xuất
+    short-video 9:16**: `zoompan`'s tham số `s={out_w}x{out_h}` chỉ ÉP kích thước output
+    CUỐI CÙNG, KHÔNG hề giữ tỷ lệ khung hình gốc — với ảnh 16:9 (project long-form) đưa
+    thẳng vào rồi ép `s=1080x1920` (9:16), kết quả bị BÓP MÉO (width co mạnh, height giãn
+    mạnh, nhìn như ảnh "co lại theo chiều dọc") thay vì crop 2 bên như
+    `assembly.py::_scale_cover_filter` đã làm cho MỌI shot KHÔNG bật camera motion. Toàn
+    bộ short-export ép `aspect_fill_mode="crop"` (mục 138) qua `_resolve_scale_filter`
+    NHƯNG nhánh camera-motion này của `_build_segment` KHÔNG hề đi qua
+    `_resolve_scale_filter` (`build_camera_motion_filter` tự dựng filter chain riêng) —
+    override ở `short_export.py` vô tác dụng với MỌI shot có `camera_motion != "none"`
+    (thực tế là ĐA SỐ shot, Ken Burns là lựa chọn phổ biến).
+
+    Fix: cover-crop (scale-lên-rồi-cắt-thừa, CÙNG công thức `_scale_cover_filter`) đưa
+    ảnh về ĐÚNG tỷ lệ `out_w:out_h` NGAY TỪ ĐẦU, trước cả `_UPSCALE` — khung `zoompan`
+    animate bên trong từ đây trở đi LUÔN cùng tỷ lệ khung xuất, nên `s={out_w}x{out_h}`
+    ở cuối chỉ còn là scale ĐỒNG NHẤT (không bóp méo). Vô hại/gần như no-op khi ảnh nguồn
+    đã ĐÚNG tỷ lệ khung xuất (case phổ biến nhất — ảnh long-form 16:9 ghép vào video
+    16:9), chỉ thật sự cắt bớt khi tỷ lệ lệch nhau (VD ảnh 16:9 ghép vào short-video 9:16
+    — đúng bug này)."""
+    return f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h}"
+
+
 def _eased_progress(n_frames: int) -> str:
     """Tỉ lệ tiến trình 0..1 đã làm MƯỢT bằng smoothstep (3f²-2f³) thay vì tuyến tính
     thô `on/(n-1)`. **Bug thật người dùng báo (2026-08-20)**: hiệu ứng camera "hơi bị
@@ -107,12 +131,15 @@ def build_camera_motion_filter(motion: str, duration: float, out_w: int, out_h: 
         return None
     n_frames = max(1, round(duration * fps))
     size = f"{out_w}x{out_h}"
+    # Ép ảnh nguồn về ĐÚNG tỷ lệ khung xuất TRƯỚC `_UPSCALE`/`zoompan`/`rotate` — xem
+    # docstring `_cover_crop_to_target` cho bug thật đã sửa (2026-09-12).
+    cover_crop = _cover_crop_to_target(out_w, out_h)
     core: str
 
     if motion in ("zoom_in", "zoom_out"):
         z0, z1 = (_ZOOM_MIN, _ZOOM_MAX) if motion == "zoom_in" else (_ZOOM_MAX, _ZOOM_MIN)
         z_expr = _zoom_expr(z0, z1, n_frames)
-        core = f"{_UPSCALE},zoompan=z='{z_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={n_frames}:s={size}:fps={fps}"
+        core = f"{cover_crop},{_UPSCALE},zoompan=z='{z_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={n_frames}:s={size}:fps={fps}"
 
     elif motion in ("pan_left", "pan_right", "tilt_up", "tilt_down"):
         z = _PAN_ZOOM
@@ -124,13 +151,13 @@ def build_camera_motion_filter(motion: str, duration: float, out_w: int, out_h: 
         centered_expr = "ih/2-(ih/zoom/2)" if is_horizontal else "iw/2-(iw/zoom/2)"
         x_expr = moving_expr if is_horizontal else centered_expr
         y_expr = centered_expr if is_horizontal else moving_expr
-        core = f"{_UPSCALE},zoompan=z={z}:x='{x_expr}':y='{y_expr}':d={n_frames}:s={size}:fps={fps}"
+        core = f"{cover_crop},{_UPSCALE},zoompan=z={z}:x='{x_expr}':y='{y_expr}':d={n_frames}:s={size}:fps={fps}"
 
     elif motion == "roll":
         period = max(duration, 0.1)
         angle_expr = f"{_ROLL_ANGLE_RAD:.6f}*sin(2*PI*t/{period:.3f})"
         core = (
-            f"{_UPSCALE},rotate=a='{angle_expr}':ow=iw:oh=ih:fillcolor=black,"
+            f"{cover_crop},{_UPSCALE},rotate=a='{angle_expr}':ow=iw:oh=ih:fillcolor=black,"
             f"crop=iw/{_ROLL_CROP_MARGIN}:ih/{_ROLL_CROP_MARGIN},scale={out_w}:{out_h},fps={fps}"
         )
 
@@ -141,7 +168,7 @@ def build_camera_motion_filter(motion: str, duration: float, out_w: int, out_h: 
         z_expr = _zoom_expr(_ORBIT_ZOOM_MIN, _ORBIT_ZOOM_MAX, n_frames)
         x_expr = f"(iw-iw/zoom)*(0.5+0.5*sin(2*PI*on/{n_frames}))"
         y_expr = f"(ih-ih/zoom)*(0.5+0.5*cos(2*PI*on/{n_frames}))"
-        core = f"{_UPSCALE},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={n_frames}:s={size}:fps={fps}"
+        core = f"{cover_crop},{_UPSCALE},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={n_frames}:s={size}:fps={fps}"
 
     else:
         return None  # pragma: no cover — mọi key trong CAMERA_MOTIONS (trừ "none") đã xử lý ở trên

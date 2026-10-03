@@ -21,8 +21,9 @@ from app.models import AuditLog, Budget, Channel, Project
 from app.pipeline import generation as gen
 from app.pipeline.script_import import ScriptImportError, build_template_workbook, parse_script_file
 from app.render.camera_motion import CAMERA_MOTIONS
+from app.render.captions import DEFAULT_MAX_CUE_CHARS, split_block_into_cues
 from app.render.intro import intro_duration_sec, resolve_intro_source
-from app.render.schemas import RenderState
+from app.render.schemas import NARRATION_LANGUAGES, RenderState
 from app.render.transitions import TRANSITIONS
 import json
 
@@ -144,6 +145,35 @@ def edit_script_block_audio(project_id: str, index: int, body: BlockAudioBody, d
     return pack
 
 
+class BlockTranslationBody(BaseModel):
+    text: str
+
+
+@router.patch("/projects/{project_id}/script/body/{index}/translation/{lang}")
+def edit_script_block_translation(project_id: str, index: int, lang: str, body: BlockTranslationBody, db: Session = Depends(get_db)):
+    """Sửa tay bản dịch VO của 1 block cho 1 NGÔN NGỮ (giọng đọc đa ngôn ngữ, 2026-09-04)
+    — ghi vào `body[index].audio_by_lang[lang]`, KHÔNG đụng `audio` gốc (đó luôn là bản
+    dịch của `primary_language`, xem `edit_script_block_audio` ở trên cho field đó).
+    Dùng khi cần chỉnh 1 câu sau khi import file đa ngôn ngữ, không cần re-import cả
+    file. `lang` phải thuộc `NARRATION_LANGUAGES` (app/render/schemas.py)."""
+    if lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+    p = _get_project_or_404(db, project_id)
+    pdir, brand, brief, pack = _load(db, p)
+    body_items = (pack.get("script") or {}).get("body") or []
+    if index < 0 or index >= len(body_items):
+        raise HTTPException(404, "Không tìm thấy block")
+    audio_by_lang = body_items[index].get("audio_by_lang") or {}
+    audio_by_lang[lang] = body.text
+    body_items[index]["audio_by_lang"] = audio_by_lang
+    if lang == (brand.get("primary_language") or "vi"):
+        body_items[index]["audio"] = body.text
+    pack["script"]["body"] = body_items
+    pack["script"]["full_text"] = "\n\n".join(b.get("audio", "") for b in body_items if b.get("audio"))
+    write_json(pdir / "pack.json", pack)
+    return pack
+
+
 _SRT_DEFAULT_DURATION_SEC = 5.0
 
 
@@ -156,10 +186,22 @@ def _format_srt_timestamp(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _build_srt(body: list[dict], *, shot_by_block_id: dict[str, dict], narration_by_shot_id: dict, intro_offset: float) -> str:
-    """Sinh nội dung .srt chuẩn từ `script.body` — 1 cue/block (KHÔNG tự tách câu dài
-    thành nhiều dòng phụ đề ngắn như phần mềm sub chuyên dụng — đủ dùng làm transcript
-    có timeline theo dõi, đúng phạm vi yêu cầu).
+def _build_srt(
+    body: list[dict], *, shot_by_block_id: dict[str, dict], narration_by_shot_id: dict, intro_offset: float,
+    lang: str | None = None, primary_language: str = "vi", max_cue_chars: int = DEFAULT_MAX_CUE_CHARS,
+) -> str:
+    """Sinh nội dung .srt chuẩn từ `script.body`.
+
+    **Cắt nhỏ cue dài — mới (2026-09-12)**, theo yêu cầu người dùng: "File transcript srt
+    đang chia timestamp theo block. Vấn đề là mỗi block có thể đọc quá dài nên việc hiển
+    thị subtitle theo transcript bị tràn chữ. Cần cắt ngắn xuống" — TRƯỚC ĐÂY hàm này cố
+    tình 1 cue/block NGUYÊN VĂN (xem lịch sử mục 52), giờ mỗi block được cắt thành nhiều
+    cue ngắn hơn `max_cue_chars` qua `captions.split_block_into_cues` — timestamp mỗi
+    cue chia lại theo tỷ lệ ký tự trên CHÍNH khoảng `(start, duration)` đã tính đúng theo
+    giọng đọc THẬT của ngôn ngữ đang xử lý (xem đoạn dưới) — không đổi tổng thời lượng/vị
+    trí từng block trên timeline, chỉ chia nhỏ HIỂN THỊ bên trong. Xem thêm docstring
+    `captions.py` cho lý do timing luôn khớp ĐÚNG VO thật của từng ngôn ngữ dù không giả
+    định tốc độ đọc/nói.
 
     **Đổi nguồn thời lượng (2026-08-20, theo yêu cầu người dùng)**: timestamp kịch bản
     (`timestamp_sec`/`end_sec`, nhập tay lúc import CSV/Excel) CHỈ mang tính THAM KHẢO —
@@ -173,18 +215,33 @@ def _build_srt(body: list[dict], *, shot_by_block_id: dict[str, dict], narration
     `intro_offset` (giây) — cộng vào MỌI cue: nếu project có intro (shot mở đầu riêng
     HOẶC video/audio thương hiệu cấp kênh, xem `render/intro.py`), video ghép ra THẬT
     SỰ bắt đầu với đoạn intro đó TRƯỚC — transcript phải dịch theo đúng offset này mới
-    khớp timeline video thật, không phải bắt đầu từ 0 như video không có intro."""
+    khớp timeline video thật, không phải bắt đầu từ 0 như video không có intro.
+
+    `lang` — **mới (2026-09-04)**, giọng đọc đa ngôn ngữ: `None` (mặc định) hoặc bằng
+    `primary_language` giữ NGUYÊN hành vi cũ (đọc `b.audio`/field `narration_*` gốc của
+    shot). Ngôn ngữ KHÁC đọc `b.audio_by_lang[lang]` + `status.narration_translations[lang]`
+    — timeline theo giọng đọc THẬT của CHÍNH ngôn ngữ đó (không dùng lại thời lượng
+    ngôn ngữ chính, vì bản dịch dài/ngắn khác nhau ra audio khác thời lượng)."""
+    is_primary = lang is None or lang == primary_language
     cues: list[tuple[float, float, str]] = []
     cursor = intro_offset
     for b in body:
-        text = (b.get("audio") or "").strip()
+        text = (b.get("audio") if is_primary else (b.get("audio_by_lang") or {}).get(lang, "")) or ""
+        text = text.strip()
         if not text:
             continue
         shot = shot_by_block_id.get(b.get("block_id"))
         status = narration_by_shot_id.get(shot["shot_id"]) if shot else None
-        if status is not None and status.narration_status == "ready" and status.narration_duration_sec:
-            duration = status.narration_duration_sec
-        else:
+        duration = None
+        if status is not None:
+            if is_primary:
+                if status.narration_status == "ready" and status.narration_duration_sec:
+                    duration = status.narration_duration_sec
+            else:
+                translation = status.narration_translations.get(lang)
+                if translation is not None and translation.narration_status == "ready" and translation.narration_duration_sec:
+                    duration = translation.narration_duration_sec
+        if duration is None:
             start_raw = b.get("timestamp_sec")
             end_raw = b.get("end_sec")
             start_est = float(start_raw) if isinstance(start_raw, (int, float)) else 0.0
@@ -192,7 +249,7 @@ def _build_srt(body: list[dict], *, shot_by_block_id: dict[str, dict], narration
             duration = max(0.1, end_est - start_est)
         start = cursor
         end = cursor + duration
-        cues.append((start, end, text))
+        cues.extend(split_block_into_cues(text, start, duration, max_chars=max_cue_chars))
         cursor = end
     lines: list[str] = []
     for i, (start, end, text) in enumerate(cues):
@@ -203,18 +260,9 @@ def _build_srt(body: list[dict], *, shot_by_block_id: dict[str, dict], narration
     return "\n".join(lines)
 
 
-@router.get("/projects/{project_id}/script/transcript-srt")
-def download_transcript_srt(project_id: str, db: Session = Depends(get_db)):
-    """Transcript kịch bản dạng `.srt` (timeline giống phụ đề) — mỗi block script = 1
-    cue. Nút "Tải transcript (.srt)" ở Script Studio (2026-08-16, theo yêu cầu người
-    dùng). Timeline dùng ĐỘ DÀI GIỌNG ĐỌC THẬT + offset intro (nếu có) — xem docstring
-    `_build_srt` (2026-08-20, mục 52 IMPLEMENTATION_REPORT.md)."""
-    p = _get_project_or_404(db, project_id)
+def _load_srt_context(db: Session, p: Project, project_id: str):
     pdir, brand, brief, pack = _load(db, p)
     body = (pack.get("script") or {}).get("body", [])
-    if not body:
-        raise HTTPException(400, "Chưa có script để xuất transcript")
-
     shots = pack.get("shots", [])
     shot_by_block_id = {s.get("block_id"): s for s in shots if s.get("block_id")}
     render_raw = read_json(pdir / "render.json")
@@ -222,8 +270,22 @@ def download_transcript_srt(project_id: str, db: Session = Depends(get_db)):
     narration_by_shot_id = {s.shot_id: s for s in render_state.shots}
     intro_source = resolve_intro_source(render_state.intro, brand, shots, narration_by_shot_id)
     intro_offset = intro_duration_sec(intro_source)
+    return body, shot_by_block_id, narration_by_shot_id, intro_offset, brand.get("primary_language") or "vi"
 
-    content = _build_srt(body, shot_by_block_id=shot_by_block_id, narration_by_shot_id=narration_by_shot_id, intro_offset=intro_offset)
+
+@router.get("/projects/{project_id}/script/transcript-srt")
+def download_transcript_srt(project_id: str, db: Session = Depends(get_db)):
+    """Transcript kịch bản dạng `.srt` (timeline giống phụ đề) — mỗi block script = 1
+    cue. Nút "Tải transcript (.srt)" ở Script Studio (2026-08-16, theo yêu cầu người
+    dùng). Timeline dùng ĐỘ DÀI GIỌNG ĐỌC THẬT + offset intro (nếu có) — xem docstring
+    `_build_srt` (2026-08-20, mục 52 IMPLEMENTATION_REPORT.md). Luôn xuất ngôn ngữ CHÍNH
+    của kênh — xem `download_transcript_srt_lang` bên dưới cho ngôn ngữ khác."""
+    p = _get_project_or_404(db, project_id)
+    body, shot_by_block_id, narration_by_shot_id, intro_offset, primary_language = _load_srt_context(db, p, project_id)
+    if not body:
+        raise HTTPException(400, "Chưa có script để xuất transcript")
+
+    content = _build_srt(body, shot_by_block_id=shot_by_block_id, narration_by_shot_id=narration_by_shot_id, intro_offset=intro_offset, primary_language=primary_language)
     return Response(
         content=content.encode("utf-8"),
         media_type="application/x-subrip",
@@ -231,17 +293,94 @@ def download_transcript_srt(project_id: str, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/projects/{project_id}/script/import/template")
-def download_script_import_template(project_id: str, db: Session = Depends(get_db)):
-    """File Excel mẫu đúng 6 cột `script_import.py::parse_script_rows()` yêu cầu, kèm
-    2 dòng ví dụ — người dùng tải về, điền theo, rồi dùng lại chính nút "Nhập kịch bản
-    từ file" bên cạnh. Nội dung mẫu tĩnh (không phụ thuộc project) nhưng vẫn đặt path
-    lồng theo project cho nhất quán với 2 endpoint import/parse, import/confirm."""
-    _get_project_or_404(db, project_id)
+@router.get("/projects/{project_id}/script/transcript-srt/{lang}")
+def download_transcript_srt_lang(project_id: str, lang: str, db: Session = Depends(get_db)):
+    """Transcript `.srt` cho 1 NGÔN NGỮ CỤ THỂ — giọng đọc đa ngôn ngữ (2026-09-04). Cùng
+    logic `download_transcript_srt` ở trên, khác timeline nếu `lang` không phải ngôn ngữ
+    chính (đọc `audio_by_lang[lang]` + `narration_translations[lang]`, xem `_build_srt`)."""
+    if lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+    p = _get_project_or_404(db, project_id)
+    body, shot_by_block_id, narration_by_shot_id, intro_offset, primary_language = _load_srt_context(db, p, project_id)
+    if not body:
+        raise HTTPException(400, "Chưa có script để xuất transcript")
+
+    content = _build_srt(body, shot_by_block_id=shot_by_block_id, narration_by_shot_id=narration_by_shot_id, intro_offset=intro_offset, lang=lang, primary_language=primary_language)
+    if not content.strip():
+        raise HTTPException(400, f"Chưa có văn bản/giọng đọc ngôn ngữ '{lang}' nào sẵn sàng để xuất.")
     return Response(
-        content=build_template_workbook(),
+        content=content.encode("utf-8"),
+        media_type="application/x-subrip",
+        headers={"Content-Disposition": f'attachment; filename="transcript_{lang}.srt"'},
+    )
+
+
+@router.get("/projects/{project_id}/script/transcript-txt")
+def download_transcript_txt(project_id: str, db: Session = Depends(get_db)):
+    """Kịch bản dạng `.txt` THUẦN, KHÔNG timestamp (khác `.srt` ở trên) — mới
+    (2026-09-12), theo yêu cầu người dùng: "Thêm nút tải kịch bản dạng .txt không có
+    timestamp ở màn script studio cho mọi ngôn ngữ." Nút "Tải kịch bản (.txt)" ở Script
+    Studio, cạnh nút .srt đã có. Luôn xuất ngôn ngữ CHÍNH của kênh — xem
+    `download_transcript_txt_lang` bên dưới cho ngôn ngữ khác."""
+    p = _get_project_or_404(db, project_id)
+    _pdir, brand, _brief, pack = _load(db, p)
+    body = (pack.get("script") or {}).get("body", [])
+    if not body:
+        raise HTTPException(400, "Chưa có script để xuất kịch bản")
+
+    from app.render.pack_export import build_script_txt
+
+    content = build_script_txt(pack, primary_language=brand.get("primary_language") or "vi")
+    if not content.strip():
+        raise HTTPException(400, "Chưa có nội dung lời thoại nào để xuất.")
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="script.txt"'},
+    )
+
+
+@router.get("/projects/{project_id}/script/transcript-txt/{lang}")
+def download_transcript_txt_lang(project_id: str, lang: str, db: Session = Depends(get_db)):
+    """Kịch bản `.txt` THUẦN cho 1 NGÔN NGỮ CỤ THỂ — mới (2026-09-12). Cùng logic
+    `download_transcript_txt` ở trên, khác nguồn văn bản nếu `lang` không phải ngôn ngữ
+    chính (đọc `audio_by_lang[lang]`, xem `build_script_txt`)."""
+    if lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+    p = _get_project_or_404(db, project_id)
+    _pdir, brand, _brief, pack = _load(db, p)
+    body = (pack.get("script") or {}).get("body", [])
+    if not body:
+        raise HTTPException(400, "Chưa có script để xuất kịch bản")
+
+    from app.render.pack_export import build_script_txt
+
+    primary_language = brand.get("primary_language") or "vi"
+    content = build_script_txt(pack, lang=lang, primary_language=primary_language)
+    if not content.strip():
+        raise HTTPException(400, f"Chưa có văn bản ngôn ngữ '{lang}' nào sẵn sàng để xuất.")
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="script_{lang}.txt"'},
+    )
+
+
+@router.get("/projects/{project_id}/script/import/template")
+def download_script_import_template(project_id: str, multilang: bool = False, db: Session = Depends(get_db)):
+    """File Excel mẫu đúng cột `script_import.py::parse_script_rows()` yêu cầu, kèm
+    dòng ví dụ — người dùng tải về, điền theo, rồi dùng lại chính nút "Nhập kịch bản
+    từ file" bên cạnh. Nội dung mẫu tĩnh (không phụ thuộc project) nhưng vẫn đặt path
+    lồng theo project cho nhất quán với 2 endpoint import/parse, import/confirm.
+
+    `multilang` — **mới (2026-09-04)** — `True` trả mẫu 11 cột (1 VO/ngôn ngữ), dùng
+    cho nút "Tải mẫu đa ngôn ngữ" ở Script Studio."""
+    _get_project_or_404(db, project_id)
+    filename = "mau-nhap-kich-ban-da-ngon-ngu.xlsx" if multilang else "mau-nhap-kich-ban.xlsx"
+    return Response(
+        content=build_template_workbook(multilang=multilang),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="mau-nhap-kich-ban.xlsx"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -249,11 +388,15 @@ def download_script_import_template(project_id: str, db: Session = Depends(get_d
 async def import_script_parse(project_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Bước 1 nhập kịch bản từ CSV/Excel (đã build vòng 4) — chỉ parse & trả preview
     (số block/số từ/thời lượng ước tính), CHƯA lưu vào Pack. Khớp dialog xác nhận
-    trong design. Parse phía server — xem app/pipeline/script_import.py."""
-    _get_project_or_404(db, project_id)
+    trong design. Parse phía server — xem app/pipeline/script_import.py.
+
+    File có nhiều cột `VO (XX)` (giọng đọc đa ngôn ngữ, 2026-09-04) — cột trở thành
+    `audio` gốc chọn theo `BrandProfile.primary_language` của kênh."""
+    p = _get_project_or_404(db, project_id)
+    pdir, brand, brief, pack = _load(db, p)
     content = await file.read()
     try:
-        result = parse_script_file(content, file.filename or "")
+        result = parse_script_file(content, file.filename or "", primary_language=brand.get("primary_language") or "vi")
     except ScriptImportError as e:
         raise HTTPException(400, str(e))
     return result
@@ -329,24 +472,38 @@ def _seed_shot_from_beat(beat: dict, index: int) -> dict:
 
 
 def _ensure_shots(pack: dict, body: list[dict]) -> list[dict]:
-    """Tạo/ĐỒNG BỘ shot list — IDEMPOTENT với shot đã có (không ghi đè/xoá), nhưng vẫn
-    bổ sung shot MỚI cho block chưa có shot. Dùng chung cho `/visual/generate` (bấm
-    "Đi tới Visual Studio") VÀ `/visual/ensure-shots-for-narration` (bấm "Sinh giọng
-    đọc cho toàn bộ block" ở Script Studio, mục 30 IMPLEMENTATION_REPORT.md).
+    """Tạo/ĐỒNG BỘ shot list — IDEMPOTENT với shot đã có (không ghi đè/xoá dữ liệu shot
+    đã sinh visual/narration), nhưng vẫn bổ sung shot MỚI cho block chưa có shot, VÀ giữ
+    ĐÚNG THỨ TỰ theo `body` (xem bug thật mục 131 bên dưới). Dùng chung cho
+    `/visual/generate` (bấm "Đi tới Visual Studio") VÀ `/visual/ensure-shots-for-narration`
+    (bấm "Sinh giọng đọc cho toàn bộ block" ở Script Studio, mục 30 IMPLEMENTATION_
+    REPORT.md).
 
     **Bug thật phát hiện 2026-08-17 (mục 31)**: bản đầu tiên của hàm này ("tạo nếu rỗng,
     có gì thì trả nguyên") xử lý đúng trường hợp shots CHƯA TỪNG tạo, nhưng SAI khi
     người dùng SỬA/DUYỆT LẠI Full Script dài hơn (thêm block) sau khi shots đã tạo từ
     trước — `body` dài ra nhưng `pack.shots` (đã tồn tại) không bao giờ được mở rộng
-    theo, "có gì thì trả nguyên" giữ mãi bộ shot CŨ NGẮN HƠN. Đo thật trên project người
-    dùng: 31 block script nhưng chỉ 12 shot — 19 block cuối KHÔNG BAO GIỜ có shot, nên
-    không thể sinh visual/narration cho chúng ở bất kỳ màn nào.
+    theo, "có gì thì trả nguyên" giữ mãi bộ shot CŨ NGẮN HƠN. Fix mục 31: đồng bộ theo
+    `block_id` (field ổn định, duy nhất — KHÔNG dùng `linked_timestamp_sec` vì giá trị
+    này có thể lệch giữa các lần tạo/sửa), block chưa có shot → tạo mới, APPEND vào cuối.
 
-    **Fix — ĐỒNG BỘ theo `block_id`** (field ổn định, duy nhất — KHÔNG dùng
-    `linked_timestamp_sec` vì giá trị này có thể lệch giữa các lần tạo/sửa): block nào
-    CHƯA có shot khớp `block_id` → tạo mới bằng `_seed_shot_from_beat`, APPEND vào cuối;
-    shot đã có GIỮ NGUYÊN (không đụng — bảo toàn liên kết visual/narration đã sinh cho
-    các block cũ).
+    **Bug thật TIẾP THEO phát hiện 2026-09-10 (mục 131)** — fix mục 31 tự nó lại sai khi
+    block MỚI không nằm ở CUỐI `body` mà XEN KẼ giữa các block cũ (VD người dùng re-import
+    thêm 8 block "K1".."K8" ở nhiều vị trí rải rác trong kịch bản — K1 ở đầu, K8 gần cuối,
+    không phải toàn bộ 8 block dồn ở cuối). "APPEND vào cuối" (mục 31) khiến 8 shot K*
+    MỚI bị dồn hết xuống CUỐI mảng `pack.shots`, lệch hẳn vị trí thật trong `body` — không
+    chỉ SAI hiển thị ở Visual Studio (shot xen kẽ đúng chỗ trong Script Studio nhưng dồn
+    cuối ở Visual Studio) mà còn ảnh hưởng THẬT tới lúc ghép video (`assembly.py` duyệt
+    `pack.shots` ĐÚNG THEO THỨ TỰ MẢNG để dựng timeline — shot lệch vị trí = clip lệch vị
+    trí trong video xuất ra).
+
+    **Fix mục 131 — DỰNG LẠI mảng shots THEO ĐÚNG THỨ TỰ `body`**: với mỗi block trong
+    `body` (theo đúng thứ tự), dùng LẠI shot đã có nếu khớp `block_id` (giữ nguyên toàn bộ
+    dữ liệu đã sinh — không tạo mới đè lên), hoặc tạo mới bằng `_seed_shot_from_beat` nếu
+    chưa có. Shot CŨ nào không còn khớp block nào trong `body` (hiếm — VD block bị xoá
+    khỏi script lúc re-import) được GIỮ LẠI, nối vào CUỐI (không bao giờ xoá dữ liệu đã
+    sinh, chỉ khác chỗ những shot này không còn "đúng vị trí" nào để xếp vào — đây là
+    trường hợp biên, không phải luồng chính người dùng gặp).
 
     **Đơn giản hoá 2026-08-17 (mục 44)**: trước đây còn 1 nhánh AI tự sinh shot
     (`gen.generate_shots`) cho script KHÔNG phải import (`source != "import"`) — nhánh
@@ -354,12 +511,11 @@ def _ensure_shots(pack: dict, body: list[dict]) -> list[dict]:
     LUÔN LÀ `"import"` (đường DUY NHẤT còn lại để có script). Hàm này giờ chỉ còn đúng 1
     đường xử lý, không branch theo `source` nữa."""
     existing = pack.get("shots") or []
-    have_block_ids = {s.get("block_id") for s in existing if s.get("block_id")}
-    missing = [(i, b) for i, b in enumerate(body) if b.get("block_id") not in have_block_ids]
-    if not missing and existing:
-        return existing
-    new_shots = [_seed_shot_from_beat(b, i) for i, b in missing]
-    return existing + new_shots if existing else new_shots
+    by_block_id = {s.get("block_id"): s for s in existing if s.get("block_id")}
+    body_block_ids = {b.get("block_id") for b in body}
+    ordered = [by_block_id[b.get("block_id")] if b.get("block_id") in by_block_id else _seed_shot_from_beat(b, i) for i, b in enumerate(body)]
+    orphaned = [s for s in existing if s.get("block_id") not in body_block_ids]
+    return ordered + orphaned
 
 
 @router.post("/projects/{project_id}/visual/ensure-shots-for-narration")
@@ -396,6 +552,78 @@ def generate_visual_shots(project_id: str, db: Session = Depends(get_db)):
     p.max_step_reached = max(p.max_step_reached, 2)
     db.commit()
     return pack
+
+
+class ShotBulkPatchBody(BaseModel):
+    shot_ids: list[str]
+    transition_to_next: str | None = None
+    camera_motion: str | None = None
+
+
+# **THỨ TỰ ĐĂNG KÝ QUAN TRỌNG** — route path LITERAL `/shots/bulk` PHẢI đăng ký TRƯỚC route
+# có path PARAM `/shots/{shot_id}` bên dưới. FastAPI/Starlette khớp route theo ĐÚNG thứ tự
+# đăng ký (không tự ưu tiên path cụ thể hơn path param) — nếu để SAU, request
+# `PATCH .../shots/bulk` sẽ bị route `{shot_id}` "nuốt" trước (hiểu "bulk" là 1 shot_id),
+# `patch_shots_bulk` bên dưới không bao giờ được gọi tới (404 "Không tìm thấy shot" thay vì
+# chạy đúng logic bulk) — bug thật gặp lúc viết test, xem IMPLEMENTATION_REPORT.md mục 130.
+@router.patch("/projects/{project_id}/visual/shots/bulk")
+def patch_shots_bulk(project_id: str, body: ShotBulkPatchBody, db: Session = Depends(get_db)):
+    """Sửa hàng loạt `transition_to_next`/`camera_motion` cho NHIỀU shot cùng lúc — mới
+    (2026-09-10), theo yêu cầu người dùng: "cho phép bulk edit 2 lựa chọn ... cho nhiều
+    hoặc tất cả block" ở Visual Studio. Đọc/ghi `pack.json` ĐÚNG 1 LẦN (không lặp N
+    request PATCH đơn lẻ như `patch_shot` bên dưới — tránh đọc/ghi thừa khi áp dụng cho
+    nhiều chục shot cùng lúc). Truyền được CẢ 2 field 1 lần hoặc CHỈ 1 field (field còn
+    lại giữ nguyên, cùng nguyên tắc "None = không đổi" của `patch_shot`) — frontend gọi
+    RIÊNG cho từng field (2 nút "Áp dụng" độc lập) nên trong thực tế luôn chỉ 1 field/lần,
+    nhưng endpoint không giả định điều đó.
+
+    KHÔNG validate `visual_type` của từng shot (VD áp `camera_motion` lên cả shot đang là
+    video) — set field không dùng tới là VÔ HẠI (assembly.py chỉ đọc `camera_motion` khi
+    `not is_video`, xem `_build_segment`), và `shot_ids` gửi lên đã được frontend tự lọc
+    đúng loại shot phù hợp trước khi gọi (VD chỉ gửi shot ảnh cho camera_motion) — endpoint
+    này chỉ áp dụng đúng những gì được yêu cầu, không tự ý lọc thêm."""
+    if body.transition_to_next is None and body.camera_motion is None:
+        raise HTTPException(400, "Cần ít nhất 1 trong 2 field transition_to_next/camera_motion")
+    if body.transition_to_next is not None and body.transition_to_next not in TRANSITIONS:
+        raise HTTPException(400, f"Transition không hợp lệ — chỉ nhận: {', '.join(TRANSITIONS)}")
+    if body.camera_motion is not None and body.camera_motion not in CAMERA_MOTIONS:
+        raise HTTPException(400, f"Hiệu ứng camera không hợp lệ — chỉ nhận: {', '.join(CAMERA_MOTIONS)}")
+    p = _get_project_or_404(db, project_id)
+    pdir, brand, brief, pack = _load(db, p)
+    shot_id_set = set(body.shot_ids)
+    matched = 0
+    for s in pack.get("shots", []):
+        if s["shot_id"] not in shot_id_set:
+            continue
+        matched += 1
+        if body.transition_to_next is not None:
+            s["transition_to_next"] = body.transition_to_next
+        if body.camera_motion is not None:
+            s["camera_motion"] = body.camera_motion
+    if matched == 0:
+        raise HTTPException(404, "Không tìm thấy shot nào khớp shot_ids")
+    write_json(pdir / "pack.json", pack)
+    return pack
+
+
+class SaveShotsToVaultBody(BaseModel):
+    shot_ids: list[str]
+
+
+# Cùng lý do đăng ký TRƯỚC route `{shot_id}` bên dưới như `/shots/bulk` ở trên (mục 130) —
+# `save-to-vault` là path LITERAL, phải đứng trước path PARAM để không bị "nuốt" nhầm.
+@router.post("/projects/{project_id}/visual/shots/save-to-vault")
+def save_shots_to_vault_endpoint(project_id: str, body: SaveShotsToVaultBody, db: Session = Depends(get_db)):
+    """Lưu ảnh/video đã sinh của 1-nhiều shot vào Kho Tài Nguyên để tái sử dụng cho
+    project khác cùng kênh — mới (2026-09-11), theo yêu cầu người dùng. Xem
+    `asset_vault/from_visual_studio.py::save_shots_to_vault` cho logic đầy đủ (bỏ qua
+    shot chưa sẵn sàng thay vì chặn cả batch, cập nhật đè nếu shot đã từng lưu)."""
+    if not body.shot_ids:
+        raise HTTPException(400, "Cần ít nhất 1 shot_id")
+    p = _get_project_or_404(db, project_id)
+    from app.asset_vault.from_visual_studio import save_shots_to_vault
+
+    return save_shots_to_vault(db, p, body.shot_ids)
 
 
 class ShotPatchBody(BaseModel):

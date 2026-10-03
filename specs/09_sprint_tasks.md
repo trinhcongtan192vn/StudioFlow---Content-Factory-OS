@@ -161,7 +161,11 @@ Thứ tự triển khai M1 (theo dependency): Foundation → DB → Provider AI 
 > ở M3, chưa build.
 
 ### M4 — Intelligence Loop (Post-GA)
-- Tích hợp YouTube Analytics API thay nạp tay (§08 mục 7).
+- ~~Tích hợp YouTube Analytics API thay nạp tay~~ **đã build 2026-09-12** (§08 mục 7,
+  Phase 1: OAuth connect, APV/CTR/retention giây 30/bình luận/DE-AT-CH tự động, retention
+  theo chương, Dashboard tab "Chỉ số YouTube"). Còn lại CHƯA build: RPM tự động (không
+  khả thi — quyền monetary khó xin), Returning Viewers tự động (cần spike xác nhận API
+  trước).
 - Tinh chỉnh gợi ý Hook/cấu trúc theo dữ liệu tích lũy.
 
 ---

@@ -10,11 +10,10 @@ from app.providers.claude import ClaudeProvider
 from app.providers.embedding_localai import LocalAIEmbeddingProvider
 from app.providers.embedding_ollama import OllamaEmbeddingProvider
 from app.providers.gemini import GeminiProvider
-from app.providers.image_comfy_sdxl import ComfySDXLImageProvider
+from app.providers.image_comfy_qwen import ComfyQwenImageProvider
 from app.providers.image_flux import FluxImageProvider
 from app.providers.image_flux_kontext import FluxKontextImageProvider
 from app.providers.image_gemini import GeminiImageProvider
-from app.providers.image_localai import LocalAIImageProvider
 from app.providers.image_openai import OpenAIImageProvider
 from app.providers.local_openai_compat import LocalOpenAICompatProvider
 from app.providers.mock import MockLLMProvider
@@ -29,9 +28,7 @@ from app.providers.tts_elevenlabs import ElevenLabsTTSProvider
 from app.providers.tts_gemini import GeminiTTSProvider
 from app.providers.tts_omnivoice import OmniVoiceProvider
 from app.providers.tts_piper import PiperTTSProvider
-from app.providers.video_comfy_wan import ComfyWanVideoProvider
 from app.providers.video_flux import FluxVideoProvider
-from app.providers.video_localai import LocalAIVideoProvider
 from app.providers.video_sora import SoraVideoProvider
 from app.providers.video_veo import VeoVideoProvider
 from app.providers.vision_gemini import GeminiVisionProvider
@@ -44,35 +41,35 @@ _LLM_ADAPTERS = {
     "gemini": GeminiProvider,
 }
 
-# `local_sdxl`/`local_wan` (ComfyUI) SONG SONG `localai_image`/`localai_video` (LocalAI,
-# mới 2026-08-25, xem docstring image_localai.py/video_localai.py) — additive theo kế
-# hoạch migrate đã duyệt, KHÔNG xoá adapter ComfyUI ở đợt này (chỉ xoá SAU khi verify
-# thật qua GPU người dùng).
 _TTS_ADAPTERS = {"vbee": VbeeTTSProvider, "elevenlabs": ElevenLabsTTSProvider, "openai": OpenAITTSProvider, "gemini": GeminiTTSProvider, "piper": PiperTTSProvider, "omnivoice": OmniVoiceProvider}
 _IMAGE_ADAPTERS = {
     "flux": FluxImageProvider, "flux_kontext": FluxKontextImageProvider, "midjourney": MidjourneyImageProvider, "openai": OpenAIImageProvider, "gemini": GeminiImageProvider,
-    "local_sdxl": ComfySDXLImageProvider, "localai_image": LocalAIImageProvider,
+    # `local_qwen` (mới 2026-09-24) — ComfyUI + Qwen-Image-2.1 GGUF, xem
+    # image_comfy_qwen.py. Provider ẢNH LOCAL DUY NHẤT còn lại — **đợt dọn dẹp 2026-09-24**
+    # đã xoá hẳn `local_sdxl`/`local_flux`/`localai_image` (chất lượng kém hơn hẳn Qwen,
+    # theo đánh giá thật của người dùng sau khi so sánh trực tiếp).
+    "local_qwen": ComfyQwenImageProvider,
 }
 _VIDEO_ADAPTERS = {
     "runway": RunwayVideoProvider, "sora": SoraVideoProvider, "veo": VeoVideoProvider, "flux": FluxVideoProvider,
-    "local_wan": ComfyWanVideoProvider, "localai_video": LocalAIVideoProvider,
+    # KHÔNG còn provider video LOCAL nào (đợt dọn dẹp 2026-09-24 xoá `local_wan`/
+    # `localai_video` cùng lúc với 3 provider ảnh local cũ) — video giờ CHỈ qua cloud.
 }
 # Task "vision"/"embedding" — mới (CHANGE_Semantic_BRoll_Asset_Vault.md), phục vụ
 # captioning + semantic matching Channel Asset Vault. `localai_vision`/`localai_embedding`
 # và `ollama_vision`/`ollama_embedding` đều là local_endpoint (base_url+model_name, không
-# api_key) — cùng nhánh `_build_asset_provider` đã xử lý cho
-# local_sdxl/local_wan/localai_image/localai_video, không cần thêm nhánh riêng.
-# `ollama_*` thêm sau (IMPLEMENTATION_REPORT.md mục 86) khi phát hiện máy người dùng
-# KHÔNG cài LocalAI — tái dùng Ollama đã chạy sẵn cho task `llm` thay vì bắt cài thêm
-# 1 service mới; giữ cả `localai_*` cho người dùng nào cài LocalAI thật (provider thay
-# thế được, đúng CLAUDE.md nguyên tắc #4).
+# api_key) — cùng nhánh `_build_asset_provider` chung cho mọi provider local, không cần
+# thêm nhánh riêng. `ollama_*` thêm sau (IMPLEMENTATION_REPORT.md mục 86) khi phát hiện
+# máy người dùng KHÔNG cài LocalAI — tái dùng Ollama đã chạy sẵn cho task `llm` thay vì
+# bắt cài thêm 1 service mới; giữ cả `localai_*` cho người dùng nào cài LocalAI thật
+# (provider thay thế được, đúng CLAUDE.md nguyên tắc #4).
 _VISION_ADAPTERS = {"ollama_vision": OllamaVisionProvider, "localai_vision": LocalAIVisionProvider, "gemini_vision": GeminiVisionProvider}
 _EMBEDDING_ADAPTERS = {"ollama_embedding": OllamaEmbeddingProvider, "localai_embedding": LocalAIEmbeddingProvider}
 
 # provider_name của adapter local (connection_type=="local_endpoint") theo từng task —
 # dùng ở _build_asset_provider() để biết constructor không nhận api_key (khác cloud),
 # xem §05 mục 2 (mở rộng local_endpoint sang tts/image/video, trước đó chỉ llm).
-_LOCAL_ASSET_PROVIDER_NAMES = {"piper"}  # local_sdxl/local_wan dùng base_url (nhánh mặc định), không cần liệt kê ở đây
+_LOCAL_ASSET_PROVIDER_NAMES = {"piper"}  # local_qwen dùng base_url (nhánh mặc định), không cần liệt kê ở đây
 
 
 class NoProviderConfiguredError(Exception):
@@ -165,15 +162,13 @@ def _build_asset_provider(cfg: ProviderConfig, adapters: dict):
         raise ValueError(f'Provider "{cfg.display_name}" ({cfg.provider_name}) chưa hỗ trợ thực thi thật.')
     if cfg.connection_type == "local_endpoint":
         # Local (§05 mục 2, mở rộng sang tts/image/video) — không dùng api_key. Piper
-        # (TTS) chạy in-process, không có server nào để trỏ base_url tới (khác
-        # ComfyUI dùng cho image/video local — xem app/providers/image_comfy_sdxl.py,
-        # video_comfy_wan.py).
+        # (TTS) chạy in-process, không có server nào để trỏ base_url tới (khác ComfyUI
+        # dùng cho local_qwen — xem app/providers/image_comfy_qwen.py).
         if cfg.provider_name in _LOCAL_ASSET_PROVIDER_NAMES:
             return adapter_cls(model_name=cfg.model_name or "")
-        # local_sdxl/local_wan — **mới (2026-08-22)**: giờ truyền THÊM `model_name`
-        # (trước chỉ truyền `base_url`) để checkpoint SDXL đổi được qua Cài đặt → Provider
-        # AI mà không cần sửa code, xem app/providers/image_comfy_sdxl.py — rỗng vẫn giữ
-        # đúng hành vi mặc định cũ (constructor tự fallback về checkpoint gốc).
+        # local_qwen truyền cả `base_url` LẪN `model_name` (đổi GGUF qua Cài đặt → Provider
+        # AI mà không cần sửa code) — rỗng vẫn giữ đúng hành vi mặc định (constructor tự
+        # fallback về GGUF mặc định).
         return adapter_cls(base_url=cfg.endpoint_url or "", model_name=cfg.model_name or "")
     api_key = decrypt_secret(cfg.api_key_encrypted) if cfg.api_key_encrypted else ""
     try:

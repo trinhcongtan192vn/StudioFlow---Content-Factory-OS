@@ -4,8 +4,10 @@ app/render/engine.py, không bao giờ ghi lại vào pack.json.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -24,12 +26,15 @@ from app.render.assembly import (
     Codec,
     Quality,
     Resolution,
+    _narration_for_lang,
     assemble_video,
     probe_gpu_encoder,
     resolve_video_codec,
 )
 from app.render.pack_export import export_pack_bundle
-from app.render.schemas import BackgroundVideoOverride, BgMusicOverride, ImageLayer, IntroAssetStatus, OverlayEffectOverride, VideoLayer
+from app.render.short_export import create_short_export, delete_short_export, run_short_export
+from app.providers.factory import NoProviderConfiguredError, get_vision
+from app.render.schemas import NARRATION_LANGUAGES, BackgroundVideoOverride, BgMusicOverride, CaptionLayer, CharacterReferenceStatus, ImageLayer, IntroAssetStatus, OverlayEffectOverride, RenderState, TranslatedNarrationStatus, VideoLayer
 from app.render.transitions import TRANSITIONS
 from app.timeutil import vn_isoformat
 
@@ -199,17 +204,30 @@ def regenerate_visual(project_id: str, shot_id: str, background_tasks: Backgroun
 
 
 @router.post("/projects/{project_id}/render/shots/{shot_id}/remove-watermark")
-def remove_shot_watermark(project_id: str, shot_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def remove_shot_watermark(project_id: str, shot_id: str, background_tasks: BackgroundTasks, mode: str = "auto", db: Session = Depends(get_db)):
     """Xoá watermark khỏi ảnh/video ĐÃ SINH/upload cho 1 shot — tái dùng `app/watermark/`
     (Florence-2 + LaMa) xây cho Kho Tài Nguyên (IMPLEMENTATION_REPORT.md mục 96/97/99).
     Yêu cầu shot đã có asset `visual_status=="ready"`. KHÔNG phát hiện watermark KHÔNG
     coi là lỗi (400/500) — asset gốc giữ NGUYÊN, chỉ ghi `visual_watermark_note` để UI
-    báo rõ ràng, tách biệt khỏi `visual_error` (lỗi thật)."""
+    báo rõ ràng, tách biệt khỏi `visual_error` (lỗi thật).
+
+    `mode` (2026-09-18) — `"auto"` (mặc định, nút "Xoá watermark" chung): với ẢNH, CHỈ
+    chạy nếu `status.visual_provider == "gemini"` (xoá ảnh mặc định luôn vá vị trí góc cố
+    định của Gemini/Nano Banana — `watermark/detector.py::gemini_corner_bbox` — áp nhầm
+    cho ảnh nguồn khác sẽ làm hỏng 1 vùng ảnh không hề có watermark, xem
+    IMPLEMENTATION_REPORT.md mục tương ứng). VIDEO không bị gate này — tự định vị qua
+    đa-frame/Florence-2 (không phụ thuộc provider). `"gemini"` (nút riêng "Xoá watermark
+    Gemini", CHO CẢ ẢNH LẪN VIDEO — người dùng chủ động xác nhận "asset này có watermark
+    Gemini") — ép chạy bất kể `visual_provider`: ảnh dùng `gemini_corner_bbox` như cũ,
+    VIDEO cũng CHUYỂN sang dùng thẳng `gemini_corner_bbox` (bỏ qua đa-frame/Florence-2) —
+    xem docstring `watermark/pipeline.py::remove_watermark_from_video` `force_gemini` cho
+    lý do (đã thử so khớp mẫu template, verify thật cho thấy KHÔNG đáng tin trên nền chi
+    tiết, nên quay về vị trí cố định đã verify)."""
     p = _get_project_or_404(db, project_id)
     _require_not_in_progress(project_id)
     pdir = project_dir(p.channel_id, p.id)
     pack = read_json(pdir / "pack.json") or {}
-    _find_shot_and_beat(pack, shot_id)  # 404 sớm nếu shot không tồn tại
+    shot, _beat = _find_shot_and_beat(pack, shot_id)  # 404 sớm nếu shot không tồn tại
 
     state = engine.load_render_state(pdir, project_id)
     status = _find_shot_status(state, shot_id)
@@ -217,25 +235,38 @@ def remove_shot_watermark(project_id: str, shot_id: str, background_tasks: Backg
         raise HTTPException(404, "Không tìm thấy trạng thái render cho shot này")
     if status.visual_status != "ready" or not status.visual_asset_path:
         raise HTTPException(400, "Shot chưa có ảnh/video sẵn sàng — sinh hoặc upload trước khi xoá watermark.")
+    is_video = shot.get("visual_type") == "video"
+    if mode == "auto" and not is_video and status.visual_provider != "gemini":
+        raise HTTPException(
+            400,
+            f"Ảnh này không rõ có phải từ Gemini không (provider: {status.visual_provider or 'không rõ'}) — "
+            'dùng nút "Xoá watermark Gemini" nếu bạn chắc chắn ảnh có watermark Gemini, hoặc bỏ qua nếu ảnh không có watermark.',
+        )
     status.visual_status = "generating"
     status.visual_watermark_note = None
     engine.save_render_state(pdir, state)
 
-    background_tasks.add_task(engine.remove_shot_watermark, project_id, shot_id)
+    background_tasks.add_task(engine.remove_shot_watermark, project_id, shot_id, mode)
     return state.model_dump()
 
 
 @router.post("/projects/{project_id}/render/remove-watermark-all")
-def remove_all_shots_watermark(project_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def remove_all_shots_watermark(project_id: str, background_tasks: BackgroundTasks, mode: str = "auto", db: Session = Depends(get_db)):
     """Xoá watermark cho MỌI shot đang có ảnh/video sẵn sàng trong project — bỏ qua thầm
     lặng shot chưa sinh xong (cùng nguyên tắc `approve_all_shots`). Tóm tắt kết quả
     (`scanned`/`cleaned`/`no_watermark`/`failed`) trả qua `RenderState.
-    watermark_scan_summary` sau khi chạy xong nền — frontend poll như mọi bulk khác."""
+    watermark_scan_summary` sau khi chạy xong nền — frontend poll như mọi bulk khác.
+
+    `mode` (2026-09-18) — `"auto"` (mặc định, nút "Xoá watermark toàn bộ slot"): CŨNG bỏ
+    qua thầm lặng ảnh không rõ nguồn Gemini (không tính vào `scanned`) — video luôn được
+    xử lý. `"gemini"` (nút riêng "Xoá watermark Gemini toàn bộ slot") — xử lý MỌI shot
+    ready (ảnh lẫn video), không gate provider — xem docstring `engine.py::
+    remove_all_shots_watermark`."""
     p = _get_project_or_404(db, project_id)
     _require_not_in_progress(project_id)
     pdir = project_dir(p.channel_id, p.id)
     state = engine.load_render_state(pdir, project_id)
-    background_tasks.add_task(engine.remove_all_shots_watermark, project_id)
+    background_tasks.add_task(engine.remove_all_shots_watermark, project_id, mode)
     return state.model_dump()
 
 
@@ -243,6 +274,35 @@ _IMAGE_EXT_BY_CONTENT_TYPE = {"image/png": "png", "image/jpeg": "jpg", "image/we
 _IMAGE_EXT_BY_SUFFIX = {".png": "png", ".jpg": "jpg", ".jpeg": "jpg", ".webp": "webp"}
 _VIDEO_EXT_BY_CONTENT_TYPE = {"video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov"}
 _VIDEO_EXT_BY_SUFFIX = {".mp4": "mp4", ".webm": "webm", ".mov": "mov"}
+
+
+def _match_ext_for_shot(shot: dict, filename: str, content_type: str | None) -> str | None:
+    """Xác định đuôi file chuẩn hoá (`png`/`jpg`/`webp`/`mp4`/`webm`/`mov`) nếu loại file
+    (ảnh/video) khớp `shot.visual_type` — `None` nếu sai loại. Tách từ `upload_shot_visual`
+    (2026-09-16) để dùng chung cho cả upload 1 shot lẫn upload hàng loạt theo mã block."""
+    is_video = shot.get("visual_type") == "video"
+    ct_map = _VIDEO_EXT_BY_CONTENT_TYPE if is_video else _IMAGE_EXT_BY_CONTENT_TYPE
+    suffix_map = _VIDEO_EXT_BY_SUFFIX if is_video else _IMAGE_EXT_BY_SUFFIX
+    return ct_map.get(content_type or "") or suffix_map.get(Path(filename).suffix.lower())
+
+
+def _upload_shot_visual_core(pdir: Path, status, shot_id: str, ext: str, data: bytes) -> None:
+    """Ghi file vào slot cố định `assets/{shot_id}.<ext>` + cập nhật `ShotRenderStatus` —
+    KHÔNG tự `save_render_state` (caller quyết định lưu 1 lần lúc nào, để batch upload
+    dồn nhiều shot vào 1 lượt ghi thay vì ghi lại toàn bộ render.json mỗi file)."""
+    old_path = Path(status.visual_asset_path) if status.visual_asset_path else None
+    new_path = pdir / "assets" / f"{shot_id}.{ext}"
+    if old_path and old_path.exists() and old_path != new_path:
+        unlink_retrying(old_path)  # tránh rác file cũ khác đuôi (VD trước .png giờ upload .jpg)
+    write_bytes(new_path, data)
+
+    status.visual_asset_path = str(new_path)
+    status.visual_provider = "upload"
+    status.visual_status = "ready"
+    status.visual_error = None
+    status.visual_started_at = None
+    status.visual_updated_at = vn_isoformat(datetime.now(timezone.utc))
+    status.approved = False  # thay ảnh/video mới → cần duyệt lại
 
 
 @router.post("/projects/{project_id}/render/shots/{shot_id}/upload-visual")
@@ -263,11 +323,9 @@ async def upload_shot_visual(project_id: str, shot_id: str, file: UploadFile = F
     pack = read_json(pdir / "pack.json") or {}
     shot, _beat = _find_shot_and_beat(pack, shot_id)
 
-    is_video = shot.get("visual_type") == "video"
-    ct_map = _VIDEO_EXT_BY_CONTENT_TYPE if is_video else _IMAGE_EXT_BY_CONTENT_TYPE
-    suffix_map = _VIDEO_EXT_BY_SUFFIX if is_video else _IMAGE_EXT_BY_SUFFIX
-    ext = ct_map.get(file.content_type or "") or suffix_map.get(Path(file.filename or "").suffix.lower())
+    ext = _match_ext_for_shot(shot, file.filename or "", file.content_type)
     if not ext:
+        is_video = shot.get("visual_type") == "video"
         kind_vn = "video (MP4/WEBM/MOV)" if is_video else "ảnh (PNG/JPEG/WEBP)"
         raise HTTPException(400, f"Shot này đang ở kiểu {'video' if is_video else 'ảnh'} — chỉ nhận {kind_vn}. Đổi kiểu (tag Image/Video) trước nếu muốn upload loại khác.")
     data = await file.read()
@@ -278,21 +336,57 @@ async def upload_shot_visual(project_id: str, shot_id: str, file: UploadFile = F
     by_id = engine._ensure_shot_entries(state, pack.get("shots", []))
     status = by_id[shot_id]
 
-    old_path = Path(status.visual_asset_path) if status.visual_asset_path else None
-    new_path = pdir / "assets" / f"{shot_id}.{ext}"
-    if old_path and old_path.exists() and old_path != new_path:
-        unlink_retrying(old_path)  # tránh rác file cũ khác đuôi (VD trước .png giờ upload .jpg)
-    write_bytes(new_path, data)
-
-    status.visual_asset_path = str(new_path)
-    status.visual_provider = "upload"
-    status.visual_status = "ready"
-    status.visual_error = None
-    status.visual_started_at = None
-    status.visual_updated_at = vn_isoformat(datetime.now(timezone.utc))
-    status.approved = False  # thay ảnh/video mới → cần duyệt lại
+    _upload_shot_visual_core(pdir, status, shot_id, ext, data)
     engine.save_render_state(pdir, state)
     return state.model_dump()
+
+
+@router.post("/projects/{project_id}/render/shots/upload-visual-batch")
+async def upload_shot_visual_batch(project_id: str, files: list[UploadFile] = File(...), db: Session = Depends(get_db)):
+    """Upload CẢ FOLDER ảnh/video 1 lần — mới (2026-09-16), theo yêu cầu người dùng: tên
+    file (bỏ đuôi mở rộng) PHẢI trùng `shot_id`/mã block (VD `B01.png` → shot `B01`) —
+    KHÔNG cần bảng tra cứu, vì `shot_id` chính là mã block (`pipeline.py::
+    _seed_shot_from_beat`: `"shot_id": beat.get("block_id") or ...`). File không khớp
+    tên shot nào, hoặc khớp tên nhưng sai loại ảnh/video so với `shot.visual_type` (cùng
+    validate như `upload_shot_visual`, KHÔNG tự đổi `visual_type`), đều xếp vào
+    `unmatched` kèm lý do — KHÔNG chặn các file còn lại (nguyên tắc "lỗi 1 phần không
+    chặn cả batch" đã dùng xuyên suốt app). Ghi `render.json` 1 LẦN sau khi xử lý xong
+    toàn bộ file (khác `_upload_shot_visual_core` gọi lẻ, tránh ghi lại state nhiều lần)."""
+    p = _get_project_or_404(db, project_id)
+    _require_not_in_progress(project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    pack = read_json(pdir / "pack.json") or {}
+    shots = pack.get("shots", [])
+    shots_by_id = {s["shot_id"]: s for s in shots}
+
+    state = engine.load_render_state(pdir, project_id)
+    by_id = engine._ensure_shot_entries(state, shots)
+
+    matched: list[dict[str, str]] = []
+    unmatched: list[dict[str, str]] = []
+
+    for file in files:
+        filename = file.filename or ""
+        shot_id = Path(filename).stem
+        shot = shots_by_id.get(shot_id)
+        if not shot:
+            unmatched.append({"filename": filename, "reason": f"Không tìm thấy block \"{shot_id}\" trong project này."})
+            continue
+        ext = _match_ext_for_shot(shot, filename, file.content_type)
+        if not ext:
+            is_video = shot.get("visual_type") == "video"
+            kind_vn = "video" if is_video else "ảnh"
+            unmatched.append({"filename": filename, "reason": f"Shot {shot_id} đang ở kiểu {kind_vn} — đổi tag Image/Video của shot trước nếu muốn upload loại khác."})
+            continue
+        data = await file.read()
+        if not data:
+            unmatched.append({"filename": filename, "reason": "File rỗng."})
+            continue
+        _upload_shot_visual_core(pdir, by_id[shot_id], shot_id, ext, data)
+        matched.append({"shot_id": shot_id, "filename": filename})
+
+    engine.save_render_state(pdir, state)
+    return {"matched": matched, "unmatched": unmatched, "state": state.model_dump()}
 
 
 @router.delete("/projects/{project_id}/render/shots/{shot_id}/visual")
@@ -336,7 +430,11 @@ def get_vault_candidates(project_id: str, shot_id: str, db: Session = Depends(ge
     pack.json — module này chỉ ĐỌC, không ghi, xem docstring đầu file). Thử semantic
     trước (nếu đã cấu hình Embedding provider + kênh đã index clip nào), rơi về keyword
     khi chưa. Loại clip ĐÃ gán cho SHOT KHÁC trong CHÍNH project này (dedup §5) — chỉ gợi
-    ý, KHÔNG tự gán (human-gate)."""
+    ý, KHÔNG tự gán (human-gate).
+
+    **media_kind (2026-09-11)** — chỉ gợi ý clip CÙNG loại với `shot.visual_type` (Kho
+    giờ chứa cả ảnh lẫn video, xem `asset_vault/from_visual_studio.py`) — tránh gợi ý
+    ảnh cho shot video hoặc ngược lại."""
     p = _get_project_or_404(db, project_id)
     pdir = project_dir(p.channel_id, p.id)
     pack = read_json(pdir / "pack.json") or {}
@@ -344,6 +442,7 @@ def get_vault_candidates(project_id: str, shot_id: str, db: Session = Depends(ge
     description = (shot.get("visual_fx") or "").strip()
     if not description:
         raise HTTPException(400, "Shot này chưa có mô tả Visual/FX để tìm clip khớp.")
+    media_kind = shot.get("visual_type") or "image"
 
     state = engine.load_render_state(pdir, project_id)
     used_clip_ids = {s.linked_clip_id for s in state.shots if s.linked_clip_id and s.shot_id != shot_id}
@@ -353,7 +452,7 @@ def get_vault_candidates(project_id: str, shot_id: str, db: Session = Depends(ge
     candidates: list[tuple] = []
     used_semantic = False
     try:
-        semantic = match_semantic(db, p.channel_id, description)
+        semantic = match_semantic(db, p.channel_id, description, media_kind=media_kind)
         if semantic:
             candidates = semantic
             used_semantic = True
@@ -361,15 +460,22 @@ def get_vault_candidates(project_id: str, shot_id: str, db: Session = Depends(ge
         pass  # chưa cấu hình Embedding provider, hoặc lỗi gọi — rơi về keyword bên dưới
 
     if not candidates:
-        keyword_clips = match_by_keyword(db, p.channel_id, description)
-        candidates = [(c, None) for c in keyword_clips]
+        # match_by_keyword trả kèm điểm chuẩn hoá 0-1 (2026-09-13, xem docstring hàm đó)
+        # — cùng thang với match_semantic, để picker hiển thị match score cho CẢ 2 nguồn
+        # gợi ý thay vì chỉ semantic như trước.
+        candidates = match_by_keyword(db, p.channel_id, description, media_kind=media_kind)
 
     filtered = apply_dedup([c for c, _ in candidates], used_clip_ids)
     if not filtered:
-        fallback = fallback_neutral_broll(db, p.channel_id)
+        fallback = fallback_neutral_broll(db, p.channel_id, media_kind=media_kind)
         filtered = apply_dedup(fallback, used_clip_ids)
 
     score_by_id = {c.clip_id: s for c, s in candidates}
+    # Sắp xếp TƯỜNG MINH theo match score giảm dần (2026-09-13, theo yêu cầu người dùng)
+    # — không chỉ dựa vào thứ tự sẵn có từ `match_semantic`/`match_by_keyword` (dù cả 2
+    # đều đã sort nội bộ) để đảm bảo đúng ngay cả với `fallback_neutral_broll` (không có
+    # điểm — luôn xếp CUỐI danh sách).
+    filtered = sorted(filtered, key=lambda c: score_by_id.get(c.clip_id) if score_by_id.get(c.clip_id) is not None else -1, reverse=True)
     return {
         "used_semantic": used_semantic,
         "candidates": [
@@ -379,6 +485,18 @@ def get_vault_candidates(project_id: str, shot_id: str, db: Session = Depends(ge
                 "duration_sec": c.duration_sec,
                 "match_score": score_by_id.get(c.clip_id),
                 "rights_status": c.rights_status,
+                # Mở rộng (2026-09-13, theo yêu cầu người dùng "hiển thị đủ thông tin
+                # giúp chọn visual phù hợp nhất") — các field này đã có sẵn trên chính
+                # `ProcessedClip` đang cầm trong tay, y hệt `_clip_out()` ở
+                # `asset_vault.py`, chỉ chưa từng được đưa vào response picker này.
+                "resolution": c.resolution,
+                "tags": json.loads(c.tags or "[]"),
+                "mood_tone": c.mood_tone,
+                "usage_count": c.usage_count,
+                # rights_status mặc định "unverified" không có ý nghĩa cho asset TỰ SINH
+                # từ Visual Studio (không phải B-roll có nguồn/license thật) — cờ này cho
+                # frontend ẩn badge rights trong trường hợp đó, cùng công thức `_clip_out`.
+                "from_visual_studio": bool(c.raw_video and c.raw_video.source_project_id),
             }
             for c in filtered
         ],
@@ -396,19 +514,33 @@ def assign_vault_clip(project_id: str, shot_id: str, body: AssignVaultClipBody, 
     từ Asset Vault thay vì nhận từ browser). `linked_clip_id` sống trên
     `ShotRenderStatus` (render.json), KHÔNG trên `Shot` (pack.json) — tránh module này
     phải ghi pack.json (xem docstring đầu file: "chỉ ĐỌC pack.json, không bao giờ ghi
-    lại"). Yêu cầu `shot.visual_type=="video"` SẴN (cùng ràng buộc `upload_shot_visual` —
-    người dùng đổi tag Image/Video ở ShotCard TRƯỚC nếu cần)."""
+    lại"). Yêu cầu `shot.visual_type` khớp `ProcessedClip.media_kind` của clip đang gán
+    (cùng ràng buộc `upload_shot_visual` — người dùng đổi tag Image/Video ở ShotCard
+    TRƯỚC nếu cần).
+
+    **media_kind (2026-09-11)** — Kho Tài Nguyên giờ chứa CẢ clip video (cắt từ
+    RawVideo) LẪN ảnh (lưu từ Visual Studio, xem `asset_vault/from_visual_studio.py`) —
+    check kiểu đổi từ "chỉ nhận video" (chặn cứng theo shot) sang tra clip TRƯỚC rồi so
+    `shot.visual_type` với `clip.media_kind` của ĐÚNG clip đang gán."""
+    p = _get_project_or_404(db, project_id)
+    _require_not_in_progress(project_id)
+    state = _assign_vault_clip_core(db, p, shot_id, body.clip_id)
+    return state.model_dump()
+
+
+def _assign_vault_clip_core(db: Session, p: Project, shot_id: str, clip_id: str) -> RenderState:
+    """Thân THẬT của `assign_vault_clip` — tách riêng (2026-09-11) để dùng chung với
+    `vault-auto-fill-apply` (áp dụng hàng loạt gợi ý đã người dùng duyệt ở màn review,
+    xem `_auto_fill_apply`), tránh copy-paste logic gán clip. Raise `HTTPException` khi
+    lỗi — caller đơn lẻ (`assign_vault_clip`) để lỗi nổi lên bình thường, caller hàng
+    loạt tự try/except từng item (lỗi 1 item không chặn cả batch)."""
     import shutil as _shutil
 
     from app.models import ProcessedClip, processed_clip_channel
 
-    p = _get_project_or_404(db, project_id)
-    _require_not_in_progress(project_id)
     pdir = project_dir(p.channel_id, p.id)
     pack = read_json(pdir / "pack.json") or {}
     shot, _beat = _find_shot_and_beat(pack, shot_id)
-    if shot.get("visual_type") != "video":
-        raise HTTPException(400, 'Shot này đang ở kiểu ảnh — đổi tag "Video" trước khi gán clip từ Kho.')
 
     # Bug thật (2026-09-02, phát hiện lúc user hỏi về hành vi matching sau khi xoá clip) —
     # câu này TỪNG JOIN qua `raw_video_channel` (kênh của raw_video CHA), sót lại từ TRƯỚC
@@ -420,16 +552,20 @@ def assign_vault_clip(project_id: str, shot_id: str, body: AssignVaultClipBody, 
     clip = (
         db.query(ProcessedClip)
         .join(processed_clip_channel, processed_clip_channel.c.clip_id == ProcessedClip.clip_id)
-        .filter(ProcessedClip.clip_id == body.clip_id, processed_clip_channel.c.channel_id == p.channel_id)
+        .filter(ProcessedClip.clip_id == clip_id, processed_clip_channel.c.channel_id == p.channel_id)
         .first()
     )
     if not clip:
         raise HTTPException(404, "Không tìm thấy clip trong Kho tư liệu của kênh này")
+    clip_kind = clip.media_kind or "video"
+    shot_kind = shot.get("visual_type") or "image"
+    if shot_kind != clip_kind:
+        raise HTTPException(400, f'Shot này đang ở kiểu "{shot_kind}" — clip trong Kho là "{clip_kind}", không khớp. Đổi tag Image/Video của shot trước.')
     src_path = Path(clip.storage_url)
     if not src_path.exists():
         raise HTTPException(400, "File clip không còn tồn tại trên đĩa")
 
-    state = engine.load_render_state(pdir, project_id)
+    state = engine.load_render_state(pdir, p.id)
     by_id = engine._ensure_shot_entries(state, pack.get("shots", []))
     status = by_id[shot_id]
 
@@ -455,7 +591,178 @@ def assign_vault_clip(project_id: str, shot_id: str, body: AssignVaultClipBody, 
     clip.last_used_at = datetime.utcnow()
     db.commit()
 
-    return state.model_dump()
+    return state
+
+
+# Ngưỡng similarity RIÊNG cho auto-fill (2026-09-11, theo yêu cầu người dùng) — CAO HƠN
+# `matching.DEFAULT_SIMILARITY_THRESHOLD` (0.65, dùng cho gợi ý thủ công "Video từ Kho"
+# từng shot, nơi người dùng LUÔN tự mắt xem qua trước khi bấm chọn) — tính năng bulk/tự
+# động này quét NHIỀU shot cùng lúc, chỉ gợi ý match THẬT chắc để giảm case sai người
+# dùng phải tự soát kỹ ở màn review.
+_AUTO_FILL_THRESHOLD = 0.8
+
+
+def _resolution_orientation_matches(resolution: str | None, project_format: str | None) -> bool:
+    """True nếu khung hình ngang/dọc (suy từ `resolution`, dạng `"WIDTHxHEIGHT"` —
+    `asset_vault/ingest.py::_probe_resolution`) khớp `project_format` ("short" → kỳ vọng
+    khung DỌC 9:16, khác → kỳ vọng khung NGANG 16:9, cùng cách đọc field đã dùng ở
+    `assembly.py`: `(p.format or "long") == "short"`). Thiếu dữ liệu (resolution rỗng/
+    không đọc được) → `True` (KHÔNG loại oan candidate chỉ vì thiếu dữ liệu — độ chính
+    xác của filter này chỉ là 1 lớp lọc THÊM, không phải điều kiện bắt buộc duy nhất)."""
+    if not resolution or "x" not in resolution.lower():
+        return True
+    try:
+        w_str, h_str = resolution.lower().split("x", 1)
+        w, h = int(w_str), int(h_str)
+    except ValueError:
+        return True
+    if w <= 0 or h <= 0:
+        return True
+    is_portrait = h > w
+    expects_portrait = (project_format or "long") == "short"
+    return is_portrait == expects_portrait
+
+
+# Trạng thái job quét auto-fill, cấp module, key = project_id — **mới (2026-09-13)**,
+# theo yêu cầu người dùng cần thấy tiến trình quét (đang quét gì/tới đâu/bao lâu). Đây
+# là job quét CẢ project chứ không gắn với 1 row DB sẵn có (khác `RawVideo.progress_*`),
+# và app single-user/local không cần bền vững qua restart hay khoá đa tiến trình — dict
+# bộ nhớ đơn giản là đủ, tránh over-engineer thêm 1 bảng SQL chỉ cho state tạm thời.
+_AUTO_FILL_JOBS: dict[str, dict] = {}
+
+
+def _run_vault_auto_fill_scan(project_id: str) -> None:
+    from app.db import SessionLocal
+
+    job = _AUTO_FILL_JOBS[project_id]
+    db = SessionLocal()
+    try:
+        p = db.query(Project).filter(Project.id == project_id).first()
+        if not p:
+            job["status"] = "error"
+            job["error"] = "Project không tồn tại."
+            return
+        pdir = project_dir(p.channel_id, p.id)
+        pack = read_json(pdir / "pack.json") or {}
+        shots = pack.get("shots", [])
+        state = engine.load_render_state(pdir, project_id)
+        status_by_id = {s.shot_id: s for s in state.shots}
+        used_clip_ids = {s.linked_clip_id for s in state.shots if s.linked_clip_id}
+
+        from app.asset_vault.matching import apply_dedup, match_semantic
+
+        pending_shots = [s for s in shots if not (status_by_id.get(s["shot_id"]) and status_by_id[s["shot_id"]].visual_status == "ready")]
+        job["total"] = len(pending_shots)
+
+        suggestions = []
+        scanned = 0
+        for shot in pending_shots:
+            scanned += 1
+            job["current"] = scanned
+            description = (shot.get("visual_fx") or "").strip()
+            job["current_label"] = f"{shot['shot_id']}: {description[:60]}" if description else shot["shot_id"]
+            if not description:
+                continue
+            media_kind = shot.get("visual_type") or "image"
+            try:
+                candidates = match_semantic(db, p.channel_id, description, threshold=_AUTO_FILL_THRESHOLD, top_k=3, media_kind=media_kind)
+            except Exception:  # noqa: BLE001
+                # Chưa cấu hình Embedding provider, hoặc lỗi gọi — auto-fill bỏ qua shot
+                # này (KHÔNG rơi về keyword search như `get_vault_candidates`: độ tin cậy
+                # của keyword match thấp hơn hẳn, không phù hợp cho tính năng TỰ ĐỘNG quét
+                # hàng loạt này — người dùng vẫn dùng được "Video từ Kho" thủ công).
+                continue
+            filtered = apply_dedup([c for c, _ in candidates], used_clip_ids)
+            score_by_id = {c.clip_id: s for c, s in candidates}
+            best = next((c for c in filtered if _resolution_orientation_matches(c.resolution, p.format)), None)
+            if not best:
+                continue
+            used_clip_ids.add(best.clip_id)
+            suggestions.append({
+                "shot_id": shot["shot_id"],
+                "visual_fx": description,
+                "clip_id": best.clip_id,
+                "caption": best.caption,
+                "media_kind": best.media_kind or "video",
+                "resolution": best.resolution,
+                "match_score": score_by_id.get(best.clip_id),
+            })
+
+        job["status"] = "done"
+        job["result"] = {"suggestions": suggestions, "scanned_count": scanned, "matched_count": len(suggestions)}
+    except Exception as e:  # noqa: BLE001
+        job["status"] = "error"
+        job["error"] = str(e)
+    finally:
+        db.close()
+
+
+@router.post("/projects/{project_id}/render/vault-auto-fill-scan")
+def start_vault_auto_fill_scan(project_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Khởi động quét nền — xem `_run_vault_auto_fill_scan` cho logic thật (y hệt logic
+    cũ của `vault-auto-fill-suggestions`, chỉ thêm cập nhật tiến trình mỗi vòng lặp).
+    Không khởi động lại nếu đã có job đang "running" cho project này (tránh double-scan
+    khi người dùng bấm 2 lần liên tiếp) — trả thẳng trạng thái hiện tại."""
+    _get_project_or_404(db, project_id)
+    existing = _AUTO_FILL_JOBS.get(project_id)
+    if existing and existing["status"] == "running":
+        return _auto_fill_job_out(project_id)
+    _AUTO_FILL_JOBS[project_id] = {
+        "status": "running",
+        "current": 0,
+        "total": 0,
+        "current_label": None,
+        "started_at": time.time(),
+        "error": None,
+        "result": None,
+    }
+    background_tasks.add_task(_run_vault_auto_fill_scan, project_id)
+    return _auto_fill_job_out(project_id)
+
+
+def _auto_fill_job_out(project_id: str) -> dict:
+    job = _AUTO_FILL_JOBS.get(project_id)
+    if not job:
+        return {"status": "idle"}
+    return {**job, "elapsed_sec": round(time.time() - job["started_at"], 1)}
+
+
+@router.get("/projects/{project_id}/render/vault-auto-fill-scan/status")
+def get_vault_auto_fill_scan_status(project_id: str, db: Session = Depends(get_db)):
+    """Poll tiến trình quét — xem `start_vault_auto_fill_scan`. `status: "idle"` khi
+    project chưa từng quét lần nào."""
+    _get_project_or_404(db, project_id)
+    return _auto_fill_job_out(project_id)
+
+
+class VaultAutoFillApplyItem(BaseModel):
+    shot_id: str
+    clip_id: str
+
+
+class VaultAutoFillApplyBody(BaseModel):
+    items: list[VaultAutoFillApplyItem]
+
+
+@router.post("/projects/{project_id}/render/vault-auto-fill-apply")
+def apply_vault_auto_fill(project_id: str, body: VaultAutoFillApplyBody, db: Session = Depends(get_db)):
+    """Áp dụng CÁC gợi ý người dùng đã accept ở màn review (từ `vault-auto-fill-
+    suggestions`) — client gửi lại ĐÚNG cặp `(shot_id, clip_id)` đã hiện trên màn hình,
+    KHÔNG để backend tự truy vấn lại (tránh lệch dữ liệu nếu Kho đổi giữa lúc quét và
+    lúc áp dụng). Lỗi 1 item KHÔNG chặn các item còn lại (nguyên tắc "lỗi 1 phần không
+    chặn cả batch"), tái dùng `_assign_vault_clip_core` — hành vi Y HỆT gán thủ công
+    từng shot."""
+    p = _get_project_or_404(db, project_id)
+    _require_not_in_progress(project_id)
+    applied: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for item in body.items:
+        try:
+            _assign_vault_clip_core(db, p, item.shot_id, item.clip_id)
+            applied.append(item.shot_id)
+        except HTTPException as e:
+            skipped.append({"shot_id": item.shot_id, "reason": str(e.detail)})
+    return {"applied": applied, "skipped": skipped}
 
 
 class NarrationSpeedBody(BaseModel):
@@ -495,6 +802,66 @@ def regenerate_narration(project_id: str, shot_id: str, background_tasks: Backgr
     engine.save_render_state(pdir, state)
 
     background_tasks.add_task(engine.regenerate_single_narration, project_id, shot_id)
+    return state.model_dump()
+
+
+def _validate_lang(lang: str) -> None:
+    if lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+
+
+@router.post("/projects/{project_id}/render/narration-translations/{lang}/start")
+def start_narration_translation_batch(project_id: str, lang: str, background_tasks: BackgroundTasks, force: bool = False, db: Session = Depends(get_db)):
+    """Sinh giọng đọc cho 1 NGÔN NGỮ (khác ngôn ngữ chính) cho MỌI shot đã có văn bản
+    dịch — nút theo từng ngôn ngữ đang kích hoạt ở Script Studio (giọng đọc đa ngôn ngữ,
+    2026-09-04). Cùng pattern `start_render` (`force` reset shot `ready` về `generating`
+    trước khi dispatch — dùng khi đổi mẫu giọng clone/BrandProfile và cần sinh lại)."""
+    _validate_lang(lang)
+    p = _get_project_or_404(db, project_id)
+    _require_not_in_progress(project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    pack = read_json(pdir / "pack.json") or {}
+    shots = pack.get("shots", [])
+    if not shots:
+        raise HTTPException(400, "Chưa có shot nào — hoàn tất Visual Studio trước")
+
+    state = engine.load_render_state(pdir, project_id)
+    engine._ensure_shot_entries(state, shots)
+    if force:
+        for status in state.shots:
+            translation = status.narration_translations.get(lang)
+            if translation is not None and translation.narration_status == "ready":
+                translation.narration_status = "generating"
+    engine.save_render_state(pdir, state)
+
+    background_tasks.add_task(engine.run_narration_translation_batch, project_id, lang)
+    return state.model_dump()
+
+
+@router.post("/projects/{project_id}/render/shots/{shot_id}/regenerate-narration-translation/{lang}")
+def regenerate_narration_translation(project_id: str, shot_id: str, lang: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Sinh lại giọng đọc 1 NGÔN NGỮ cho ĐÚNG 1 shot (giọng đọc đa ngôn ngữ, 2026-09-04)
+    — nút "Tạo giọng đọc" cạnh ô văn bản dịch của ngôn ngữ đang kích hoạt ở Script
+    Studio. Cùng pattern `regenerate_narration`."""
+    _validate_lang(lang)
+    p = _get_project_or_404(db, project_id)
+    _require_not_in_progress(project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    pack = read_json(pdir / "pack.json") or {}
+    _find_shot_and_beat(pack, shot_id)
+
+    state = engine.load_render_state(pdir, project_id)
+    status = _find_shot_status(state, shot_id)
+    if not status:
+        raise HTTPException(404, "Không tìm thấy trạng thái render cho shot này — bấm 'Bắt đầu sinh asset' trước")
+    entry = status.narration_translations.get(lang)
+    if entry is None:
+        entry = TranslatedNarrationStatus()
+        status.narration_translations[lang] = entry
+    entry.narration_status = "generating"
+    engine.save_render_state(pdir, state)
+
+    background_tasks.add_task(engine.regenerate_single_narration_translation, project_id, shot_id, lang)
     return state.model_dump()
 
 
@@ -673,6 +1040,131 @@ def get_intro_asset(request: Request, project_id: str, kind: str, db: Session = 
     if not path:
         raise HTTPException(404, "Chưa có asset này")
     return range_file_response(request, path)
+
+
+# ---------------------------------------------------------------------------
+# Ảnh nhân vật tham khảo (CharacterReferenceStatus) — mới (2026-09-09, mục 127), theo yêu
+# cầu người dùng: upload 1 ảnh nhân vật, tự động sinh mô tả qua VisionProvider (CÙNG cơ chế
+# Channel Asset Vault dùng để caption clip — xem app/asset_vault/ingest.py::caption_clip),
+# mô tả tự nối vào MỌI prompt sinh ảnh của project (xem
+# app/render/engine.py::_build_visual_prompt, tham số character_reference_desc). Xem đầy đủ
+# bối cảnh/lý do ở docstring CharacterReferenceStatus (render/schemas.py).
+# ---------------------------------------------------------------------------
+_CHARACTER_REFERENCE_PROMPT = (
+    "Describe ONLY the visual design of the main character in this image, in English, in "
+    "1-2 concise sentences (about 30-50 words) — focus on distinctive, reusable traits: "
+    "head/body shape, hair, face/eyes, colors, clothing, art style. Do NOT describe the "
+    "pose, action, or background/scene in this specific image — this description will be "
+    "reused to draw the SAME character in different poses and scenes."
+)
+
+
+def _caption_character_reference(db: Session, state: RenderState, image_bytes: bytes) -> None:
+    """Gọi VisionProvider sinh `description` — lỗi (chưa cấu hình provider, provider lỗi)
+    KHÔNG chặn việc lưu ảnh (khác nhiều nơi khác coi lỗi provider AI là chặn cứng) — ảnh
+    tham khảo vẫn hữu ích để NGƯỜI DÙNG tự xem/tự gõ tay `description` qua endpoint PATCH
+    bên dưới, ghi rõ lỗi vào `caption_error` để UI hiện thông báo thay vì âm thầm rỗng."""
+    assert state.character_reference is not None
+    try:
+        result = get_vision(db).caption(image_bytes, prompt=_CHARACTER_REFERENCE_PROMPT)
+        state.character_reference.description = result.caption.strip()
+        state.character_reference.caption_error = None
+    except NoProviderConfiguredError as e:
+        state.character_reference.caption_error = str(e)
+    except Exception as e:  # noqa: BLE001 — lỗi provider AI đa dạng (HTTP/timeout/parse...), không chặn upload
+        state.character_reference.caption_error = f"Lỗi sinh mô tả tự động: {e}"
+
+
+@router.post("/projects/{project_id}/render/character-reference/upload")
+async def upload_character_reference(project_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload ảnh nhân vật tham khảo — TỰ ĐỘNG sinh `description` đồng bộ ngay trong
+    request này (không cần polling — 1 ảnh, độ trễ tương đương caption 1 keyframe clip ở
+    Asset Vault). Thay THẲNG nếu đã có ảnh trước đó (1 slot duy nhất/project, cùng nguyên
+    tắc `upload_intro_visual`)."""
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, p.id)
+
+    ct = file.content_type or ""
+    suffix = Path(file.filename or "").suffix.lower()
+    ext = _IMAGE_EXT_BY_CONTENT_TYPE.get(ct) or _IMAGE_EXT_BY_SUFFIX.get(suffix)
+    if not ext:
+        raise HTTPException(400, "Chỉ nhận ảnh PNG/JPEG/WEBP")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "File rỗng")
+
+    new_path = pdir / "assets" / f"character_reference.{ext}"
+    state = engine.load_render_state(pdir, project_id)
+    if state.character_reference is None:
+        state.character_reference = CharacterReferenceStatus()
+    old_path = Path(state.character_reference.image_path) if state.character_reference.image_path else None
+    if old_path and old_path.exists() and old_path != new_path:
+        unlink_retrying(old_path)
+    write_bytes(new_path, data)
+    state.character_reference.image_path = str(new_path)
+
+    _caption_character_reference(db, state, data)
+    engine.save_render_state(pdir, state)
+    return state.model_dump()
+
+
+@router.post("/projects/{project_id}/render/character-reference/recaption")
+def recaption_character_reference(project_id: str, db: Session = Depends(get_db)):
+    """Sinh lại `description` từ ảnh ĐÃ CÓ (không upload lại) — dùng khi lần sinh trước lỗi
+    (`caption_error`), hoặc muốn thử lại sau khi đổi provider vision ở Cài đặt."""
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    state = engine.load_render_state(pdir, project_id)
+    if not state.character_reference or not state.character_reference.image_path:
+        raise HTTPException(404, "Chưa có ảnh nhân vật tham khảo nào")
+    path = Path(state.character_reference.image_path)
+    if not path.exists():
+        raise HTTPException(404, "File ảnh không còn tồn tại trên đĩa")
+    _caption_character_reference(db, state, path.read_bytes())
+    engine.save_render_state(pdir, state)
+    return state.model_dump()
+
+
+class CharacterReferenceDescriptionBody(BaseModel):
+    description: str
+
+
+@router.patch("/projects/{project_id}/render/character-reference/description")
+def patch_character_reference_description(project_id: str, body: CharacterReferenceDescriptionBody, db: Session = Depends(get_db)):
+    """Sửa tay `description` — VisionProvider không phải lúc nào cũng mô tả đúng ý muốn,
+    người dùng có thể tự viết lại/tinh chỉnh sau khi xem kết quả sinh tự động."""
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    state = engine.load_render_state(pdir, project_id)
+    if state.character_reference is None:
+        raise HTTPException(404, "Chưa có ảnh nhân vật tham khảo nào")
+    state.character_reference.description = body.description.strip()
+    engine.save_render_state(pdir, state)
+    return state.model_dump()
+
+
+@router.delete("/projects/{project_id}/render/character-reference")
+def delete_character_reference(project_id: str, db: Session = Depends(get_db)):
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    state = engine.load_render_state(pdir, project_id)
+    if state.character_reference and state.character_reference.image_path:
+        path = Path(state.character_reference.image_path)
+        if path.exists():
+            unlink_retrying(path)
+    state.character_reference = None
+    engine.save_render_state(pdir, state)
+    return state.model_dump()
+
+
+@router.get("/projects/{project_id}/render/character-reference/asset")
+def get_character_reference_asset(request: Request, project_id: str, db: Session = Depends(get_db)):
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    state = engine.load_render_state(pdir, project_id)
+    if not state.character_reference or not state.character_reference.image_path:
+        raise HTTPException(404, "Chưa có ảnh nhân vật tham khảo nào")
+    return range_file_response(request, state.character_reference.image_path)
 
 
 @router.post("/projects/{project_id}/render/bg-music/upload")
@@ -877,8 +1369,11 @@ async def upload_project_background_video(project_id: str, file: UploadFile = Fi
     # `_{len(...)}` cộng thêm mốc mili-giây — 2 lần upload LIÊN TIẾP THẬT NHANH (VD upload
     # nhiều file cùng lúc từ frontend) có thể rơi vào CÙNG 1 mili-giây, riêng mốc thời gian
     # không đủ tránh đè file nhau; độ dài danh sách hiện tại làm hậu tố PHỤ đảm bảo tên
-    # luôn khác nhau trong 1 project dù trùng mili-giây.
-    new_path = pdir / "assets" / f"background_video_{int(time.time() * 1000)}_{len(state.background_video.asset_paths)}.{ext}"
+    # luôn khác nhau trong 1 project dù trùng mili-giây. **Thêm hex ngẫu nhiên (2026-09-12)**
+    # — `len(...)` một mình KHÔNG đủ an toàn cho 2 request THẬT SỰ song song (mỗi request
+    # tự load `state` riêng, đọc `len(...)` TRƯỚC khi request kia kịp append — cùng giá
+    # trị độ dài, vẫn đè file nhau) — xem giải thích đầy đủ ở `asset_vault/ingest.py::_new_id`.
+    new_path = pdir / "assets" / f"background_video_{int(time.time() * 1000)}_{len(state.background_video.asset_paths)}_{uuid.uuid4().hex[:6]}.{ext}"
     write_bytes(new_path, data)
     state.background_video.asset_paths.append(str(new_path))
     engine.save_render_state(pdir, state)
@@ -1016,7 +1511,9 @@ async def upload_project_layer(
     # `_{len(...)}` cộng mốc mili-giây — cùng lý do tránh đè tên file đã áp dụng cho
     # video nền chung (mục 110): 2 lần upload liên tiếp thật nhanh có thể rơi cùng 1
     # mili-giây, độ dài danh sách hiện tại làm hậu tố phụ đảm bảo luôn khác nhau.
-    layer_id = f"layer_{int(time.time() * 1000)}_{len(state.layers)}"
+    # Hex ngẫu nhiên (2026-09-12) — `_{len(...)}` một mình không đủ an toàn cho 2 request
+    # song song, xem giải thích ở `asset_vault/ingest.py::_new_id`.
+    layer_id = f"layer_{int(time.time() * 1000)}_{len(state.layers)}_{uuid.uuid4().hex[:6]}"
     new_path = pdir / "assets" / f"{layer_id}.{ext}"
     write_bytes(new_path, data)
     state.layers.append(VideoLayer(id=layer_id, asset_path=str(new_path), position=position, width_pct=width_pct, opacity=opacity, blend_mode=blend_mode))
@@ -1133,7 +1630,9 @@ async def upload_project_image_layer(
 
     state = engine.load_render_state(pdir, project_id)
     # Cùng lý do đặt tên tránh đè file đã áp dụng cho layer video/video nền (mục 110/112).
-    layer_id = f"imglayer_{int(time.time() * 1000)}_{len(state.image_layers)}"
+    # Hex ngẫu nhiên (2026-09-12) — `_{len(...)}` một mình không đủ an toàn cho 2 request
+    # song song, xem giải thích ở `asset_vault/ingest.py::_new_id`.
+    layer_id = f"imglayer_{int(time.time() * 1000)}_{len(state.image_layers)}_{uuid.uuid4().hex[:6]}"
     new_path = pdir / "assets" / f"{layer_id}.{ext}"
     write_bytes(new_path, data)
     state.image_layers.append(ImageLayer(id=layer_id, asset_path=str(new_path), position=position, width_pct=width_pct, opacity=opacity, blend_mode=blend_mode))
@@ -1198,11 +1697,67 @@ def get_project_image_layer_asset(request: Request, project_id: str, layer_id: s
     return range_file_response(request, layer.asset_path)
 
 
+class CaptionLayerBody(BaseModel):
+    enabled: Optional[bool] = None
+    position: Optional[str] = None
+    size_pct: Optional[float] = None
+    opacity: Optional[float] = None
+    # `""` (chuỗi rỗng) từ frontend nghĩa là "theo ngôn ngữ đang ghép" — chuẩn hoá về
+    # `None` ngay khi nhận (JSON không phân biệt "field không gửi" và "field gửi rỗng"
+    # gọn hơn khi field này Optional[str] thay vì thêm cờ riêng).
+    lang: Optional[str] = None
+
+
+def _validate_caption_layer_fields(position: str | None, size_pct: float | None, opacity: float | None, lang: str | None) -> None:
+    if position is not None and position not in _LAYER_POSITIONS:
+        raise HTTPException(400, f"Vị trí không hợp lệ — chọn 1 trong: {', '.join(sorted(_LAYER_POSITIONS))}")
+    if size_pct is not None and not (0.01 <= size_pct <= 0.3):
+        raise HTTPException(400, "Kích thước chữ phải trong khoảng 1%–30% chiều cao khung hình")
+    if opacity is not None and not (0.0 <= opacity <= 1.0):
+        raise HTTPException(400, "Độ mờ phải trong khoảng 0.0–1.0")
+    if lang is not None and lang != "" and lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+
+
+@router.patch("/projects/{project_id}/render/caption-layer")
+def patch_caption_layer(project_id: str, body: CaptionLayerBody, db: Session = Depends(get_db)):
+    """Layer CAPTION (phụ đề cứng burn-in) — **mới (2026-09-12)**, theo yêu cầu người
+    dùng: "Bổ sung tính năng cho phép user thêm caption vào video ở bước visual
+    studio... chọn 9 vị trí, kích thước, độ mờ tương tự phần Layer video định vị". KHÁC
+    `layers`/`image_layers` (list, nhiều instance, upload file) — đây là 1 CẤU HÌNH DUY
+    NHẤT/project, KHÔNG có file upload nào (nội dung lấy thẳng từ script) — 1 endpoint
+    PATCH duy nhất (partial update, field nào không gửi giữ nguyên), tự tạo
+    `state.caption_layer` nếu chưa có (giống `state.bg_music`/`state.overlay` lazy-create).
+    Bật/tắt qua field `enabled` — không cần endpoint DELETE riêng."""
+    _validate_caption_layer_fields(body.position, body.size_pct, body.opacity, body.lang)
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    state = engine.load_render_state(pdir, project_id)
+    layer = state.caption_layer or CaptionLayer()
+    if body.enabled is not None:
+        layer.enabled = body.enabled
+    if body.position is not None:
+        layer.position = body.position
+    if body.size_pct is not None:
+        layer.size_pct = body.size_pct
+    if body.opacity is not None:
+        layer.opacity = body.opacity
+    if body.lang is not None:
+        layer.lang = body.lang or None
+    state.caption_layer = layer
+    engine.save_render_state(pdir, state)
+    return state.model_dump()
+
+
 class AssembleBody(BaseModel):
     resolution: Resolution = "1080p"
     codec: Codec = "h264"
     quality: Quality = "medium"
     use_gpu: bool = False  # NVENC — mới (2026-08-17), theo yêu cầu người dùng ("CPU render có vẻ lâu")
+    # Ngôn ngữ xuất video (2026-09-11) — `None` → ngôn ngữ chính của kênh. `start_assemble`
+    # dưới CHẶN CỨNG (400) nếu giọng đọc ngôn ngữ này chưa sinh hết cho mọi shot — theo
+    # yêu cầu người dùng, xem `assembly.py::assemble_video` docstring cho thiết kế đầy đủ.
+    lang: str | None = None
 
 
 @router.get("/render/gpu-encode-status")
@@ -1255,11 +1810,24 @@ def start_assemble(project_id: str, background_tasks: BackgroundTasks, body: Ass
         resolve_video_codec(body.codec, body.use_gpu)  # validate NGAY (400) — không đợi BackgroundTasks mới báo lỗi
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    if body.lang is not None and body.lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+
+    # Ngôn ngữ xuất video (2026-09-11, theo yêu cầu người dùng: "nếu giọng đọc của ngôn
+    # ngữ được chọn chưa sinh hết, hiển thị cho user biết và KHÔNG cho render") — chặn
+    # CỨNG (400) giống hệt cách gate visual ở trên, KHÁC lần đầu thiết kế tính năng này
+    # (ban đầu chỉ cảnh báo, không chặn — user sau đó yêu cầu đổi thành chặn cứng).
+    brand = engine._load_brand_profile(p.channel_id)
+    primary_language = brand.get("primary_language") or "vi"
+    export_lang = body.lang if body.lang in NARRATION_LANGUAGES else primary_language
+    missing_narration = [s.shot_id for s in state.shots if _narration_for_lang(s, export_lang, primary_language)[0] != "ready"]
+    if missing_narration:
+        raise HTTPException(400, f"Giọng đọc [{export_lang}] chưa sinh xong cho {len(missing_narration)} shot: {', '.join(missing_narration[:5])}{'...' if len(missing_narration) > 5 else ''} — sinh xong giọng đọc ở ngôn ngữ này (Script Studio/Visual Studio) trước khi ghép.")
 
     state.assembly_status = "assembling"
     state.assembly_error = None
     engine.save_render_state(pdir, state)
-    background_tasks.add_task(assemble_video, project_id, resolution=body.resolution, codec=body.codec, quality=body.quality, use_gpu=body.use_gpu)
+    background_tasks.add_task(assemble_video, project_id, resolution=body.resolution, codec=body.codec, quality=body.quality, use_gpu=body.use_gpu, lang=body.lang)
     return state.model_dump()
 
 
@@ -1311,6 +1879,24 @@ def get_shot_asset(request: Request, project_id: str, shot_id: str, kind: str, d
     return range_file_response(request, path)
 
 
+@router.get("/projects/{project_id}/render/shots/{shot_id}/asset/narration/{lang}")
+def get_shot_narration_translation_asset(request: Request, project_id: str, shot_id: str, lang: str, db: Session = Depends(get_db)):
+    """Phục vụ file audio giọng đọc NGÔN NGỮ KHÁC ngôn ngữ chính cho 1 shot — giọng đọc
+    đa ngôn ngữ (2026-09-04). Xem `get_shot_asset` ở trên cho ngôn ngữ chính."""
+    if lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    state = engine.load_render_state(pdir, project_id)
+    status = _find_shot_status(state, shot_id)
+    if not status:
+        raise HTTPException(404, "Không tìm thấy trạng thái render cho shot này")
+    translation = status.narration_translations.get(lang)
+    if not translation or not translation.narration_asset_path:
+        raise HTTPException(404, "Chưa sinh giọng đọc ngôn ngữ này")
+    return range_file_response(request, translation.narration_asset_path)
+
+
 @router.get("/projects/{project_id}/render/download")
 def download_render(request: Request, project_id: str, db: Session = Depends(get_db)):
     """**Bug thật người dùng báo (2026-08-20)**: player video ở Render Studio không tua
@@ -1344,6 +1930,79 @@ def download_narration_full(request: Request, project_id: str, db: Session = Dep
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     return range_file_response(request, path, filename="narration_full.mp3", media_type="audio/mpeg")
+
+
+@router.get("/projects/{project_id}/render/narration-download/{lang}")
+def download_narration_full_lang(request: Request, project_id: str, lang: str, db: Session = Depends(get_db)):
+    """Ghép + tải giọng đọc TOÀN BỘ script cho 1 NGÔN NGỮ CỤ THỂ — giọng đọc đa ngôn ngữ
+    (2026-09-04). Xem `download_narration_full` ở trên cho ngôn ngữ chính, `engine.
+    build_narration_download` cho logic ghép."""
+    if lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+    _get_project_or_404(db, project_id)
+    try:
+        path = engine.build_narration_download(project_id, lang=lang)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    return range_file_response(request, path, filename=f"narration_full_{lang}.mp3", media_type="audio/mpeg")
+
+
+class ShortExportCreateBody(BaseModel):
+    start_block_id: str
+    end_block_id: str
+    regenerate_images: bool = False
+    # Ngôn ngữ giọng đọc dùng để xuất short-video — mới (2026-09-12), theo yêu cầu người
+    # dùng ("cho phép chọn ngôn ngữ khi xuất short-video, tương tự như khi render
+    # long-video"). `None`/bỏ qua → ngôn ngữ chính của kênh. Validate + gate cứng (400
+    # nếu giọng đọc CHƯA sinh xong cho shot trong khoảng) nằm trong `create_short_export`.
+    lang: str | None = None
+
+
+@router.post("/projects/{project_id}/render/short-export")
+def create_short_export_endpoint(project_id: str, background_tasks: BackgroundTasks, body: ShortExportCreateBody, db: Session = Depends(get_db)):
+    """Xuất short-video 9:16 từ 1 khoảng block — **mới (2026-09-12)**, Output Center.
+    Xem docstring `ShortVideoExport` (render/schemas.py) + `render/short_export.py` cho
+    thiết kế đầy đủ. `GET .../render/status` (đã có sẵn, frontend poll liên tục) tự
+    nhiên trả kèm `short_exports` — không cần endpoint GET riêng cho tiến độ."""
+    p = _get_project_or_404(db, project_id)
+    try:
+        export = create_short_export(db, p, body.start_block_id.strip(), body.end_block_id.strip(), body.regenerate_images, lang=body.lang)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    background_tasks.add_task(run_short_export, project_id, export.id)
+    pdir = project_dir(p.channel_id, p.id)
+    return engine.load_render_state(pdir, project_id).model_dump()
+
+
+@router.delete("/projects/{project_id}/render/short-export/{export_id}")
+def delete_short_export_endpoint(project_id: str, export_id: str, db: Session = Depends(get_db)):
+    """Xoá 1 short-video đã xuất — giải phóng lại 1 trong `MAX_SHORT_EXPORTS_PER_PROJECT`
+    slot."""
+    p = _get_project_or_404(db, project_id)
+    try:
+        state = delete_short_export(p, export_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return state.model_dump()
+
+
+@router.get("/projects/{project_id}/render/short-export/{export_id}/download")
+def download_short_export(request: Request, project_id: str, export_id: str, db: Session = Depends(get_db)):
+    p = _get_project_or_404(db, project_id)
+    pdir = project_dir(p.channel_id, p.id)
+    state = engine.load_render_state(pdir, project_id)
+    export = next((e for e in state.short_exports if e.id == export_id), None)
+    if not export or export.status != "done" or not export.video_path:
+        raise HTTPException(400, "Short-video này chưa xuất xong.")
+    ext = export.video_path.rsplit(".", 1)[-1].lower()
+    media_type = "video/webm" if ext == "webm" else "video/mp4"
+    # Hậu tố ngôn ngữ trong tên file tải về — mới (2026-09-12), khớp quy ước
+    # `pack_export.py::export_pack_bundle` (2 export cùng khoảng block khác ngôn ngữ cần
+    # tên file phân biệt được). `export.lang` có thể `None` với export CŨ tạo trước tính
+    # năng chọn ngôn ngữ — fallback ngôn ngữ chính của kênh.
+    lang = export.lang or (engine._load_brand_profile(p.channel_id).get("primary_language") or "vi")
+    filename = f"short_{export.start_block_id}-{export.end_block_id}_{lang}.{ext}"
+    return range_file_response(request, export.video_path, filename=filename, media_type=media_type)
 
 
 class ExportPackBundleBody(BaseModel):

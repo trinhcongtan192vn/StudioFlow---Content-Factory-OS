@@ -66,6 +66,14 @@ ipcMain.handle("open-folder", async (_event, folderPath: string) => {
   if (errorMessage) throw new Error(errorMessage);
 });
 
+// Kết nối tài khoản Google (chỉ số YouTube, 2026-09-12) — mở URL đồng ý OAuth trong
+// TRÌNH DUYỆT HỆ THỐNG (không phải cửa sổ app, vốn không có thanh địa chỉ/không tin cậy
+// được cho màn đăng nhập Google) — `shell.openExternal` là API Electron chuẩn cho việc
+// này, cùng module `shell` đã import sẵn cho `openPath` ở trên.
+ipcMain.handle("open-external", async (_event, url: string) => {
+  await shell.openExternal(url);
+});
+
 app.whenReady().then(createWindow);
 
 app.on("window-all-closed", () => {

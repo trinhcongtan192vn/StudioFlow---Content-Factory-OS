@@ -6,6 +6,7 @@ import AIParamsSettings from "./AIParamsSettings";
 import PromptTemplatesSettings from "./PromptTemplatesSettings";
 import AuditLogSettings from "./AuditLogSettings";
 import AppBrandingSettings from "./AppBrandingSettings";
+import YoutubeSettings from "./YoutubeSettings";
 
 const NAV = [
   { key: "general", label: "Cấu hình chung" },
@@ -13,6 +14,7 @@ const NAV = [
   { key: "billing", label: "Chi phí & Ngân sách" },
   { key: "params", label: "Tham số AI mặc định" },
   { key: "prompts", label: "Prompt Templates" },
+  { key: "youtube", label: "Chỉ số YouTube" },
   { key: "audit", label: "Audit Log" },
   { key: "branding", label: "Thương hiệu ứng dụng" },
 ] as const;
@@ -52,6 +54,7 @@ export default function SettingsShell() {
         {tab === "billing" && <BillingSettings />}
         {tab === "params" && <AIParamsSettings />}
         {tab === "prompts" && <PromptTemplatesSettings />}
+        {tab === "youtube" && <YoutubeSettings />}
         {tab === "audit" && <AuditLogSettings />}
         {tab === "branding" && <AppBrandingSettings />}
       </div>

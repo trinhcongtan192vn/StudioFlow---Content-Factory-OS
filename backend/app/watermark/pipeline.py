@@ -9,16 +9,18 @@ Gemini/Nano Banana trên nền minh hoạ chi tiết (verify thật, nhiều pro
 `remove_watermark_from_image` dùng `detector.gemini_corner_bbox` (vị trí đã đo thật, luôn
 ~90%/83% chiều rộng/cao) làm mặc định thay vì AI định vị theo nội dung.
 
-**Video — phát hiện 1 LẦN, áp cho MỌI frame** (VẪN dùng Florence-2 — verify thật cho video
-Gemini/Veo, mục bug #2, khác hẳn watermark ẢNH ở trên đủ tương phản để định vị được): stock
-footage/video tư liệu hầu
-hết CỐ ĐỊNH vị trí suốt clip (logo góc, dòng chữ credit...) — phát hiện lại mỗi frame vừa
-tốn kém (Florence-2 sinh text, chậm hơn nhiều so với LaMa inpaint 1 vùng đã biết) vừa rủi
-ro (1-2 frame phát hiện SAI vị trí sẽ tạo giật hình rõ rệt giữa các frame liền kề, xấu hơn
-hẳn watermark cũ). Phát hiện trên 1 FRAME ĐẠI DIỆN (lấy tại 20% thời lượng — né đoạn
-đầu/leader có thể đen/mờ khác thường), dùng CHUNG bbox đó cho toàn bộ frame còn lại, vá
-theo LÔ (batch) qua `remover.inpaint_regions_batch_cropped` — nhanh hơn hẳn vá tuần tự
-từng frame, xem docstring `remover.py` cho số đo thật."""
+**Video — phát hiện 1 LẦN, áp cho MỌI frame** (stock footage/video tư liệu hầu hết CỐ ĐỊNH
+vị trí watermark suốt clip — logo góc, dòng chữ credit... — phát hiện lại mỗi frame vừa
+tốn kém vừa rủi ro giật hình nếu 1-2 frame phát hiện lệch nhau). **Phương pháp CHÍNH
+(2026-09-18, theo đề xuất người dùng)**: `detector.detect_static_watermark_bbox` — đo độ
+lệch chuẩn THEO THỜI GIAN của từng pixel trên nhiều frame lấy mẫu rải đều (watermark
+không di chuyển, nội dung thật luôn đổi) — đáng tin hơn hẳn việc chỉ nhìn 1 frame đơn.
+Không tìm được vùng đủ tin cậy (VD cảnh quay quá tĩnh) → rơi về **Florence-2** (lưới an
+toàn — verify thật cho video Gemini/Veo, mục bug #2, khác hẳn watermark ẢNH ở trên đủ
+tương phản để định vị được) trên 1 FRAME ĐẠI DIỆN (lấy tại 20% thời lượng — né đoạn
+đầu/leader có thể đen/mờ khác thường). Dù nguồn nào, bbox tìm được dùng CHUNG cho toàn bộ
+frame còn lại, vá theo LÔ (batch) qua `remover.inpaint_regions_batch_cropped` — nhanh hơn
+hẳn vá tuần tự từng frame, xem docstring `remover.py` cho số đo thật."""
 from __future__ import annotations
 
 import shutil
@@ -28,7 +30,7 @@ from typing import Callable
 
 from PIL import Image
 
-from .detector import detect_watermark_bboxes_robust, gemini_corner_bbox
+from .detector import detect_static_watermark_bbox, detect_watermark_bboxes_robust, gemini_corner_bbox
 from .remover import inpaint_regions_batch_cropped, inpaint_regions_full_frame
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -89,6 +91,7 @@ def _has_audio_stream(ffprobe: str, video_path: str) -> bool:
 def remove_watermark_from_video(
     ffmpeg: str, video_path: str, out_path: Path, tmp_dir: Path, *,
     text_input: str = "watermark",
+    force_gemini: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> list[tuple[int, int, int, int]]:
     """Xoá watermark khỏi CẢ VIDEO — 3 giai đoạn, báo tiến trình qua `on_progress(current,
@@ -96,7 +99,19 @@ def remove_watermark_from_video(
     (1) tách toàn bộ frame ra JPG (ffmpeg, nhanh — I/O thuần, không AI), (2) phát hiện
     watermark trên 1 frame đại diện rồi vá TỪNG frame (chậm nhất — 1 lượt LaMa/frame), (3)
     ghép lại video từ frame đã vá + audio gốc (nếu có). Dọn sạch `tmp_dir` khi xong (kể cả
-    khi lỗi giữa chừng, qua `finally`). Trả về bbox đã dùng (debug/log)."""
+    khi lỗi giữa chừng, qua `finally`). Trả về bbox đã dùng (debug/log).
+
+    `force_gemini` (2026-09-18, nút "Xoá watermark Gemini" riêng — người dùng CHỦ ĐỘNG
+    xác nhận asset có watermark Gemini, bất kể `visual_provider`) — dùng THẲNG
+    `gemini_corner_bbox` (vị trí tương đối cố định, cùng hàm đã verify cho ẢNH từ bug #4)
+    thay vì đa-frame/Florence-2. **Đã thử "so khớp mẫu template" (lưu icon Gemini thật rồi
+    `cv2.matchTemplate`) TRƯỚC KHI chọn hướng này — verify thật trên frame video THẬT của
+    người dùng (nền giấy cũ nhiều chữ) cho thấy cả so khớp pixel thô lẫn bản đồ cạnh Canny
+    đều khớp NHẦM vào hoạ tiết nền thay vì icon thật (điểm tự tin 0.49-0.59 nhưng SAI vị
+    trí) — cùng nguyên nhân khiến Florence-2 thất bại (nền chi tiết tương phản cao hơn hẳn
+    icon mờ bán trong suốt). Đo trực tiếp xác nhận `gemini_corner_bbox` VẪN chứa đúng vị
+    trí icon thật trên chính frame đó — nên tái dùng hàm đã verify này thay vì thuật toán
+    mới rủi ro hơn."""
     ffprobe = shutil.which("ffprobe") or "ffprobe"
     frames_dir = tmp_dir / "wm_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -112,13 +127,27 @@ def remove_watermark_from_video(
         if n_frames == 0:
             raise RuntimeError("Không tách được frame nào từ video (file lỗi hoặc rỗng)")
 
-        # Phát hiện trên frame đại diện tại ~20% thời lượng — né đoạn đầu có thể đen/mờ.
         sample_idx = max(0, min(n_frames - 1, int(n_frames * 0.2)))
-        sample_image = Image.open(frame_paths[sample_idx]).convert("RGB")
-        bboxes = detect_watermark_bboxes_robust(sample_image, text_input)
-        if not bboxes:
-            raise ValueError("Không phát hiện được watermark nào trong video — thử mô tả khác.")
-        bbox = bboxes[0]  # 1 vùng nổi bật nhất — đa số watermark stock footage chỉ có 1 logo/dòng chữ cố định
+        if force_gemini:
+            # Người dùng đã CHẮC CHẮN đây là Gemini — dùng thẳng vị trí cố định đã verify,
+            # không cần lớp phát hiện nội dung tổng quát nào (xem docstring hàm).
+            sample_image = Image.open(frame_paths[sample_idx]).convert("RGB")
+            bbox = gemini_corner_bbox(sample_image.size)
+        else:
+            # Phát hiện CHÍNH qua nhiều frame (độ lệch chuẩn theo thời gian, 2026-09-18,
+            # theo đề xuất người dùng: watermark không di chuyển trong khi nội dung thật
+            # luôn đổi) — xem docstring `detector.py::detect_static_watermark_bbox`. Đáng
+            # tin hơn hẳn Florence-2 trên 1 frame đơn (rủi ro đoán sai lan ra CẢ video, bug
+            # #1/#2). Không tìm được vùng nào đủ tin cậy → rơi về Florence-2 (lưới an toàn
+            # cũ, GIỮ NGUYÊN khả năng đã có) trên 1 frame đại diện tại ~20% thời lượng —
+            # né đoạn đầu có thể đen/mờ.
+            bbox = detect_static_watermark_bbox(frame_paths)
+            if bbox is None:
+                sample_image = Image.open(frame_paths[sample_idx]).convert("RGB")
+                bboxes = detect_watermark_bboxes_robust(sample_image, text_input)
+                if not bboxes:
+                    raise ValueError("Không phát hiện được watermark nào trong video — thử mô tả khác.")
+                bbox = bboxes[0]  # 1 vùng nổi bật nhất — đa số watermark stock footage chỉ có 1 logo/dòng chữ cố định
 
         if on_progress:
             on_progress(0, n_frames, f"Đang xoá watermark 0/{n_frames} frame")
@@ -142,6 +171,6 @@ def remove_watermark_from_video(
             cmd += ["-i", video_path, "-map", "0:v:0", "-map", "1:a:0", "-c:a", "copy", "-shortest"]
         cmd += ["-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", str(out_path)]
         subprocess.run(cmd, capture_output=True, check=True, text=True)
-        return bboxes
+        return [bbox]
     finally:
         shutil.rmtree(frames_dir, ignore_errors=True)

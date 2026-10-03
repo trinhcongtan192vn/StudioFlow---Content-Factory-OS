@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../../api/client";
-import type { AssembleConfig, ExportCodec, ExportQuality, ExportResolution, GpuEncodeStatus, ProductionPack, ProjectSummary, RenderState } from "../../api/types";
+import type { AssembleConfig, ExportCodec, ExportQuality, ExportResolution, GpuEncodeStatus, NarrationLanguage, ProductionPack, ProjectSummary, RenderState, ShotRenderStatus } from "../../api/types";
+import { NARRATION_LANGUAGES, NARRATION_LANGUAGE_LABELS } from "../../api/types";
 
 const RESOLUTION_LABEL: Record<ExportResolution, string> = { "720p": "720p (1280×720)", "1080p": "1080p (1920×1080)", "4k": "4K (3840×2160)" };
 // Short-form (9:16) — mới (2026-08-21): cùng 3 mức chất lượng nhưng chiều DỌC (khớp
@@ -19,6 +20,16 @@ function formatDuration(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return m > 0 ? `${m} phút ${s}s` : `${s}s`;
+}
+
+/** Giọng đọc CỦA 1 shot đã sẵn sàng CHO NGÔN NGỮ XUẤT VIDEO đang chọn hay chưa — mới
+ * (2026-09-11). Ngôn ngữ CHÍNH của kênh dùng field phẳng (`narration_status`), ngôn ngữ
+ * khác tra `narration_translations[lang]` — khớp đúng cách backend đọc
+ * (`assembly.py::_narration_for_lang`) và cách ScriptStudio.tsx đã hiện trạng thái theo
+ * ngôn ngữ (`narrationEntryForLang`). */
+function narrationReadyForLang(s: ShotRenderStatus, lang: NarrationLanguage, primaryLanguage: NarrationLanguage): boolean {
+  if (lang === primaryLanguage) return s.narration_status === "ready";
+  return s.narration_translations[lang]?.narration_status === "ready";
 }
 
 /** Render Studio — CHỈ còn bước ghép video (ffmpeg). Sinh asset (ảnh/video/giọng đọc)
@@ -40,7 +51,13 @@ export default function RenderStudio({ project }: { project: ProjectSummary; pac
   const [assembling, setAssembling] = useState(false);
   const [resettingStuck, setResettingStuck] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [config, setConfig] = useState<AssembleConfig>({ resolution: "1080p", codec: "h264", quality: "medium", use_gpu: false });
+  const [config, setConfig] = useState<AssembleConfig>({ resolution: "1080p", codec: "h264", quality: "medium", use_gpu: false, lang: null });
+  // Ngôn ngữ xuất video (2026-09-11, theo yêu cầu người dùng) — mặc định ngôn ngữ CHÍNH
+  // của kênh, đọc từ BrandProfile (cùng nguồn `ScriptStudio.tsx` đã dùng cho tính năng
+  // giọng đọc đa ngôn ngữ, mục 119). `config.lang` khởi tạo `null` (chưa biết ngôn ngữ
+  // chính) rồi tự set = primaryLanguage NGAY SAU KHI fetch xong (chỉ 1 lần — không đè
+  // lên lựa chọn người dùng tự đổi sau đó, cùng pattern `gpuEncode` auto-tick bên dưới).
+  const [primaryLanguage, setPrimaryLanguage] = useState<NarrationLanguage>("vi");
   // Trạng thái NVENC thật của máy — không chỉ tra `ffmpeg -encoders`, vì encoder có thể
   // ĐĂNG KÝ nhưng driver NVIDIA chưa đủ mới để chạy được (gặp thật lúc phát triển tính
   // năng này). Kiểm 1 lần khi mở màn, disable checkbox NGAY nếu không dùng được thay vì
@@ -68,6 +85,11 @@ export default function RenderStudio({ project }: { project: ProjectSummary; pac
   useEffect(() => {
     load();
     api.getGpuEncodeStatus().then(setGpuEncode, () => setGpuEncode({ available: false, message: "Không kiểm tra được GPU encode." }));
+    api.getBrandProfile(project.channel_id).then((bp) => {
+      const lang = bp.primary_language || "vi";
+      setPrimaryLanguage(lang);
+      setConfig((c) => (c.lang == null ? { ...c, lang } : c));
+    }, () => {} /* BrandProfile luôn tồn tại — lỗi mạng hiếm gặp, giữ mặc định "vi" */);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
 
@@ -155,7 +177,15 @@ export default function RenderStudio({ project }: { project: ProjectSummary; pac
   // đúng điều kiện `assembly.py` Pass 1 đang cho phép.
   const hasBackgroundVideo = !!state?.background_video?.asset_paths?.length;
   const notReadyCount = shots.filter((s) => s.visual_status !== "ready" && !(hasBackgroundVideo && !s.visual_asset_path)).length;
-  const canAssemble = shots.length > 0 && notReadyCount === 0;
+
+  // Giọng đọc của ngôn ngữ xuất video ĐÃ CHỌN chưa sinh hết cho mọi shot — mới
+  // (2026-09-11, theo yêu cầu người dùng: "nếu giọng đọc của ngôn ngữ được chọn chưa
+  // sinh hết, hiển thị cho user biết và KHÔNG cho render") — CHẶN CỨNG nút "Ghép video",
+  // khớp gate cứng tương ứng ở backend (`routers/render.py::start_assemble`).
+  const exportLang = (config.lang || primaryLanguage) as NarrationLanguage;
+  const missingNarrationCount = shots.filter((s) => !narrationReadyForLang(s, exportLang, primaryLanguage)).length;
+
+  const canAssemble = shots.length > 0 && notReadyCount === 0 && missingNarrationCount === 0;
 
   // Bug thật người dùng báo (2026-08-23): ảnh hiện ở Visual Studio khác ảnh trong video
   // đã ghép — nguyên nhân là sinh lại ảnh/giọng đọc SAU lần ghép cuối, video cũ không tự
@@ -212,8 +242,13 @@ export default function RenderStudio({ project }: { project: ProjectSummary; pac
           <div style={{ fontSize: 13 }}>
             <strong>{readyCount}/{shots.length} shot đã sinh xong visual</strong>
           </div>
-          {!canAssemble && (
+          {notReadyCount > 0 && (
             <div style={{ fontSize: 11.5, opacity: 0.65 }}>Cần sinh xong visual cho MỌI shot ở Visual Studio trước khi ghép được{hasBackgroundVideo ? " (trừ shot dùng video nền chung)" : ""}.</div>
+          )}
+          {missingNarrationCount > 0 && (
+            <div style={{ fontSize: 11.5, color: "var(--color-warning)" }}>
+              ⚠ Giọng đọc [{NARRATION_LANGUAGE_LABELS[exportLang]}] chưa sinh xong cho {missingNarrationCount}/{shots.length} shot — cần sinh xong giọng đọc ngôn ngữ này (hoặc đổi sang ngôn ngữ khác đã sẵn sàng) trước khi ghép được.
+            </div>
           )}
         </div>
       )}
@@ -319,6 +354,17 @@ export default function RenderStudio({ project }: { project: ProjectSummary; pac
                 ))}
               </select>
             </div>
+          </div>
+          <div className="field" style={{ margin: 0 }}>
+            <label>Ngôn ngữ giọng đọc</label>
+            <select className="input" value={exportLang} onChange={(e) => setConfig((c) => ({ ...c, lang: e.target.value as NarrationLanguage }))}>
+              {NARRATION_LANGUAGES.map((lang) => (
+                <option key={lang} value={lang}>
+                  {NARRATION_LANGUAGE_LABELS[lang]}
+                  {lang === primaryLanguage ? " (ngôn ngữ chính của kênh)" : ""}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="field" style={{ margin: 0 }}>
             <label>Định dạng</label>

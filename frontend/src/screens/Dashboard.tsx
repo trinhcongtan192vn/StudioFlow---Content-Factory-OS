@@ -3,14 +3,18 @@ import { api } from "../api/client";
 import type { ProjectSummary } from "../api/types";
 import ChannelDialog from "../components/ChannelDialog";
 import LocalServicesPanel from "../components/LocalServicesPanel";
+import YoutubeMetricsPanel from "../components/YoutubeMetricsPanel";
 import { STATUS_LABEL, STATUS_DOT_COLOR, STEP_LABELS } from "../components/statusMeta";
 import { useApp } from "../store/AppContext";
+
+type ChannelPanelTab = "projects" | "youtube";
 
 export default function Dashboard() {
   const app = useApp();
   const [selected, setSelected] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
+  const [panelTab, setPanelTab] = useState<ChannelPanelTab>("projects");
 
   useEffect(() => {
     if (selected) api.listProjects(selected).then(setProjects);
@@ -34,7 +38,10 @@ export default function Dashboard() {
           <div
             key={ch.id}
             className="card elev-sm"
-            onClick={() => setSelected(selected === ch.id ? null : ch.id)}
+            onClick={() => {
+              setSelected(selected === ch.id ? null : ch.id);
+              setPanelTab("projects");
+            }}
             style={{ cursor: "pointer", border: selected === ch.id ? "1px solid var(--color-accent)" : "1px solid transparent" }}
           >
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10, justifyContent: "space-between" }}>
@@ -83,7 +90,31 @@ export default function Dashboard() {
 
       {selected && (
         <div>
-          <h4 style={{ marginBottom: "var(--space-3)" }}>Dự án — {app.channels.find((c) => c.id === selected)?.name}</h4>
+          <h4 style={{ marginBottom: "var(--space-3)" }}>{app.channels.find((c) => c.id === selected)?.name}</h4>
+          <div style={{ display: "flex", gap: "var(--space-1)", borderBottom: "1px solid var(--color-divider)", marginBottom: "var(--space-4)" }}>
+            {(
+              [
+                { key: "projects", label: "Dự án" },
+                { key: "youtube", label: "Chỉ số YouTube" },
+              ] as const
+            ).map((t) => (
+              <div
+                key={t.key}
+                onClick={() => setPanelTab(t.key)}
+                style={{
+                  padding: "8px 14px",
+                  fontSize: 13,
+                  cursor: "pointer",
+                  borderBottom: panelTab === t.key ? "2px solid var(--color-accent)" : "2px solid transparent",
+                  color: panelTab === t.key ? "var(--color-accent-300)" : "color-mix(in srgb, var(--color-text) 65%, transparent)",
+                }}
+              >
+                {t.label}
+              </div>
+            ))}
+          </div>
+
+          {panelTab === "projects" && (
           <div style={{ overflowX: "auto" }}>
           <table className="table">
             <thead>
@@ -143,6 +174,11 @@ export default function Dashboard() {
             </tbody>
           </table>
           </div>
+          )}
+
+          {panelTab === "youtube" && (
+            <YoutubeMetricsPanel channel={app.channels.find((c) => c.id === selected)!} onChannelUpdated={app.refreshChannels} />
+          )}
         </div>
       )}
 

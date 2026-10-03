@@ -1,5 +1,16 @@
 import io
 
+import app.routers.channels as channels_router
+
+
+def test_new_id_unique_even_when_time_collides(monkeypatch):
+    """Cùng bug/fix `_new_id` đã sửa ở `test_projects_brief.py` — xem docstring đầy đủ ở
+    đó. `channels.py` có bản copy RIÊNG của hàm này (không dùng chung với `projects.py`),
+    cần verify riêng."""
+    monkeypatch.setattr(channels_router.time, "time", lambda: 1789999999.999)
+    ids = [channels_router._new_id("ch") for _ in range(50)]
+    assert len(set(ids)) == 50
+
 
 def test_create_and_list_channel(client, unique_name):
     resp = client.post("/channels", json={"name": f"Kênh {unique_name}", "niche": "Lịch sử"})
@@ -69,41 +80,38 @@ def test_brandprofile_get_put_versioning(client, channel):
     assert 1 in versions and 2 in versions
 
 
-def test_new_channel_brandprofile_has_blank_motion_tone_and_cultural_lock_negative(client, unique_name):
-    """Bug thật (2026-09-02, user báo) — `motion_tone`/`cultural_lock_negative` TỪNG có
-    default không rỗng ghim sẵn trong schema (gợi ý "chậm, tinh tế"/loại trừ Nhật-Hàn) —
-    kênh MỚI TẠO hiện sẵn giá trị dù người dùng chưa từng nhập gì, trông như đã có dữ liệu.
-    Đổi default schema về rỗng — cụm gợi ý cũ chuyển thành placeholder ở frontend, không
-    còn là giá trị thật."""
+def test_new_channel_brandprofile_has_blank_cultural_lock_negative(client, unique_name):
+    """Bug thật (2026-09-02, user báo) — `cultural_lock_negative` TỪNG có default không
+    rỗng ghim sẵn trong schema (gợi ý loại trừ Nhật-Hàn) — kênh MỚI TẠO hiện sẵn giá trị
+    dù người dùng chưa từng nhập gì, trông như đã có dữ liệu. Đổi default schema về rỗng —
+    cụm gợi ý cũ chuyển thành placeholder ở frontend, không còn là giá trị thật.
+
+    (`motion_tone` — field song sinh của bug này — đã xoá cùng lúc xoá provider Wan local,
+    đợt dọn dẹp 2026-09-24, xem IMPLEMENTATION_REPORT.md.)"""
     resp = client.post("/channels", json={"name": f"Kênh trống {unique_name}", "niche": "Test"})
     ch = resp.json()
     profile = client.get(f"/channels/{ch['id']}/brandprofile").json()
-    assert profile["motion_tone"] == ""
     assert profile["cultural_lock_negative"] == ""
 
 
-def test_put_brandprofile_persists_cleared_motion_tone_and_cultural_lock_negative(client, channel):
-    """Bug thật (2026-09-02, user tự test) — xoá trắng 2 field này rồi lưu, mở lại vẫn
+def test_put_brandprofile_persists_cleared_cultural_lock_negative(client, channel):
+    """Bug thật (2026-09-02, user tự test) — xoá trắng field này rồi lưu, mở lại vẫn
     thấy giá trị cũ. Root cause thật ra ở FRONTEND (`ChannelDialog.tsx::draftFromProfile`
     dùng `bp.field || "<default cũ>"`, coi chuỗi rỗng ĐÃ LƯU giống hệt "chưa có giá trị" —
     xem IMPLEMENTATION_REPORT.md mục 104) — test này verify riêng phần BACKEND (được hỏi
     trong lúc điều tra: PUT full-replace có DROP chuỗi rỗng không?) — xác nhận KHÔNG, PUT
     lưu ĐÚNG chuỗi rỗng, GET đọc lại ĐÚNG chuỗi rỗng."""
     profile = client.get(f"/channels/{channel['id']}/brandprofile").json()
-    profile["motion_tone"] = "chuyển động chậm, tinh tế"
     profile["cultural_lock_negative"] = "japanese kimono"
     client.put(f"/channels/{channel['id']}/brandprofile", json=profile)
 
     profile2 = client.get(f"/channels/{channel['id']}/brandprofile").json()
-    profile2["motion_tone"] = ""
     profile2["cultural_lock_negative"] = ""
     resp = client.put(f"/channels/{channel['id']}/brandprofile", json=profile2)
     assert resp.status_code == 200
-    assert resp.json()["motion_tone"] == ""
     assert resp.json()["cultural_lock_negative"] == ""
 
     reloaded = client.get(f"/channels/{channel['id']}/brandprofile").json()
-    assert reloaded["motion_tone"] == ""
     assert reloaded["cultural_lock_negative"] == ""
 
 
@@ -179,4 +187,34 @@ def test_clear_brand_logo_via_put(client, channel):
     resp = client.put(f"/channels/{channel['id']}/brandprofile", json=profile)
     assert resp.status_code == 200
     assert resp.json()["logo_path"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Kéo thả sắp xếp thứ tự kênh trên Sidebar (2026-09-19) — `order_index` mới, xem
+# `models.py::Channel.order_index`/`routers/channels.py::reorder_channels`.
+# ---------------------------------------------------------------------------
+def test_create_channel_appends_at_end_of_order(client, unique_name):
+    a = client.post("/channels", json={"name": f"OrderA {unique_name}"}).json()
+    b = client.post("/channels", json={"name": f"OrderB {unique_name}"}).json()
+    all_ids = [c["id"] for c in client.get("/channels").json()]
+    assert all_ids.index(a["id"]) < all_ids.index(b["id"])  # tạo sau -> đứng sau
+
+
+def test_reorder_channels_persists_new_order(client, unique_name):
+    a = client.post("/channels", json={"name": f"ReorderA {unique_name}"}).json()
+    b = client.post("/channels", json={"name": f"ReorderB {unique_name}"}).json()
+    c = client.post("/channels", json={"name": f"ReorderC {unique_name}"}).json()
+
+    resp = client.patch("/channels/reorder", json={"channel_ids": [c["id"], a["id"], b["id"]]})
+    assert resp.status_code == 200, resp.text
+
+    all_ids = [ch["id"] for ch in client.get("/channels").json()]
+    mine = {a["id"], b["id"], c["id"]}
+    ordered_mine = [i for i in all_ids if i in mine]
+    assert ordered_mine == [c["id"], a["id"], b["id"]]
+
+
+def test_reorder_channels_404_for_unknown_id(client, channel):
+    resp = client.patch("/channels/reorder", json={"channel_ids": [channel["id"], "ch_does_not_exist"]})
+    assert resp.status_code == 404
     assert client.get(f"/channels/{channel['id']}/brandprofile/logo").status_code == 404

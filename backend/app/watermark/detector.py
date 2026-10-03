@@ -18,6 +18,8 @@ crash `AttributeError: 'Florence2LanguageConfig' object has no attribute
 requirements.txt) chạy đúng, xác nhận thật bằng cách chạy lại nguyên script verify."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from PIL import Image
 
 _FLORENCE_MODEL_ID = "microsoft/Florence-2-base"
@@ -184,3 +186,89 @@ def detect_watermark_bboxes_robust(
         if reliable:
             return reliable
     return []
+
+
+# Phát hiện qua NHIỀU frame (độ lệch chuẩn theo thời gian) — mới (2026-09-18), theo đề
+# xuất người dùng: watermark KHÔNG di chuyển trong khi nội dung thật luôn đổi (chuyển
+# động/nhiễu/ánh sáng) giữa các frame — đo độ lệch chuẩn theo thời gian của TỪNG PIXEL
+# trên 1 tập frame lấy mẫu rải đều, vùng lệch chuẩn THẤP + hình dạng hợp lý (tái dùng
+# `_bbox_area_fraction`/`_bbox_has_plausible_shape` ở trên, đã tổng quát hoá không phụ
+# thuộc Florence-2) chính là watermark. ĐÁNG TIN CẬY HƠN Florence-2 trên 1 frame đơn (rủi
+# ro đoán sai lan ra CẢ video nếu đúng frame đó model đoán hỏng, xem bug #1/#2 ở trên) —
+# dùng làm phương pháp CHÍNH cho video, Florence-2 giữ làm LƯỚI AN TOÀN khi phương pháp
+# này không tìm được vùng đủ tin cậy (xem `pipeline.py::remove_watermark_from_video`).
+# KHÔNG cần model AI nào — chỉ `numpy`/`cv2` (đã có sẵn qua `scenedetect[opencv]` trong
+# requirements.txt, không thêm dependency mới), rẻ hơn hẳn nạp Florence-2 (~63s/lần).
+_STATIC_STD_PERCENTILE = 15  # ngưỡng "pixel tĩnh" = 15th percentile độ lệch chuẩn theo thời gian
+_EDGE_SAMPLE_SKIP_FRACTION = 0.05  # bỏ 5% đầu/cuối danh sách frame — né đoạn fade/leader
+
+
+def _sample_frame_indices(n_frames: int, sample_count: int) -> list[int]:
+    lo = int(n_frames * _EDGE_SAMPLE_SKIP_FRACTION)
+    hi = n_frames - 1 - lo
+    if hi <= lo:
+        lo, hi = 0, n_frames - 1
+    import numpy as np
+
+    count = min(sample_count, hi - lo + 1)
+    if count < 2:
+        return list(range(n_frames))
+    return sorted({int(round(v)) for v in np.linspace(lo, hi, count)})
+
+
+def detect_static_watermark_bbox(frame_paths: list[Path], sample_count: int = 16) -> tuple[int, int, int, int] | None:
+    """Phát hiện watermark qua ĐỘ LỆCH CHUẨN THEO THỜI GIAN trên nhiều frame lấy mẫu rải
+    đều trong `frame_paths` (danh sách đường dẫn frame ĐÃ TÁCH SẴN từ video, cùng độ phân
+    giải — xem `pipeline.py::remove_watermark_from_video`) — trả `None` nếu không tìm
+    được vùng nào đủ tin cậy (caller tự rơi về Florence-2, xem docstring hằng số ở trên).
+    KHÔNG raise ra ngoài — mọi lỗi bất ngờ (VD frame lỗi/kích thước lệch nhau) đều trả
+    `None`, để caller coi như "phương pháp mới không tìm được" thay vì làm hỏng cả lượt
+    xoá watermark.
+
+    Lưu ý: pixel tĩnh ĐA SỐ nằm ở watermark (không di chuyển), nhưng cảnh quay TĨNH THẬT
+    (camera không di chuyển, hầu như không có chủ thể chuyển động) cũng có thể có vùng
+    lệch chuẩn thấp KHÔNG PHẢI watermark — bộ lọc diện tích/hình dạng + ưu tiên vùng GẦN
+    GÓC khung hình nhất (quy ước đặt watermark thực tế) giảm rủi ro này, không loại bỏ
+    hoàn toàn được (không suy đoán quá khả năng thật của kỹ thuật thống kê thuần này)."""
+    try:
+        import cv2
+        import numpy as np
+
+        n_frames = len(frame_paths)
+        if n_frames < 2:
+            return None
+        indices = _sample_frame_indices(n_frames, sample_count)
+        if len(indices) < 2:
+            return None
+
+        frames = [np.asarray(Image.open(frame_paths[i]).convert("L"), dtype=np.float32) for i in indices]
+        stack = np.stack(frames)  # (N, H, W)
+        h, w = stack.shape[1], stack.shape[2]
+        image_size = (w, h)
+        std_map = stack.std(axis=0)  # (H, W) — độ lệch chuẩn theo thời gian của từng pixel
+
+        threshold = float(np.percentile(std_map, _STATIC_STD_PERCENTILE))
+        static_mask = (std_map <= threshold).astype(np.uint8) * 255
+        cleaned = cv2.morphologyEx(static_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+        n_labels, _labels, stats, centroids = cv2.connectedComponentsWithStats(cleaned, connectivity=8)
+        corners = [(0, 0), (w, 0), (0, h), (w, h)]
+
+        best_bbox: tuple[int, int, int, int] | None = None
+        best_dist: float | None = None
+        for label in range(1, n_labels):  # bỏ label 0 (nền)
+            x, y, cw, ch, _area = stats[label]
+            if cw <= 0 or ch <= 0:
+                continue
+            bbox = (int(x), int(y), int(x + cw), int(y + ch))
+            if _bbox_area_fraction(bbox, image_size) > _MAX_BBOX_AREA_FRACTION:
+                continue
+            if not _bbox_has_plausible_shape(bbox, image_size):
+                continue
+            cx, cy = centroids[label]
+            dist = min(((cx - corx) ** 2 + (cy - cory) ** 2) ** 0.5 for corx, cory in corners)
+            if best_dist is None or dist < best_dist:
+                best_dist, best_bbox = dist, bbox
+        return best_bbox
+    except Exception:  # noqa: BLE001
+        return None

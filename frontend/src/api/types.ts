@@ -8,6 +8,10 @@ export interface ChannelSummary {
   archived: boolean;
   brandprofile_version: number;
   running_count: number;
+  // Chỉ số YouTube — mới (2026-09-12).
+  youtube_channel_id: string | null;
+  youtube_channel_title: string | null;
+  youtube_connected_at: string | null;
 }
 
 export interface TrashProjectSummary extends ProjectSummary {
@@ -33,6 +37,18 @@ export interface RetentionBenchmark {
   max_anchor_gap_sec: number;
   target_body_len_min: number;
 }
+// Giọng đọc đa ngôn ngữ (mới 2026-09-04) — 6 ngôn ngữ hỗ trợ, khớp
+// `backend/app/render/schemas.py::NARRATION_LANGUAGES` (nguồn sự thật duy nhất).
+export type NarrationLanguage = "vi" | "en" | "de" | "pt_br" | "es" | "fr";
+export const NARRATION_LANGUAGES: NarrationLanguage[] = ["vi", "en", "de", "pt_br", "es", "fr"];
+export const NARRATION_LANGUAGE_LABELS: Record<NarrationLanguage, string> = {
+  vi: "Tiếng Việt",
+  en: "Tiếng Anh",
+  de: "Tiếng Đức",
+  pt_br: "Tiếng Bồ Đào Nha (Brazil)",
+  es: "Tiếng Tây Ban Nha",
+  fr: "Tiếng Pháp",
+};
 export interface BrandProfile {
   channel_id: string;
   niche: string;
@@ -46,22 +62,12 @@ export interface BrandProfile {
   // trúc, hoạ tiết) — áp dụng cho MỌI provider (cloud lẫn local). Rỗng mặc định — đặc thù
   // theo từng kênh/thời kỳ lịch sử.
   cultural_lock_positive: string;
-  // `cultural_lock_negative` — loại trừ văn hoá ngoại lai, default không rỗng (phổ quát
-  // cho mọi kênh). CHỈ áp dụng đầy đủ cho local_sdxl/local_wan (negative-prompt thật) —
-  // cloud (OpenAI/Gemini/Flux) không có tham số negative prompt.
+  // `cultural_lock_negative` — loại trừ văn hoá ngoại lai. **Đợt dọn dẹp (2026-09-24)**:
+  // hiện KHÔNG nối vào bất kỳ provider nào — trước đây chỉ có tác dụng qua negative-prompt
+  // thật của 4 provider local đã xoá (SDXL/Flux/Wan/LocalAI, xem IMPLEMENTATION_REPORT.md)
+  // — để dành nối vào provider local còn lại (`local_qwen`, có negative_prompt thật) sau
+  // nếu cần.
   cultural_lock_negative: string;
-  // Ảnh tham chiếu phong cách — **mới (2026-08-23), làm lại đợt 2 (2026-08-25)**: đợt
-  // đầu dùng IPAdapter qua ComfyUI (nhiều ảnh, chưa từng verify thật). Đợt 2 chuyển
-  // sang img2img qua LocalAI (`localai_image`, xem backend `image_localai.py`) — CHỈ
-  // dùng ảnh ĐẦU TIÊN trong list dù field vẫn là mảng (tương thích ngược dữ liệu cũ) —
-  // UI giờ chỉ cho upload 1 ảnh. `style_reference_weight` (0-1, cao = giữ phong cách
-  // NHIỀU) — provider tự quy đổi sang `strength` (diffusers img2img, hướng ngược).
-  style_reference_paths: string[];
-  style_reference_weight: number;
-  // Tông chuyển động cho video AI local (Wan2.2) — mới (2026-08-23) — khác
-  // visual_style_prompt (phong cách thị giác TĨNH) — nói về tốc độ/kiểu chuyển động.
-  // Chỉ áp dụng cho provider local_wan, provider video cloud (Sora/Veo/Flux) bỏ qua.
-  motion_tone: string;
   hook_formats_preferred: string[];
   retention_benchmark: RetentionBenchmark;
   // Logo kênh — mới (2026-08-22) — thuần hiển thị nhận diện thương hiệu, không dùng
@@ -77,11 +83,6 @@ export interface BrandProfile {
   // (kể cả intro) khi ghép MP4, trừ khi project tự override riêng (RenderState.bg_music).
   bg_music_path: string;
   bg_music_volume: number;
-  // Style LoRA khoá "chữ ký hình ảnh" cho ảnh local SDXL — mới (2026-08-22), đổi sang
-  // STACK nhiều LoRA (2026-08-23, theo đề xuất người dùng — 1 LoRA "chất liệu" + 1 LoRA
-  // "hướng văn hoá"). Mỗi `name` là tên file THẬT trong ComfyUI/models/loras/ — rỗng =
-  // không dùng LoRA nào. Chỉ áp dụng cho provider local_sdxl, provider khác bỏ qua.
-  style_loras: { name: string; strength: number }[];
   // Hiệu ứng lớp phủ (overlay, VD mưa/tuyết rơi) MẶC ĐỊNH của kênh — mới (2026-08-22) —
   // blend đè liên tục lên toàn bộ video (kể cả intro) khi ghép MP4, trừ khi project tự
   // override riêng (RenderState.overlay). LUÔN video (mp4/webm/mov).
@@ -95,6 +96,12 @@ export interface BrandProfile {
   aspect_fill_mode: "crop" | "blur";
   // Auto-ducking nhạc nền (§9b.5) — tự giảm nhạc nền khi có giọng đọc, mặc định tắt.
   bg_music_ducking_enabled: boolean;
+  // Giọng đọc đa ngôn ngữ cho thị trường nước ngoài — mới (2026-09-04). `primary_language`
+  // quyết định ngôn ngữ nào dùng để render video/tính timestamp (field `audio`/
+  // `narration_*` gốc, KHÔNG đổi). `voice_clone_ref_paths` — mẫu giọng clone RIÊNG từng
+  // ngôn ngữ (thay `voice_clone_ref_path` đơn cũ, field đó GIỮ NGUYÊN để đọc dữ liệu cũ).
+  primary_language: NarrationLanguage;
+  voice_clone_ref_paths: Partial<Record<NarrationLanguage, string>>;
   version: number;
 }
 // Chỉ trả về từ POST voice-sample/upload — báo 1 lần mẫu có bị cắt ngắn không (mục 24
@@ -120,6 +127,7 @@ export interface ProjectSummary {
   // Dashboard). `parent_project_id` null = long-form; có giá trị = short-form.
   parent_project_id: string | null;
   format: "long" | "short";
+  youtube_video_id: string | null; // mới (2026-09-12), xem YoutubeVideosAvailable
   created_at: string;
   updated_at: string;
 }
@@ -162,6 +170,10 @@ export interface ScriptBodyItem {
   visual_type?: string | null;
   anchor: boolean;
   warning: Warning | null;
+  // Giọng đọc đa ngôn ngữ (mới 2026-09-04) — văn bản VO đã dịch cho TỪNG ngôn ngữ, đọc từ
+  // file import (cột "VO (VI)"/"VO (DE)"/...) hoặc sửa tay ở Script Studio. `audio` (field
+  // gốc, trên) luôn là bản dịch của `BrandProfile.primary_language`.
+  audio_by_lang: Partial<Record<NarrationLanguage, string>>;
 }
 export interface Script {
   hook: { spoken: string; visual: string; duration_sec: number } | null;
@@ -193,6 +205,9 @@ export interface ImportedBeat {
   direction_label: string;
   audio: string;
   anchor: boolean;
+  // Giọng đọc đa ngôn ngữ (mới 2026-09-04) — populated khi file import dùng cột "VO (XX)"
+  // thay vì 1 cột VO đơn (xem app/pipeline/script_import.py). Rỗng {} với file cũ.
+  audio_by_lang: Partial<Record<NarrationLanguage, string>>;
 }
 export interface ImportPreview {
   beats: ImportedBeat[];
@@ -281,12 +296,76 @@ export interface RetentionEntry {
   ret_100: number | null;
   avg_view_duration: number | null;
   thumbnail_ctr: number | null;
+  // RPM (doanh thu ước tính/1.000 view) — mới (2026-09-12). GIỮ NHẬP TAY (không tự động
+  // hoá như các chỉ số YouTube khác, xem `YoutubeVideoMetrics` dưới) — quyền doanh thu
+  // YouTube (`yt-analytics-monetary.readonly`) khó xin cho app cá nhân.
+  rpm: number | null;
 }
 export interface RetentionOut {
   entry: RetentionEntry | null;
   target_hook_strength: number | null;
   guardrail_hook_strength: number | null;
   diff_vs_benchmark: number | null;
+}
+
+// Chỉ số YouTube (Data API v3 + Analytics API v2) — mới (2026-09-12), theo yêu cầu
+// người dùng: kéo dữ liệu thật từ YouTube thay "Nạp retention thủ công". Xem
+// `backend/app/youtube_analytics.py`/`backend/app/routers/youtube_analytics.py`.
+export interface YoutubeSettingsStatus {
+  has_oauth_client: boolean;
+}
+// "Đã kết nối" giờ RIÊNG theo từng kênh — mục 154 (2026-09-19), xem
+// `api.getYoutubeChannelOAuthStatus`.
+export interface YoutubeChannelOAuthStatus {
+  connected: boolean;
+}
+export interface YoutubeVideoAvailable {
+  video_id: string;
+  title: string;
+  published_at: string;
+}
+export interface YoutubeVideoMetrics {
+  project_id: string;
+  synced_at: string;
+  views: number | null;
+  avg_view_percentage: number | null; // APV (%)
+  avg_view_duration_sec: number | null;
+  retention_at_30s: number | null; // %
+  impressions: number | null;
+  impression_ctr: number | null; // %
+  comment_count: number | null;
+  comments_per_1000_views: number | null;
+  video_duration_sec: number | null;
+  views_by_country: Record<string, number> | null;
+}
+export interface YoutubeChannelSnapshot {
+  synced_at: string;
+  subscriber_count: number | null;
+  total_views: number | null;
+  video_count: number | null;
+  avg_view_percentage: number | null;
+  avg_impression_ctr: number | null;
+  avg_retention_at_30s: number | null;
+  comments_per_1000_views: number | null;
+  de_at_ch_views_pct: number | null;
+}
+export interface YoutubeVideoRow {
+  project_id: string;
+  project_title: string;
+  youtube_video_id: string;
+  metrics: YoutubeVideoMetrics | null;
+}
+export interface YoutubeChannelMetricsOut {
+  youtube_channel_id: string | null;
+  youtube_channel_title: string | null;
+  channel_snapshot: YoutubeChannelSnapshot | null;
+  videos: YoutubeVideoRow[];
+}
+export interface YoutubeRetentionChapter {
+  block_id: string;
+  start_ratio: number;
+  end_ratio: number;
+  avg_retention: number;
 }
 
 // M2 Production Layer — khớp backend/app/render/schemas.py. State này sống trong
@@ -309,6 +388,9 @@ export interface ShotRenderStatus {
   // Channel Asset Vault (CHANGE_Semantic_BRoll_Asset_Vault.md) — set khi
   // `visual_provider === "asset_vault"`, trỏ tới ProcessedClip.clip_id đã gán.
   linked_clip_id: string | null;
+  // Chiều NGƯỢC lại linked_clip_id — mới (2026-09-11) — set khi visual CỦA CHÍNH shot
+  // này đã được lưu vào Kho Tài Nguyên (nút "Lưu vào Kho tài nguyên").
+  saved_to_vault_clip_id: string | null;
   // Xoá watermark (2026-08-28) — "quét xong, không tìm thấy" KHÔNG phải lỗi (asset gốc
   // giữ nguyên), nên tách khỏi visual_error — hiện thông báo trung tính riêng.
   visual_watermark_note: string | null;
@@ -324,6 +406,17 @@ export interface ShotRenderStatus {
   narration_error: string | null;
   narration_duration_sec: number | null;
   narration_started_at: string | null;
+  narration_updated_at: string | null;
+  // Giọng đọc CÁC NGÔN NGỮ KHÁC ngôn ngữ chính — mới (2026-09-04). Ngôn ngữ chính dùng
+  // field `narration_*` gốc ở trên (không đổi).
+  narration_translations: Partial<Record<NarrationLanguage, TranslatedNarrationStatus>>;
+}
+export interface TranslatedNarrationStatus {
+  narration_status: AssetStatus;
+  narration_asset_path: string | null;
+  narration_provider: string | null;
+  narration_error: string | null;
+  narration_duration_sec: number | null;
   narration_updated_at: string | null;
 }
 export interface GpuStatus {
@@ -387,6 +480,16 @@ export interface OverlayEffectOverride {
   // đã cấu hình. Cùng khái niệm IntroAssetStatus.disabled.
   disabled: boolean;
 }
+// Ảnh nhân vật tham khảo RIÊNG của project — mới (2026-09-09, mục 127) — upload xong tự
+// sinh `description` qua VisionProvider, nối vào MỌI prompt sinh ảnh của project (giữ
+// nhân vật đồng nhất giữa các shot). KHÔNG có cấp kênh (khác Intro/BgMusic/Overlay) — đặc
+// thù từng project/video. `caption_error` — lỗi sinh mô tả tự động (KHÔNG chặn upload,
+// ảnh vẫn lưu được) — người dùng tự sửa `description` qua PATCH hoặc bấm sinh lại.
+export interface CharacterReferenceStatus {
+  image_path: string | null;
+  description: string;
+  caption_error: string | null;
+}
 // Tóm tắt 1 lượt "Xoá watermark toàn bộ slot" (2026-08-28) — banner hiện SAU khi bulk
 // chạy xong, gộp thay vì rải thông báo riêng từng shot (dễ bỏ sót với nhiều shot).
 export interface WatermarkScanSummary {
@@ -434,13 +537,49 @@ export interface ImageLayer {
   opacity: number;
   blend_mode: LayerBlendMode;
 }
+// Layer CAPTION (phụ đề cứng burn-in) — mới (2026-09-12), theo yêu cầu người dùng:
+// "thêm caption vào video ở bước visual studio... chọn 9 vị trí, kích thước, độ mờ
+// tương tự phần Layer video định vị". KHÁC VideoLayer/ImageLayer (list, upload file) —
+// đây là 1 CẤU HÌNH DUY NHẤT/project, không có asset upload (nội dung lấy từ script).
+export interface CaptionLayer {
+  enabled: boolean;
+  position: LayerPosition;
+  size_pct: number; // cỡ chữ = % CHIỀU CAO khung hình xuất (khác width_pct — % chiều RỘNG — của VideoLayer/ImageLayer)
+  opacity: number;
+  // null = dùng ĐÚNG ngôn ngữ đang ghép video (export_lang) — khác đi thì dùng ngôn ngữ
+  // người dùng tự chọn riêng cho caption, độc lập ngôn ngữ giọng đọc.
+  lang: NarrationLanguage | null;
+}
+// Xuất short-video 9:16 từ 1 khoảng block — mới (2026-09-12), theo yêu cầu người dùng:
+// repurpose 1 đoạn của project long-form thành YouTube Shorts/TikTok mà KHÔNG cần tạo 1
+// project short-form riêng (khác hẳn `Project.format==="short"`/`parent_project_id`).
+// Tối đa 3 cái/project (chặn 400 ở backend khi bấm xuất thêm — xem `render/short_export.py`).
+export type ShortVideoExportStatus = "pending" | "generating_images" | "assembling" | "done" | "error";
+export interface ShortVideoExport {
+  id: string;
+  start_block_id: string;
+  end_block_id: string;
+  regenerate_images: boolean;
+  // Ngôn ngữ giọng đọc dùng để xuất — mới (2026-09-12). `null` chỉ gặp ở export CŨ tạo
+  // trước tính năng chọn ngôn ngữ (fallback ngôn ngữ chính của kênh khi hiển thị).
+  lang: NarrationLanguage | null;
+  status: ShortVideoExportStatus;
+  error: string | null;
+  progress_current: number | null;
+  progress_total: number | null;
+  progress_label: string | null;
+  video_path: string | null;
+  created_at: string | null;
+}
 export interface RenderState {
   project_id: string;
   shots: ShotRenderStatus[];
   layers: VideoLayer[]; // mới (2026-09-02, mục 112)
   image_layers: ImageLayer[]; // mới (2026-09-02, mục 115)
+  caption_layer: CaptionLayer | null; // mới (2026-09-12)
   narration_speed: number; // 1.0 = tốc độ gốc — mới (2026-09-02, mục 109), chỉnh ở Script Studio
   intro: IntroAssetStatus | null;
+  character_reference: CharacterReferenceStatus | null;
   bg_music: BgMusicOverride | null;
   overlay: OverlayEffectOverride | null;
   background_video: BackgroundVideoOverride | null;
@@ -454,6 +593,7 @@ export interface RenderState {
   assembly_completed_at: string | null;
   final_video_path: string | null;
   watermark_scan_summary: WatermarkScanSummary | null;
+  short_exports: ShortVideoExport[];
 }
 
 // Thư viện Creative Asset — mới (2026-08-20) — nhạc nền/video/ảnh/giọng đọc dùng lại
@@ -506,6 +646,10 @@ export interface ProcessedClip {
   rights_note: string;
   created_at: string;
   caption_error: string | null;
+  // Lưu ảnh/video từ Visual Studio vào Kho Tài Nguyên — mới (2026-09-11). "video" cho
+  // MỌI clip cắt cảnh cũ + mới; "image" cho ảnh lưu từ Visual Studio.
+  media_kind: "video" | "image";
+  from_visual_studio: boolean;
 }
 export interface VaultCandidate {
   clip_id: string;
@@ -513,10 +657,58 @@ export interface VaultCandidate {
   duration_sec: number;
   match_score: number | null;
   rights_status: ClipRightsStatus;
+  resolution: string;
+  tags: string[];
+  mood_tone: string;
+  usage_count: number;
+  from_visual_studio: boolean;
 }
 export interface VaultCandidatesResult {
   used_semantic: boolean;
   candidates: VaultCandidate[];
+}
+// Lưu shot vào Kho Tài Nguyên (2026-09-11) — xem api.saveShotsToVault.
+export interface SaveShotsToVaultResult {
+  saved: string[];
+  updated: string[];
+  skipped: { shot_id: string; reason: string }[];
+}
+// Tự động điền block còn thiếu từ Kho Tài Nguyên (2026-09-11).
+export interface VaultAutoFillSuggestion {
+  shot_id: string;
+  visual_fx: string;
+  clip_id: string;
+  caption: string;
+  media_kind: "video" | "image";
+  resolution: string;
+  match_score: number | null;
+}
+export interface VaultAutoFillSuggestionsResult {
+  suggestions: VaultAutoFillSuggestion[];
+  scanned_count: number;
+  matched_count: number;
+}
+// Tiến trình quét "Tự động điền từ Kho tài nguyên" — **mới (2026-09-13)** — job nền poll
+// được, xem `api.startVaultAutoFillScan`/`getVaultAutoFillScanStatus`.
+export interface VaultAutoFillScanStatus {
+  status: "idle" | "running" | "done" | "error";
+  current?: number;
+  total?: number;
+  current_label?: string | null;
+  elapsed_sec?: number;
+  error?: string | null;
+  result?: VaultAutoFillSuggestionsResult | null;
+}
+export interface VaultAutoFillApplyResult {
+  applied: string[];
+  skipped: { shot_id: string; reason: string }[];
+}
+// Upload cả folder ảnh/video khớp theo mã block — mới (2026-09-16), theo yêu cầu người
+// dùng: tên file (bỏ đuôi) trùng shot_id/mã block, xem `render.py::upload_shot_visual_batch`.
+export interface ShotUploadBatchResult {
+  matched: { shot_id: string; filename: string }[];
+  unmatched: { filename: string; reason: string }[];
+  state: RenderState;
 }
 export type ExportResolution = "720p" | "1080p" | "4k";
 export type ExportCodec = "h264" | "h265" | "vp9";
@@ -526,6 +718,10 @@ export interface AssembleConfig {
   codec: ExportCodec;
   quality: ExportQuality;
   use_gpu: boolean;
+  // Ngôn ngữ xuất video (2026-09-11) — null/undefined → ngôn ngữ chính của kênh
+  // (BrandProfile.primary_language). Thời lượng từng cảnh ăn theo giọng đọc ngôn ngữ
+  // này, xem app/render/assembly.py::assemble_video.
+  lang?: NarrationLanguage | null;
 }
 export interface GpuEncodeStatus {
   available: boolean;

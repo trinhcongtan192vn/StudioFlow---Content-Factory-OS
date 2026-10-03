@@ -46,15 +46,6 @@ class RetentionBenchmark(BaseModel):
     target_body_len_min: int = 8
 
 
-class StyleLoraEntry(BaseModel):
-    """1 dòng trong `BrandProfile.style_loras` — **mới (2026-08-23)**, thay
-    `style_lora_path`/`style_lora_strength` (đơn, mục 64) để STACK được nhiều LoRA cùng
-    lúc (VD 1 LoRA sơn dầu + 1 LoRA thuỷ mặc), theo đề xuất người dùng chống thiên lệch
-    văn hoá Nhật/Hàn của checkpoint/LoRA gốc — xem IMPLEMENTATION_REPORT.md."""
-    name: str  # tên file THẬT trong ComfyUI/models/loras/ — cùng quy ước style_lora_path cũ
-    strength: float = 0.8
-
-
 class BrandProfile(BaseModel):
     channel_id: str
     niche: str = ""
@@ -71,40 +62,21 @@ class BrandProfile(BaseModel):
     # dưới, vì đúng/sai theo TỪNG kênh + bối cảnh lịch sử cụ thể, không có 1 default nào
     # đúng cho mọi kênh — người dùng tự điền ở màn Sửa BrandProfile. Nối vào prompt DƯƠNG
     # cho MỌI provider (cloud lẫn local) — đây là vấn đề ĐÚNG/SAI nội dung văn hoá, không
-    # phải tối ưu riêng model local như `visual_style_prompt`/`motion_tone`.
+    # phải tối ưu riêng model local như `visual_style_prompt`.
     cultural_lock_positive: str = ""
     # `cultural_lock_negative` — cụm loại trừ văn hoá ngoại lai. TỪNG default KHÔNG RỖNG
     # (gợi ý cụm loại trừ Nhật/Hàn phổ quát) — đổi thành RỖNG mặc định (2026-09-02, theo
     # yêu cầu người dùng: kênh mới tạo phải trống hẳn, không có giá trị ẩn nào). Cụm gợi ý
     # cũ giữ lại làm PLACEHOLDER (chỉ hiện mờ trong ô nhập, không phải giá trị thật) ở
     # `ChannelDialog.tsx` — người dùng tự bấm điền nếu muốn dùng, không còn tự động áp cho
-    # mọi kênh. CHỈ áp dụng được cho provider có negative-prompt THẬT (`local_sdxl`/
-    # `local_wan` qua ComfyUI CLIPTextEncode(negative) — OpenAI/Gemini/Flux không có tham
-    # số negative prompt nào trong adapter hiện tại). KHÔNG nhét câu phủ định vào prompt
-    # DƯƠNG cho cloud — bài học thật từ mục 66 (phủ định trong prompt dương yếu hơn hẳn
-    # negative-prompt thật) — xem `app/render/engine.py::generate_visual_asset`.
+    # mọi kênh. **Đợt dọn dẹp (2026-09-24)**: field này HIỆN KHÔNG nối vào bất kỳ provider
+    # nào — trước đây chỉ có tác dụng qua negative-prompt thật của 4 provider local đã xoá
+    # (SDXL/Flux/Wan/LocalAI, xem IMPLEMENTATION_REPORT.md); `local_qwen` (provider ảnh
+    # local còn lại) CÓ `negative_prompt` thật (khác Flux) nhưng CHƯA được nối field này
+    # vào — để dành cho lần cải tiến sau nếu cần, không xoá field/UI vì ngoài phạm vi yêu
+    # cầu hiện tại. KHÔNG nhét câu phủ định vào prompt DƯƠNG cho cloud — bài học thật từ
+    # mục 66 (phủ định trong prompt dương yếu hơn hẳn negative-prompt thật).
     cultural_lock_negative: str = ""
-    # Ảnh tham chiếu phong cách (IPAdapter) — **mới (2026-08-23)**, theo yêu cầu người
-    # dùng: "cho model xem trực tiếp tranh cung đình/tư liệu bảo tàng/Đông Hồ/Hàng Trống
-    # thật" để ép đúng thị giác Việt — hiệu quả hơn hẳn chỉ dùng chữ, vì tách được PHONG
-    # CÁCH khỏi BỐ CỤC (khác cơ chế img2img/anchor image đã có — Tier 2, `reference_image`
-    # số ít — vốn để ẢNH GỐC ảnh hưởng TRỰC TIẾP lên bố cục/màu). Đảo ngược quyết định
-    # "không dùng IPAdapter" đã ghi ở docstring `image_comfy_sdxl.py`/specs/05 §8d (custom
-    # node cộng đồng, rủi ro lệch tên/version) — người dùng đã xác nhận chấp nhận đánh
-    # đổi này. Đường dẫn TUYỆT ĐỐI trong `channel_dir(id)/style_refs/` (khác style_loras —
-    # LoRA sống trong ComfyUI, ảnh tham chiếu sống trong workspace của app). CHỈ áp dụng
-    # `local_sdxl` — provider khác không hỗ trợ ảnh tham chiếu kiểu này.
-    style_reference_paths: list[str] = Field(default_factory=list)
-    style_reference_weight: float = 0.6
-    # Tông chuyển động cho video AI local (Wan2.2) — **mới (2026-08-23)**, theo
-    # StudioFlow_Video_Improvement_Plan.md: video diffusion cần 1 ràng buộc chuyển
-    # động RIÊNG (khác `visual_style_prompt` — đó là phong cách/tông màu THỊ GIÁC,
-    # không nói gì về tốc độ/kiểu chuyển động) — nối vào prompt qua `app/render/engine.py::
-    # _build_video_motion_prompt`, CHỈ áp dụng cho provider `local_wan` (không áp cho
-    # Sora/Veo/Flux — ngoài phạm vi cải tiến này). TỪNG default "chậm, tinh tế" không rỗng
-    # — đổi thành RỖNG mặc định (2026-09-02, theo yêu cầu người dùng: kênh mới tạo phải
-    # trống hẳn). Gợi ý cũ giữ lại làm PLACEHOLDER ở `ChannelDialog.tsx`.
-    motion_tone: str = ""
     hook_formats_preferred: list[str] = Field(default_factory=list)
     retention_benchmark: RetentionBenchmark = Field(default_factory=RetentionBenchmark)
     # Logo kênh — **mới (2026-08-22)**, theo yêu cầu người dùng. Thuần hiển thị nhận diện
@@ -142,14 +114,6 @@ class BrandProfile(BaseModel):
     # xuyên suốt. Mặc định TẮT — giữ nguyên hành vi cũ cho kênh chưa cấu hình. Xem
     # `app/render/assembly.py::_mix_bg_music`.
     bg_music_ducking_enabled: bool = False
-    # Style LoRA khoá "chữ ký hình ảnh" cho ảnh local SDXL — **mới (2026-08-22, mục 64)**,
-    # **đổi sang STACK nhiều LoRA (2026-08-23)**: 1 LoRA đơn không đủ vừa khoá chất liệu
-    # (VD sơn dầu) VỪA ép đúng hướng văn hoá Việt (VD thuỷ mặc Trung Quốc thuần khác hẳn
-    # thuỷ mặc Nhật) — theo đề xuất người dùng, stack 2-3 LoRA ở mức 0.5-0.8 mỗi cái. Mỗi
-    # `StyleLoraEntry.name` là TÊN FILE (không phải đường dẫn tuyệt đối — LoRA sống trong
-    # `ComfyUI/models/loras/`, KHÔNG PHẢI channel_dir như các asset khác). Rỗng = không
-    # dùng LoRA nào (hành vi cũ). CHỈ áp dụng `local_sdxl` — provider khác bỏ qua.
-    style_loras: list[StyleLoraEntry] = Field(default_factory=list)
     # Hiệu ứng lớp phủ (overlay) MẶC ĐỊNH của kênh — **mới (2026-08-22)**, theo yêu cầu
     # người dùng: 1 video hiệu ứng (VD mưa rơi, tuyết rơi...) blend ĐÈ LIÊN TỤC lên TOÀN
     # BỘ video (kể cả intro) khi ghép MP4 — cùng cách bg_music hoạt động (KHÁC intro, vốn
@@ -176,6 +140,20 @@ class BrandProfile(BaseModel):
     # + làm mờ, không mất chi tiết ở rìa — hữu ích khi ghép clip B-roll từ Asset Vault lệch
     # tỷ lệ). Xem `app/render/assembly.py::_scale_blurfill_filter`.
     aspect_fill_mode: Literal["crop", "blur"] = "crop"
+    # Giọng đọc đa ngôn ngữ cho thị trường nước ngoài — **mới (2026-09-04)**, theo yêu
+    # cầu người dùng: kênh phục vụ thị trường nước ngoài cần chọn 1 ngôn ngữ CHÍNH (quyết
+    # định văn bản nào dùng để render video + tính timestamp — xem `ShotRenderStatus.
+    # narration_*` gốc ở app/render/schemas.py, KHÔNG đổi field nào) và có thể cấu hình
+    # thêm mẫu giọng clone RIÊNG cho từng ngôn ngữ trong `NARRATION_LANGUAGES` (dùng làm
+    # `reference_audio` cho OmniVoice — xem app/render/engine.py::
+    # _read_voice_clone_ref_for_lang). Đặt ở BrandProfile (không phải RenderState) vì đây
+    # là lựa chọn CẤP KÊNH, giống `voice_clone_ref_path` gốc.
+    primary_language: Literal["vi", "en", "de", "pt_br", "es", "fr"] = "vi"
+    # Dict thay cho `voice_clone_ref_path` đơn — mỗi ngôn ngữ 1 mẫu giọng riêng. Field
+    # `voice_clone_ref_path` GIỮ NGUYÊN (đọc project cũ) — coi là mẫu của `primary_
+    # language` khi `voice_clone_ref_paths` chưa có entry tương ứng (fallback tương
+    # thích ngược, xem `_read_voice_clone_ref_for_lang`).
+    voice_clone_ref_paths: dict[str, str] = Field(default_factory=dict)
     version: int = 1
 
 
@@ -250,6 +228,13 @@ class ScriptBodyItem(BaseModel):
     visual_type: Optional[str] = None  # "Loại Visual" từ file import (Image/Video, gợi ý — khác Shot.visual_type)
     anchor: bool = False
     warning: Optional[Warning] = None
+    # Giọng đọc đa ngôn ngữ — **mới (2026-09-04)**: văn bản VO đã dịch sẵn cho TỪNG ngôn
+    # ngữ, đọc thẳng từ file import (cột "VO (VI)"/"VO (DE)"/... — xem
+    # `app/pipeline/script_import.py`). `audio` (field gốc, KHÔNG đổi) luôn là bản dịch
+    # của `BrandProfile.primary_language` — mọi nơi ĐANG đọc `audio` (assembly, SRT,
+    # guardrail...) tiếp tục hoạt động y nguyên, không cần sửa gì. Sửa tay 1 ngôn ngữ ở
+    # Script Studio ghi thẳng vào field này (xem `PATCH .../script/body/{index}/translation/{lang}`).
+    audio_by_lang: dict[str, str] = Field(default_factory=dict)
 
 
 class ScriptCta(BaseModel):

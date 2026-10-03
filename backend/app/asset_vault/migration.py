@@ -40,11 +40,22 @@ def _add_missing_columns(engine: Engine, inspector) -> None:
             "progress_total": "INTEGER",
             "progress_label": "VARCHAR",
             "original_filename": "VARCHAR",
+            # 2026-09-11 — xem docstring `models.py::RawVideo.source_project_id`.
+            "source_project_id": "VARCHAR",
         },
         # `caption_error` — mới (2026-08-27, bulk gắn nhãn theo lựa chọn tự do ở Kho Tài
         # Nguyên) — xem docstring `models.py::ProcessedClip.caption_error`.
+        # `media_kind`/`source_shot_id` — mới (2026-09-11, lưu asset Visual Studio vào
+        # Kho Tài Nguyên) — xem docstring `models.py::ProcessedClip`.
         "processed_clip": {
             "caption_error": "TEXT",
+            # DEFAULT 'video' NGAY trong ALTER TABLE (không chỉ default Python-level của
+            # ORM) — SQLite áp default hằng số này cho CẢ hàng cũ đã có sẵn, không chỉ
+            # hàng mới — bắt buộc phải backfill vì MỌI clip cũ đều là video (cắt từ
+            # RawVideo thật), để trống (NULL) sẽ làm sai mọi filter `media_kind=="video"`
+            # mới thêm ở `matching.py`/`assign_vault_clip`.
+            "media_kind": "VARCHAR DEFAULT 'video'",
+            "source_shot_id": "VARCHAR",
         },
     }
     with engine.begin() as conn:

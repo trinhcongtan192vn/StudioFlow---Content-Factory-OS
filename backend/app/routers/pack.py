@@ -8,17 +8,18 @@ from app.db import get_db
 from app.filestore import read_json, write_bytes, write_json, write_versioned
 from app.models import PackVersion, Project
 from app.providers.factory import NoProviderConfiguredError, get_image_chain
-from app.providers.image_comfy_sdxl import estimate_cost as estimate_local_sdxl_cost
+from app.providers.image_comfy_qwen import estimate_cost as estimate_local_qwen_cost
 from app.providers.image_gemini import estimate_cost as estimate_gemini_image_cost
 from app.providers.image_openai import estimate_cost as estimate_openai_image_cost
 from app.routers.pipeline import record_asset_usage
 from app.timeutil import vn_isoformat
 
 # Bảng riêng của thumbnail (KHÁC _IMAGE_COST_FN trong app/render/engine.py, dùng cho
-# ảnh shot) — thiếu "local_sdxl" ở đây từng làm sinh thumbnail bằng SDXL local bị tính
-# nhầm $0.06 (rơi về fallback estimate_openai_image_cost) dù chi phí thật là $0, phát
-# hiện lúc người dùng test thật (IMPLEMENTATION_REPORT.md).
-_IMAGE_COST_FN = {"openai": estimate_openai_image_cost, "gemini": estimate_gemini_image_cost, "local_sdxl": estimate_local_sdxl_cost}
+# ảnh shot) — thiếu provider local ở đây từng làm sinh thumbnail bằng SDXL local (đã xoá,
+# xem đợt dọn dẹp 2026-09-24) bị tính nhầm $0.06 (rơi về fallback
+# estimate_openai_image_cost) dù chi phí thật là $0, phát hiện lúc người dùng test thật
+# (IMPLEMENTATION_REPORT.md) — giữ nguyên tắc đó cho `local_qwen`.
+_IMAGE_COST_FN = {"openai": estimate_openai_image_cost, "gemini": estimate_gemini_image_cost, "local_qwen": estimate_local_qwen_cost}
 
 router = APIRouter(tags=["pack"])
 

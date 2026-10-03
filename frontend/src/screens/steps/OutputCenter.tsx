@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../../api/client";
-import type { ProductionPack, ProjectSummary, RetentionOut } from "../../api/types";
+import type { ProductionPack, ProjectSummary, RetentionOut, YoutubeVideoAvailable } from "../../api/types";
 import AddToLibraryButton from "../../components/AddToLibraryButton";
 import Lightbox, { ExpandButton } from "../../components/Lightbox";
 import LibraryPicker from "../../components/LibraryPicker";
 import StepHeader from "../../components/StepHeader";
 import type { StepProps } from "../ProjectView";
 import RenderStudio from "./RenderStudio";
+import ShortVideoExportCard from "./ShortVideoExportCard";
 
 // **Đổi (2026-08-26), theo yêu cầu người dùng**: bỏ hẳn "Output A" (export spec/prompts
 // dạng markdown/JSON máy đọc — ít dùng thực tế, đã có JSON pack.json sẵn trên đĩa cho ai
@@ -38,7 +39,11 @@ export default function OutputCenter({ project, pack, refresh }: StepProps) {
         <RenderStudio project={project} pack={pack} />
       </div>
 
-      <RetentionCard projectId={project.id} />
+      <div style={{ marginBottom: "var(--space-6)" }}>
+        <ShortVideoExportCard project={project} />
+      </div>
+
+      <RetentionCard project={project} />
     </div>
   );
 }
@@ -290,23 +295,23 @@ function PackExportCard({ projectId, hasShots }: { projectId: string; hasShots: 
   );
 }
 
-function RetentionCard({ projectId }: { projectId: string }) {
+function RetentionCard({ project }: { project: ProjectSummary }) {
   const [data, setData] = useState<RetentionOut | null>(null);
-  const [form, setForm] = useState({ published_at: "", ret_0: "", ret_25: "", ret_50: "", ret_100: "", avg_view_duration: "", thumbnail_ctr: "" });
+  const [form, setForm] = useState({ published_at: "", ret_0: "", ret_25: "", ret_50: "", ret_100: "", avg_view_duration: "", thumbnail_ctr: "", rpm: "" });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    api.getRetention(projectId).then(setData);
-  }, [projectId]);
+    api.getRetention(project.id).then(setData);
+  }, [project.id]);
 
   async function save() {
     setSaving(true);
     try {
       const body: Record<string, number | string | null> = { published_at: form.published_at || null };
-      for (const k of ["ret_0", "ret_25", "ret_50", "ret_100", "avg_view_duration", "thumbnail_ctr"] as const) {
+      for (const k of ["ret_0", "ret_25", "ret_50", "ret_100", "avg_view_duration", "thumbnail_ctr", "rpm"] as const) {
         body[k] = form[k] === "" ? null : parseFloat(form[k]);
       }
-      const r = await api.putRetention(projectId, body);
+      const r = await api.putRetention(project.id, body);
       setData(r);
     } finally {
       setSaving(false);
@@ -316,7 +321,14 @@ function RetentionCard({ projectId }: { projectId: string }) {
   return (
     <div className="card elev-sm" style={{ maxWidth: 560, gap: "var(--space-3)" }}>
       <div className="card-kicker">Retention nạp thủ công</div>
-      <div style={{ fontSize: 13, opacity: 0.75, marginTop: -4 }}>Sau khi video đã đăng, nhập số liệu thực tế từ YouTube Studio để đối chiếu benchmark kênh.</div>
+      <div style={{ fontSize: 13, opacity: 0.75, marginTop: -4 }}>
+        Các chỉ số khác (APV, retention giây 30, CTR, bình luận...) có thể kéo tự động từ YouTube ở Dashboard → kênh → tab "Chỉ số YouTube" (cần liên kết video bên dưới trước). RPM (doanh thu) luôn cần nhập tay.
+      </div>
+
+      <YoutubeVideoLinkPicker project={project} />
+
+      <div className="hr" style={{ margin: "var(--space-1) 0" }} />
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "var(--space-2)" }}>
         <NumField label="Ret. 0% (Hook)" value={form.ret_0} onChange={(v) => setForm((f) => ({ ...f, ret_0: v }))} />
         <NumField label="Ret. 25%" value={form.ret_25} onChange={(v) => setForm((f) => ({ ...f, ret_25: v }))} />
@@ -330,6 +342,9 @@ function RetentionCard({ projectId }: { projectId: string }) {
           <label>Ngày đăng</label>
           <input className="input" type="date" value={form.published_at} onChange={(e) => setForm((f) => ({ ...f, published_at: e.target.value }))} />
         </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "var(--space-2)" }}>
+        <NumField label="RPM (€ / 1.000 view — luôn nhập tay)" value={form.rpm} onChange={(v) => setForm((f) => ({ ...f, rpm: v }))} />
       </div>
       <button className="btn btn-secondary" style={{ alignSelf: "flex-start" }} onClick={save} disabled={saving}>
         {saving ? "Đang lưu..." : "Lưu số liệu"}
@@ -354,6 +369,52 @@ function RetentionCard({ projectId }: { projectId: string }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Chọn/đổi video YouTube tương ứng project này — **mới (2026-09-12)**. Luôn là lựa
+ * chọn CHỦ ĐỘNG của người dùng (KHÔNG tự đoán theo tên trùng khớp), theo CLAUDE.md
+ * nguyên tắc 3. Cần kênh đã kết nối OAuth ở Settings trước (nếu chưa, danh sách rỗng). */
+function YoutubeVideoLinkPicker({ project }: { project: ProjectSummary }) {
+  const [videos, setVideos] = useState<YoutubeVideoAvailable[] | null>(null);
+  const [currentId, setCurrentId] = useState<string | null>(project.youtube_video_id);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api
+      .getYoutubeVideosAvailable(project.id)
+      .then((r) => {
+        setVideos(r.videos);
+        setCurrentId(r.current_video_id);
+      })
+      .catch(() => setVideos([]));
+  }, [project.id]);
+
+  async function onChange(videoId: string) {
+    setSaving(true);
+    try {
+      const r = await api.patchYoutubeLink(project.id, videoId || null);
+      setCurrentId(r.youtube_video_id);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (videos === null) return null;
+
+  return (
+    <div className="field" style={{ margin: 0 }}>
+      <label>Video YouTube tương ứng</label>
+      <select className="input" value={currentId || ""} onChange={(e) => onChange(e.target.value)} disabled={saving}>
+        <option value="">— Chưa liên kết —</option>
+        {videos.map((v) => (
+          <option key={v.video_id} value={v.video_id}>
+            {v.title}
+          </option>
+        ))}
+      </select>
+      {videos.length === 0 && <div style={{ fontSize: 11.5, opacity: 0.6, marginTop: 4 }}>Kênh chưa kết nối YouTube, hoặc chưa có video nào — kết nối ở Dashboard → kênh → tab "Chỉ số YouTube".</div>}
     </div>
   );
 }

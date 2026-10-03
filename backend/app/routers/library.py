@@ -11,6 +11,7 @@ upload hiện tại, tránh phình route trùng lặp gần như y hệt nhau.""
 from __future__ import annotations
 
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -43,7 +44,10 @@ _EXT_BY_SUFFIX: dict[str, dict[str, str]] = {
 
 
 def _new_id() -> str:
-    return f"asset_{int(time.time() * 1000)}"
+    # Hậu tố hex ngẫu nhiên (2026-09-12) — tránh trùng ID khi 2 hàng tạo trong CÙNG 1
+    # mili giây (bug thật gặp lúc full test suite chạy nhanh, `UNIQUE constraint
+    # failed`) — xem giải thích đầy đủ ở `asset_vault/ingest.py::_new_id`.
+    return f"asset_{int(time.time() * 1000)}{uuid.uuid4().hex[:6]}"
 
 
 def _asset_out(a: CreativeAsset) -> dict:

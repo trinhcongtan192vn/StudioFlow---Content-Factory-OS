@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -50,7 +51,12 @@ _PROGRESS_COMMIT_INTERVAL_SEC = 0.4
 
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{int(time.time() * 1000)}"
+    # Hậu tố hex ngẫu nhiên (2026-09-12) — bug thật gặp lúc chạy full test suite nhanh:
+    # 2 hàng tạo trong CÙNG 1 mili giây (VD batch import nhiều clip liên tiếp) nhận
+    # TRÙNG `int(time.time()*1000)`, insert thứ 2 lỗi `UNIQUE constraint failed`. Rủi ro
+    # thật ngoài đời cũng có (bấm nút tạo hàng loạt rất nhanh liên tiếp), không chỉ do
+    # test chạy nhanh.
+    return f"{prefix}_{int(time.time() * 1000)}{uuid.uuid4().hex[:6]}"
 
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._À-ỹ-]+")
@@ -413,6 +419,25 @@ def _extract_keyframe(ffmpeg: str, clip_path: str, duration_sec: float) -> bytes
     return data
 
 
+def index_clip_embedding(db: Session, clip: ProcessedClip) -> None:
+    """Embed `caption`/`tags`/`mood_tone` ĐÃ CÓ SẴN trên clip rồi upsert vào Chroma — tách
+    riêng khỏi `caption_clip` (2026-09-13) để TÁI DÙNG cho asset lưu từ Visual Studio
+    (`from_visual_studio.py::save_shots_to_vault`), vốn đã có caption sẵn từ `visual_fx`
+    (không cần Vision provider chụp lại) nhưng TRƯỚC ĐÂY không hề gọi bước embed này —
+    khiến TOÀN BỘ asset Visual Studio (152/152 ảnh tại thời điểm phát hiện) vô hình với
+    "Tự động điền từ Kho tài nguyên" (`render.py::_run_vault_auto_fill_scan`, CHỈ tìm qua
+    semantic/Chroma, không có fallback từ khoá) dù khớp caption/mô tả shot 100% — người
+    dùng chỉ thấy được qua nút "Video/Ảnh từ Kho" thủ công (có fallback từ khoá). Xem
+    IMPLEMENTATION_REPORT.md mục 146. KHÔNG tự `commit()` — caller quyết định thời điểm
+    commit (mirror `caption_clip`)."""
+    tags = json.loads(clip.tags or "[]")
+    document = f"{clip.caption} | Tags: {', '.join(tags)} | Mood: {clip.mood_tone or ''}"
+    embedding = get_embedding(db).embed(document)
+    vector_id = clip.clip_id
+    upsert_clip_vector(vector_id, embedding, document)
+    clip.vector_id = vector_id
+
+
 def caption_clip(db: Session, clip: ProcessedClip) -> None:
     """Gắn caption/tags/mood_tone (Vision provider — mặc định `ollama_vision`/Moondream,
     xem IMPLEMENTATION_REPORT.md) rồi embed + upsert Chroma (§3 giai đoạn B bước 2-4). Lỗi
@@ -425,11 +450,7 @@ def caption_clip(db: Session, clip: ProcessedClip) -> None:
     clip.tags = json.dumps(result.tags, ensure_ascii=False)
     clip.mood_tone = result.mood_tone
 
-    document = f"{result.caption} | Tags: {', '.join(result.tags)} | Mood: {result.mood_tone}"
-    embedding = get_embedding(db).embed(document)
-    vector_id = clip.clip_id
-    upsert_clip_vector(vector_id, embedding, document)
-    clip.vector_id = vector_id
+    index_clip_embedding(db, clip)
     db.commit()
 
 
@@ -473,6 +494,51 @@ def caption_all_pending_clips(db: Session, raw_video: RawVideo) -> None:
     if not had_error:
         raw_video.error_message = None  # xoá lỗi cũ (nếu có, VD từ lần gắn nhãn lại thất bại trước đó) — status="indexed" không nên còn kèm thông báo lỗi đã hết hiệu lực
     db.commit()
+
+
+def reconcile_raw_video_status(db: Session, raw_video: RawVideo) -> bool:
+    """Tự phục hồi (self-heal) `RawVideo.status` bị KẸT sai — bug thật (2026-09-10, báo
+    bởi người dùng: "Video đã cắt cảnh vẫn hiện đang cắt cảnh, đã gán nhãn nhưng vẫn hiện
+    đang gán nhãn"). Gốc rễ: `_run()` wrapper (`routers/asset_vault.py`) bọc
+    `auto_detect_scenes`/`caption_all_pending_clips` trong `BackgroundTasks` KHÔNG có
+    try/except quanh lệnh gọi lõi — nếu backend crash/tự khởi động lại giữa chừng (đã xảy
+    ra nhiều lần trong quá trình phát triển), task nền chết lặng lẽ; công việc con (cắt
+    từng clip, caption từng clip) đã commit DB tăng dần nhưng dòng CUỐI chuyển `status`
+    sang bước kế tiếp không kịp chạy → `status` kẹt vĩnh viễn dù dữ liệu con đã xong thật.
+
+    Gọi ở các endpoint GET (đọc) TRƯỚC KHI trả response — KHÔNG khởi chạy job nền nào mới,
+    chỉ SUY LẠI `status` từ dữ liệu con đã có sẵn. Trả về `True` nếu có đổi (caller tự
+    `db.commit()`). Chỉ đi TỚI (forward), không bao giờ lùi lại bước trước hay tự gán
+    "error" khi thiếu bằng chứng:
+
+    - `status=="tagging"` mà TẤT CẢ clip con đã có `caption` HOẶC `caption_error` (gắn nhãn
+      xong, dù thành công hay lỗi từng clip) → suy đúng logic cuối
+      `caption_all_pending_clips` lẽ ra đã chạy: "error" nếu có ≥1 clip lỗi, else "indexed".
+    - `status=="detecting"` mà ĐÃ có ≥1 clip con VÀ `progress_current`/`progress_total`/
+      `progress_label` đều None (không có task nào đang chạy dở — task thật luôn có
+      progress) → bước cắt cảnh rõ ràng đã chạy xong (ít nhất 1 phần) nhưng chưa kịp ghi
+      "tagging" → suy "tagging". Video mới upload/chưa cắt cảnh lần nào (0 clip) KHÔNG bị
+      đụng tới — đây vẫn là trạng thái ban đầu đúng, không phải bug."""
+    clips = db.query(ProcessedClip).filter(ProcessedClip.raw_video_id == raw_video.id).all()
+    if not clips:
+        return False
+    if raw_video.status == "tagging" and all(c.caption or c.caption_error for c in clips):
+        failed = [c.clip_id for c in clips if c.caption_error]
+        raw_video.status = "error" if failed else "indexed"
+        if failed:
+            raw_video.error_message = f"Lỗi gắn nhãn {len(failed)} clip: {', '.join(failed[:3])}{'...' if len(failed) > 3 else ''}"
+        else:
+            raw_video.error_message = None
+        return True
+    if (
+        raw_video.status == "detecting"
+        and raw_video.progress_current is None
+        and raw_video.progress_total is None
+        and raw_video.progress_label is None
+    ):
+        raw_video.status = "tagging"
+        return True
+    return False
 
 
 def delete_processed_clip(db: Session, clip: ProcessedClip) -> None:

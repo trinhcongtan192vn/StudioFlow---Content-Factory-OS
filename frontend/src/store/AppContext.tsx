@@ -31,6 +31,8 @@ interface AppState {
   refreshChannels: () => Promise<void>;
   refreshBootstrap: () => Promise<void>;
   bumpProjectsVersion: (channelId: string) => void;
+  // Kéo thả sắp xếp kênh trên Sidebar — mới (2026-09-19).
+  reorderChannels: (orderedIds: string[]) => Promise<void>;
 }
 
 const AppCtx = createContext<AppState | null>(null);
@@ -83,6 +85,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const toggleRightPanel = () => setRightPanelOpen((s) => !s);
   const bumpProjectsVersion = (channelId: string) => setProjectsVersion((s) => ({ ...s, [channelId]: (s[channelId] || 0) + 1 }));
 
+  const reorderChannels = async (orderedIds: string[]) => {
+    // Optimistic — sắp lại `channels` local NGAY theo thứ tự người dùng vừa kéo thả,
+    // trước khi API trả lời (cảm giác tức thì, không đợi network). Lỗi thì refetch lại
+    // đúng trạng thái server (rollback đơn giản, cùng pattern lỗi-thì-refetch đã dùng nơi
+    // khác trong app).
+    const byId = new Map(channels.map((c) => [c.id, c]));
+    const reordered = orderedIds.map((id) => byId.get(id)).filter((c): c is ChannelSummary => !!c);
+    setChannels(reordered);
+    try {
+      await api.reorderChannels(orderedIds);
+    } catch {
+      await refreshChannels();
+    }
+  };
+
   const value: AppState = {
     view,
     channels,
@@ -108,6 +125,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     refreshChannels,
     refreshBootstrap,
     bumpProjectsVersion,
+    reorderChannels,
   };
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }

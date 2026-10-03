@@ -1,11 +1,13 @@
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import channel_dir, delete_channel_dir
@@ -13,6 +15,7 @@ from app.db import get_db
 from app.filestore import read_json, unlink_retrying, write_bytes, write_versioned
 from app.models import AuditLog, BrandProfileVersion, Channel, Project
 from app.rangefile import range_file_response
+from app.render.schemas import NARRATION_LANGUAGES
 from app.schemas import BrandProfile
 from app.timeutil import vn_isoformat
 
@@ -20,7 +23,10 @@ router = APIRouter(tags=["channels"])
 
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{int(time.time() * 1000)}"
+    # Hậu tố hex ngẫu nhiên (2026-09-12) — tránh trùng ID khi 2 hàng tạo trong CÙNG 1
+    # mili giây (bug thật gặp lúc full test suite chạy nhanh, `UNIQUE constraint
+    # failed`) — xem giải thích đầy đủ ở `asset_vault/ingest.py::_new_id`.
+    return f"{prefix}_{int(time.time() * 1000)}{uuid.uuid4().hex[:6]}"
 
 
 class ChannelCreate(BaseModel):
@@ -46,19 +52,45 @@ def _channel_out(db: Session, ch: Channel) -> dict:
         "archived": ch.archived,
         "brandprofile_version": ch.brandprofile_version,
         "running_count": running,
+        # Chỉ số YouTube — mới (2026-09-12) — xem `routers/youtube_analytics.py`.
+        "youtube_channel_id": ch.youtube_channel_id,
+        "youtube_channel_title": ch.youtube_channel_title,
+        "youtube_connected_at": ch.youtube_connected_at,
     }
 
 
 @router.get("/channels")
 def list_channels(db: Session = Depends(get_db)):
-    chs = db.query(Channel).filter(Channel.archived == False).all()  # noqa: E712
+    chs = db.query(Channel).filter(Channel.archived == False).order_by(Channel.order_index).all()  # noqa: E712
     return [_channel_out(db, c) for c in chs]
+
+
+class ReorderChannelsBody(BaseModel):
+    channel_ids: list[str]
+
+
+@router.patch("/channels/reorder")
+def reorder_channels(body: ReorderChannelsBody, db: Session = Depends(get_db)):
+    """Kéo thả sắp xếp lại thứ tự kênh trên Sidebar — mới (2026-09-19). Nhận NGUYÊN danh
+    sách ID theo thứ tự mới mong muốn, gán `order_index` = vị trí trong danh sách đó."""
+    chs = db.query(Channel).filter(Channel.id.in_(body.channel_ids)).all()
+    by_id = {c.id: c for c in chs}
+    missing = [cid for cid in body.channel_ids if cid not in by_id]
+    if missing:
+        raise HTTPException(404, f"Không tìm thấy kênh: {', '.join(missing)}")
+    for idx, cid in enumerate(body.channel_ids):
+        by_id[cid].order_index = idx
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/channels")
 def create_channel(body: ChannelCreate, db: Session = Depends(get_db)):
     cid = _new_id("ch")
-    ch = Channel(id=cid, name=body.name, niche=body.niche, brandprofile_version=1)
+    # order_index = cuối danh sách hiện có (2026-09-19, xem docstring cột) — khớp hành vi
+    # mặc định hiện tại (kênh mới luôn xuất hiện cuối, không có optimistic chèn đầu nào).
+    max_order = db.query(func.max(Channel.order_index)).scalar()
+    ch = Channel(id=cid, name=body.name, niche=body.niche, brandprofile_version=1, order_index=0 if max_order is None else max_order + 1)
     db.add(ch)
     db.flush()
 
@@ -281,6 +313,59 @@ def get_voice_sample(request: Request, channel_id: str, db: Session = Depends(ge
     return range_file_response(request, path)
 
 
+@router.post("/channels/{channel_id}/brandprofile/voice-sample/upload/{lang}")
+async def upload_voice_sample_lang(channel_id: str, lang: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Mẫu giọng đọc RIÊNG cho 1 NGÔN NGỮ — giọng đọc đa ngôn ngữ cho thị trường nước
+    ngoài (2026-09-04). Ghi vào `BrandProfile.voice_clone_ref_paths[lang]` (KHÔNG đụng
+    `voice_clone_ref_path` đơn cũ) — dùng làm `reference_audio` khi sinh giọng đọc ngôn
+    ngữ đó (xem `app/render/engine.py::_read_voice_clone_ref_for_lang`). Cùng logic cắt
+    10s/validate định dạng như `upload_voice_sample` (mẫu ngôn ngữ chính)."""
+    if lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+    ch = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not ch:
+        raise HTTPException(404, "Không tìm thấy kênh")
+    profile = read_json(channel_dir(channel_id) / "brandprofile.json")
+    if profile is None:
+        raise HTTPException(404, "Chưa có BrandProfile")
+
+    ext = _VOICE_EXT_BY_CONTENT_TYPE.get(file.content_type or "") or _VOICE_EXT_BY_SUFFIX.get(Path(file.filename or "").suffix.lower())
+    if not ext:
+        raise HTTPException(400, "Chỉ nhận audio WAV/MP3")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "File audio rỗng")
+
+    cdir = channel_dir(channel_id)
+    sample_path = cdir / f"voice_sample_{lang}.{ext}"
+    write_bytes(sample_path, data)
+    trimmed, original_duration_sec = _trim_voice_sample(sample_path)
+
+    voice_clone_ref_paths = dict(profile.get("voice_clone_ref_paths") or {})
+    voice_clone_ref_paths[lang] = str(sample_path)
+    profile["voice_clone_ref_paths"] = voice_clone_ref_paths
+    next_version = (ch.brandprofile_version or 0) + 1
+    profile["version"] = next_version
+    current, versioned = write_versioned(cdir, "brandprofile", profile, next_version)
+    ch.brandprofile_path = str(current)
+    ch.brandprofile_version = next_version
+    db.add(BrandProfileVersion(channel_id=channel_id, version=next_version, file_path=str(versioned), note=f"Upload mẫu giọng ngôn ngữ {lang}"))
+    db.add(AuditLog(action="Upload giọng đa ngôn ngữ", detail=f"{ch.name} ({lang})", entity=ch.name))
+    db.commit()
+    return {**profile, "voice_sample_trimmed": trimmed, "voice_sample_original_duration_sec": original_duration_sec}
+
+
+@router.get("/channels/{channel_id}/brandprofile/voice-sample/{lang}")
+def get_voice_sample_lang(request: Request, channel_id: str, lang: str, db: Session = Depends(get_db)):
+    if lang not in NARRATION_LANGUAGES:
+        raise HTTPException(400, f"Ngôn ngữ không hợp lệ — phải là 1 trong {NARRATION_LANGUAGES}")
+    profile = read_json(channel_dir(channel_id) / "brandprofile.json") or {}
+    path = (profile.get("voice_clone_ref_paths") or {}).get(lang)
+    if not path:
+        raise HTTPException(404, "Chưa có mẫu giọng cho ngôn ngữ này")
+    return range_file_response(request, path)
+
+
 _LOGO_EXT_BY_CONTENT_TYPE = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 _LOGO_EXT_BY_SUFFIX = {".png": "png", ".jpg": "jpg", ".jpeg": "jpg", ".webp": "webp"}
 
@@ -337,88 +422,6 @@ def get_brand_logo(channel_id: str, db: Session = Depends(get_db)):
     # (app/rangefile.py, 2026-08-23): logo bị ĐÈ TẠI CHỖ mỗi lần đổi, không có header này
     # trình duyệt có thể trả bytes cũ từ cache mà không revalidate.
     return FileResponse(path, headers={"Cache-Control": "no-cache"})
-
-
-@router.post("/channels/{channel_id}/brandprofile/style-references/upload")
-async def upload_style_reference(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Ảnh tham chiếu phong cách (IPAdapter) — **mới (2026-08-23)**, theo yêu cầu người
-    dùng chống thiên lệch văn hoá Nhật/Hàn: "cho model xem trực tiếp tranh cung đình/tư
-    liệu bảo tàng/Đông Hồ/Hàng Trống thật" để ép đúng thị giác Việt — xem
-    `BrandProfile.style_reference_paths`. KHÁC MỌI field asset khác của BrandProfile
-    (logo/intro/bg-music/overlay đều 1 file, thay TẠI CHỖ) — đây là DANH SÁCH NHIỀU ảnh,
-    mỗi lần upload THÊM 1 ảnh (không thay thế), tên file tự sinh duy nhất
-    (`_new_id("ref")`) để tránh trùng khi upload nhiều ảnh liên tiếp. Lưu riêng trong
-    `channel_dir(id)/style_refs/` (khác channel_dir gốc — tránh lẫn với các asset đơn
-    khác)."""
-    ch = db.query(Channel).filter(Channel.id == channel_id).first()
-    if not ch:
-        raise HTTPException(404, "Không tìm thấy kênh")
-    profile = read_json(channel_dir(channel_id) / "brandprofile.json")
-    if profile is None:
-        raise HTTPException(404, "Chưa có BrandProfile")
-
-    ext = _LOGO_EXT_BY_CONTENT_TYPE.get(file.content_type or "") or _LOGO_EXT_BY_SUFFIX.get(Path(file.filename or "").suffix.lower())
-    if not ext:
-        raise HTTPException(400, "Chỉ nhận ảnh PNG/JPEG/WEBP")
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "File ảnh rỗng")
-
-    refs_dir = channel_dir(channel_id) / "style_refs"
-    new_path = refs_dir / f"{_new_id('ref')}.{ext}"
-    write_bytes(new_path, data)
-
-    paths = list(profile.get("style_reference_paths") or [])
-    paths.append(str(new_path))
-    profile["style_reference_paths"] = paths
-    next_version = (ch.brandprofile_version or 0) + 1
-    profile["version"] = next_version
-    current, versioned = write_versioned(channel_dir(channel_id), "brandprofile", profile, next_version)
-    ch.brandprofile_path = str(current)
-    ch.brandprofile_version = next_version
-    db.add(BrandProfileVersion(channel_id=channel_id, version=next_version, file_path=str(versioned), note="Thêm ảnh tham chiếu phong cách"))
-    db.add(AuditLog(action="Thêm ảnh tham chiếu phong cách", detail=ch.name, entity=ch.name))
-    db.commit()
-    return profile
-
-
-@router.delete("/channels/{channel_id}/brandprofile/style-references/{filename}")
-def delete_style_reference(channel_id: str, filename: str, db: Session = Depends(get_db)):
-    """Bỏ ĐÚNG 1 ảnh tham chiếu khỏi danh sách + xoá file trên đĩa — `filename` là tên
-    file THẬT trong `style_refs/` (lấy từ `style_reference_paths`, không phải index —
-    tránh lệch nếu danh sách đổi thứ tự giữa lúc người dùng thao tác)."""
-    ch = db.query(Channel).filter(Channel.id == channel_id).first()
-    if not ch:
-        raise HTTPException(404, "Không tìm thấy kênh")
-    profile = read_json(channel_dir(channel_id) / "brandprofile.json")
-    if profile is None:
-        raise HTTPException(404, "Chưa có BrandProfile")
-
-    target = channel_dir(channel_id) / "style_refs" / filename
-    paths = list(profile.get("style_reference_paths") or [])
-    remaining = [p for p in paths if Path(p).name != filename]
-    if len(remaining) == len(paths):
-        raise HTTPException(404, "Không tìm thấy ảnh tham chiếu này trong danh sách")
-    if target.exists():
-        unlink_retrying(target)
-    profile["style_reference_paths"] = remaining
-    next_version = (ch.brandprofile_version or 0) + 1
-    profile["version"] = next_version
-    current, versioned = write_versioned(channel_dir(channel_id), "brandprofile", profile, next_version)
-    ch.brandprofile_path = str(current)
-    ch.brandprofile_version = next_version
-    db.add(BrandProfileVersion(channel_id=channel_id, version=next_version, file_path=str(versioned), note="Bỏ ảnh tham chiếu phong cách"))
-    db.add(AuditLog(action="Bỏ ảnh tham chiếu phong cách", detail=ch.name, entity=ch.name))
-    db.commit()
-    return profile
-
-
-@router.get("/channels/{channel_id}/brandprofile/style-references/{filename}")
-def get_style_reference(channel_id: str, filename: str, db: Session = Depends(get_db)):
-    target = channel_dir(channel_id) / "style_refs" / filename
-    if not target.exists():
-        raise HTTPException(404, "Không tìm thấy ảnh tham chiếu")
-    return FileResponse(target)
 
 
 _INTRO_VIDEO_EXT_BY_CONTENT_TYPE = {"video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov"}

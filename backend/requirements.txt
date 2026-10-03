@@ -38,6 +38,14 @@ respx==0.21.1
 chromadb==1.5.9
 scenedetect[opencv]==0.7.1
 yt-dlp==2026.8.19
+# Chỉ số YouTube (Data API v3 + Analytics API v2) — mới (2026-09-12), theo yêu cầu người
+# dùng: thay "Nạp retention thủ công" bằng kéo dữ liệu thật. OAuth "installed app"/loopback
+# (RFC 8252) — KHÔNG cần server public, phù hợp app desktop 1 người dùng (xem
+# app/youtube_analytics.py). Khác hẳn `youtube-transcript-api` ở trên (chỉ lấy transcript
+# công khai, không OAuth).
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.149.0
 # Piper TTS (app/providers/tts_piper.py) — `PiperVoice` load thẳng file `.onnx` (kiến
 # trúc VITS nhỏ, ~30-60MB) bằng onnxruntime, chạy tốt trên CPU.
 onnxruntime==1.28.0
